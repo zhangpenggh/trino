@@ -36,6 +36,9 @@ import io.airlift.http.server.testing.TestingHttpServerModule;
 import io.airlift.jaxrs.JaxrsModule;
 import io.airlift.jmx.testing.TestingJmxModule;
 import io.airlift.json.JsonModule;
+import io.airlift.log.Level;
+import io.airlift.log.Logger;
+import io.airlift.log.Logging;
 import io.airlift.node.testing.TestingNodeModule;
 import io.airlift.tracetoken.TraceTokenModule;
 import io.trino.connector.CatalogName;
@@ -120,6 +123,12 @@ import static java.util.concurrent.TimeUnit.MILLISECONDS;
 public class TestingTrinoServer
         implements Closeable
 {
+    static {
+        Logging.initialize().setLevel(LifeCycleManager.class.getName(), Level.DEBUG);
+    }
+
+    private static final Logger log = Logger.get(TestingTrinoServer.class);
+
     public static TestingTrinoServer create()
     {
         return builder().build();
@@ -199,6 +208,8 @@ public class TestingTrinoServer
             List<SystemAccessControl> systemAccessControls,
             List<EventListener> eventListeners)
     {
+        log.error(new RuntimeException(), "Starting TestingTrinoServer");
+
         this.coordinator = coordinator;
 
         this.baseDataDir = baseDataDir.orElseGet(TestingTrinoServer::tempDirectory);
@@ -332,6 +343,19 @@ public class TestingTrinoServer
 
     @Override
     public void close()
+            throws IOException
+    {
+        log.error(new RuntimeException(), "Stopping TestingTrinoServer");
+        try {
+            doClose();
+        }
+        catch (RuntimeException e) {
+            log.error(e, "Failed stopping TestingTrinoServer");
+            throw e;
+        }
+    }
+
+    private void doClose()
             throws IOException
     {
         try (Closer closer = Closer.create()) {
