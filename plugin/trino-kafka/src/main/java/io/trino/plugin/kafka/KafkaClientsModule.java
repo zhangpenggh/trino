@@ -32,6 +32,7 @@ public class KafkaClientsModule
         configBinder(binder).bindConfig(KafkaSecurityConfig.class);
         installClientModule(SecurityProtocol.PLAINTEXT, KafkaClientsModule::configurePlainText);
         installClientModule(SecurityProtocol.SSL, KafkaClientsModule::configureSsl);
+        installClientModule(SecurityProtocol.SASL_PLAINTEXT, KafkaClientsModule::configureSaslPlainText);
     }
 
     private void installClientModule(SecurityProtocol securityProtocol, Module module)
@@ -58,5 +59,12 @@ public class KafkaClientsModule
         binder.bind(KafkaConsumerFactory.class).to(SslKafkaConsumerFactory.class).in(Scopes.SINGLETON);
         binder.bind(KafkaProducerFactory.class).to(SslKafkaProducerFactory.class).in(Scopes.SINGLETON);
         binder.bind(KafkaAdminFactory.class).to(SslKafkaAdminFactory.class).in(Scopes.SINGLETON);
+    }
+
+    private static void configureSaslPlainText(Binder binder)
+    {
+        binder.bind(KafkaConsumerFactory.class).to(SaslPlainTextKafkaConsumerFactory.class).in(Scopes.SINGLETON);
+        binder.bind(KafkaProducerFactory.class).to(SaslPlainTextKafkaProducerFactory.class).in(Scopes.SINGLETON);
+        binder.bind(KafkaAdminFactory.class).to(SaslPlainTextKafkaAdminFactory.class).in(Scopes.SINGLETON);
     }
 }

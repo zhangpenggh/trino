@@ -44,6 +44,8 @@ public class KafkaConfig
     private int messagesPerSplit = 100_000;
     private boolean timestampUpperBoundPushDownEnabled;
     private String tableDescriptionSupplier = FileTableDescriptionSupplier.NAME;
+    private String compressionType = "gzip";
+    private String acks = "1";
 
     @Size(min = 1)
     public Set<HostAddress> getNodes()
@@ -56,6 +58,14 @@ public class KafkaConfig
     public KafkaConfig setNodes(String nodes)
     {
         this.nodes = (nodes == null) ? null : parseNodes(nodes);
+        return this;
+    }
+
+    @Config("kafka.producer-compression-type")
+    @ConfigDescription("kafka producer compression type")
+    public KafkaConfig setCompressionType(String compressionType)
+    {
+        this.compressionType = compressionType;
         return this;
     }
 
@@ -151,5 +161,22 @@ public class KafkaConfig
     {
         this.timestampUpperBoundPushDownEnabled = timestampUpperBoundPushDownEnabled;
         return this;
+    }
+
+    public String getCompressionType()
+    {
+        return compressionType;
+    }
+
+    public String getAcks()
+    {
+        return acks;
+    }
+
+    @Config("kafka.acks")
+    @ConfigDescription("kafka acks")
+    public void setAcks(String acks)
+    {
+        this.acks = acks;
     }
 }
