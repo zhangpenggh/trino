@@ -86,7 +86,8 @@ public class KafkaPageSink
                 errorCount++;
             }
             else {
-                writtenBytes += recordMetadata.serializedValueSize() + recordMetadata.serializedKeySize();
+                int keySize = recordMetadata.serializedKeySize() < 0 ? 0 : recordMetadata.serializedKeySize();
+                writtenBytes += recordMetadata.serializedValueSize() + keySize;
             }
         }
 
@@ -127,6 +128,10 @@ public class KafkaPageSink
             messageBytes = messageEncoder.toByteArray();
 
             expectedWrittenBytes += keyBytes.length + messageBytes.length;
+
+            if (keyBytes.length == 0) {
+                keyBytes = null;
+            }
 
             producer.send(new ProducerRecord<>(topicName, keyBytes, messageBytes), producerCallback);
         }
