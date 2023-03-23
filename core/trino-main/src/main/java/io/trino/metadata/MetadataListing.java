@@ -15,12 +15,12 @@ package io.trino.metadata;
 
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
-import com.google.common.collect.ImmutableSortedMap;
 import com.google.common.collect.ImmutableSortedSet;
 import io.trino.Session;
-import io.trino.connector.CatalogName;
 import io.trino.security.AccessControl;
+import io.trino.spi.ErrorCodeSupplier;
 import io.trino.spi.TrinoException;
+import io.trino.spi.connector.CatalogHandle;
 import io.trino.spi.connector.ColumnMetadata;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.connector.TableColumnsMetadata;
@@ -31,63 +31,51 @@ import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Optional;
 import java.util.Set;
-import java.util.SortedMap;
 import java.util.SortedSet;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
-import static com.google.common.collect.Iterables.getOnlyElement;
+import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 import static io.trino.spi.StandardErrorCode.TABLE_REDIRECTION_ERROR;
 
 public final class MetadataListing
 {
     private MetadataListing() {}
 
-    public static SortedMap<String, CatalogName> listCatalogs(Session session, Metadata metadata, AccessControl accessControl)
+    public static SortedSet<String> listCatalogNames(Session session, Metadata metadata, AccessControl accessControl)
     {
-        return listCatalogs(session, metadata, accessControl, Optional.empty());
+        return listCatalogNames(session, metadata, accessControl, Optional.empty());
     }
 
-    public static SortedMap<String, CatalogName> listCatalogs(Session session, Metadata metadata, AccessControl accessControl, Optional<String> catalogName)
+    public static SortedSet<String> listCatalogNames(Session session, Metadata metadata, AccessControl accessControl, Optional<String> catalogName)
     {
-        Map<String, CatalogName> catalogNames;
+        Set<String> catalogs;
         if (catalogName.isPresent()) {
-            Optional<CatalogName> catalogHandle = metadata.getCatalogHandle(session, catalogName.get());
+            Optional<CatalogHandle> catalogHandle = metadata.getCatalogHandle(session, catalogName.get());
             if (catalogHandle.isEmpty()) {
-                return ImmutableSortedMap.of();
+                return ImmutableSortedSet.of();
             }
-            catalogNames = ImmutableSortedMap.of(catalogName.get(), catalogHandle.get());
+            catalogs = ImmutableSet.of(catalogName.get());
         }
         else {
-            catalogNames = metadata.getCatalogs(session).entrySet().stream()
-                    .collect(toImmutableMap(
-                            Map.Entry::getKey,
-                            entry -> entry.getValue().getConnectorCatalogName()));
+            catalogs = metadata.listCatalogs(session).stream()
+                    .map(CatalogInfo::getCatalogName)
+                    .collect(toImmutableSet());
         }
-        Set<String> allowedCatalogs = accessControl.filterCatalogs(session.getIdentity(), catalogNames.keySet());
-
-        ImmutableSortedMap.Builder<String, CatalogName> result = ImmutableSortedMap.naturalOrder();
-        for (Map.Entry<String, CatalogName> entry : catalogNames.entrySet()) {
-            if (allowedCatalogs.contains(entry.getKey())) {
-                result.put(entry);
-            }
-        }
-        return result.build();
+        return ImmutableSortedSet.copyOf(accessControl.filterCatalogs(session.toSecurityContext(), catalogs));
     }
 
-    public static SortedMap<String, Catalog> getCatalogs(Session session, Metadata metadata, AccessControl accessControl)
+    public static List<CatalogInfo> listCatalogs(Session session, Metadata metadata, AccessControl accessControl)
     {
-        Map<String, Catalog> catalogs = metadata.getCatalogs(session);
-        Set<String> allowedCatalogs = accessControl.filterCatalogs(session.getIdentity(), catalogs.keySet());
-
-        ImmutableSortedMap.Builder<String, Catalog> result = ImmutableSortedMap.naturalOrder();
-        for (Map.Entry<String, Catalog> entry : catalogs.entrySet()) {
-            if (allowedCatalogs.contains(entry.getKey())) {
-                result.put(entry);
-            }
-        }
-        return result.build();
+        List<CatalogInfo> catalogs = metadata.listCatalogs(session);
+        Set<String> catalogNames = catalogs.stream()
+                .map(CatalogInfo::getCatalogName)
+                .collect(toImmutableSet());
+        Set<String> allowedCatalogs = accessControl.filterCatalogs(session.toSecurityContext(), catalogNames);
+        return catalogs.stream()
+                .filter(catalogInfo -> allowedCatalogs.contains(catalogInfo.getCatalogName()))
+                .collect(toImmutableList());
     }
 
     public static SortedSet<String> listSchemas(Session session, Metadata metadata, AccessControl accessControl, String catalogName)
@@ -96,6 +84,16 @@ public final class MetadataListing
     }
 
     public static SortedSet<String> listSchemas(Session session, Metadata metadata, AccessControl accessControl, String catalogName, Optional<String> schemaName)
+    {
+        try {
+            return doListSchemas(session, metadata, accessControl, catalogName, schemaName);
+        }
+        catch (RuntimeException exception) {
+            throw handleListingException(exception, "schemas", catalogName);
+        }
+    }
+
+    private static SortedSet<String> doListSchemas(Session session, Metadata metadata, AccessControl accessControl, String catalogName, Optional<String> schemaName)
     {
         Set<String> schemaNames = ImmutableSet.copyOf(metadata.listSchemaNames(session, catalogName));
         if (schemaName.isPresent()) {
@@ -110,6 +108,16 @@ public final class MetadataListing
 
     public static Set<SchemaTableName> listTables(Session session, Metadata metadata, AccessControl accessControl, QualifiedTablePrefix prefix)
     {
+        try {
+            return doListTables(session, metadata, accessControl, prefix);
+        }
+        catch (RuntimeException exception) {
+            throw handleListingException(exception, "tables", prefix.getCatalogName());
+        }
+    }
+
+    private static Set<SchemaTableName> doListTables(Session session, Metadata metadata, AccessControl accessControl, QualifiedTablePrefix prefix)
+    {
         Set<SchemaTableName> tableNames = metadata.listTables(session, prefix).stream()
                 .map(QualifiedObjectName::asSchemaTableName)
                 .collect(toImmutableSet());
@@ -122,6 +130,16 @@ public final class MetadataListing
 
     public static Set<SchemaTableName> listViews(Session session, Metadata metadata, AccessControl accessControl, QualifiedTablePrefix prefix)
     {
+        try {
+            return doListViews(session, metadata, accessControl, prefix);
+        }
+        catch (RuntimeException exception) {
+            throw handleListingException(exception, "views", prefix.getCatalogName());
+        }
+    }
+
+    private static Set<SchemaTableName> doListViews(Session session, Metadata metadata, AccessControl accessControl, QualifiedTablePrefix prefix)
+    {
         Set<SchemaTableName> tableNames = metadata.listViews(session, prefix).stream()
                 .map(QualifiedObjectName::asSchemaTableName)
                 .collect(toImmutableSet());
@@ -129,6 +147,16 @@ public final class MetadataListing
     }
 
     public static Map<SchemaTableName, ViewInfo> getViews(Session session, Metadata metadata, AccessControl accessControl, QualifiedTablePrefix prefix)
+    {
+        try {
+            return doGetViews(session, metadata, accessControl, prefix);
+        }
+        catch (RuntimeException exception) {
+            throw handleListingException(exception, "views", prefix.getCatalogName());
+        }
+    }
+
+    private static Map<SchemaTableName, ViewInfo> doGetViews(Session session, Metadata metadata, AccessControl accessControl, QualifiedTablePrefix prefix)
     {
         Map<SchemaTableName, ViewInfo> views = metadata.getViews(session, prefix).entrySet().stream()
                 .collect(toImmutableMap(entry -> entry.getKey().asSchemaTableName(), Entry::getValue));
@@ -142,6 +170,16 @@ public final class MetadataListing
 
     public static Set<SchemaTableName> listMaterializedViews(Session session, Metadata metadata, AccessControl accessControl, QualifiedTablePrefix prefix)
     {
+        try {
+            return doListMaterializedViews(session, metadata, accessControl, prefix);
+        }
+        catch (RuntimeException exception) {
+            throw handleListingException(exception, "materialized views", prefix.getCatalogName());
+        }
+    }
+
+    private static Set<SchemaTableName> doListMaterializedViews(Session session, Metadata metadata, AccessControl accessControl, QualifiedTablePrefix prefix)
+    {
         Set<SchemaTableName> tableNames = metadata.listMaterializedViews(session, prefix).stream()
                 .map(QualifiedObjectName::asSchemaTableName)
                 .collect(toImmutableSet());
@@ -149,6 +187,16 @@ public final class MetadataListing
     }
 
     public static Map<SchemaTableName, ViewInfo> getMaterializedViews(Session session, Metadata metadata, AccessControl accessControl, QualifiedTablePrefix prefix)
+    {
+        try {
+            return doGetMaterializedViews(session, metadata, accessControl, prefix);
+        }
+        catch (RuntimeException exception) {
+            throw handleListingException(exception, "materialized views", prefix.getCatalogName());
+        }
+    }
+
+    private static Map<SchemaTableName, ViewInfo> doGetMaterializedViews(Session session, Metadata metadata, AccessControl accessControl, QualifiedTablePrefix prefix)
     {
         Map<SchemaTableName, ViewInfo> materializedViews = metadata.getMaterializedViews(session, prefix).entrySet().stream()
                 .collect(toImmutableMap(entry -> entry.getKey().asSchemaTableName(), Entry::getValue));
@@ -161,6 +209,16 @@ public final class MetadataListing
     }
 
     public static Set<GrantInfo> listTablePrivileges(Session session, Metadata metadata, AccessControl accessControl, QualifiedTablePrefix prefix)
+    {
+        try {
+            return doListTablePrivileges(session, metadata, accessControl, prefix);
+        }
+        catch (RuntimeException exception) {
+            throw handleListingException(exception, "table privileges", prefix.getCatalogName());
+        }
+    }
+
+    private static Set<GrantInfo> doListTablePrivileges(Session session, Metadata metadata, AccessControl accessControl, QualifiedTablePrefix prefix)
     {
         List<GrantInfo> grants = metadata.listTablePrivileges(session, prefix);
         Set<SchemaTableName> allowedTables = accessControl.filterTables(
@@ -175,7 +233,17 @@ public final class MetadataListing
 
     public static Map<SchemaTableName, List<ColumnMetadata>> listTableColumns(Session session, Metadata metadata, AccessControl accessControl, QualifiedTablePrefix prefix)
     {
-        List<TableColumnsMetadata> catalogColumns = getOnlyElement(metadata.listTableColumns(session, prefix).values(), List.of());
+        try {
+            return doListTableColumns(session, metadata, accessControl, prefix);
+        }
+        catch (RuntimeException exception) {
+            throw handleListingException(exception, "table columns", prefix.getCatalogName());
+        }
+    }
+
+    private static Map<SchemaTableName, List<ColumnMetadata>> doListTableColumns(Session session, Metadata metadata, AccessControl accessControl, QualifiedTablePrefix prefix)
+    {
+        List<TableColumnsMetadata> catalogColumns = metadata.listTableColumns(session, prefix);
 
         Map<SchemaTableName, Optional<List<ColumnMetadata>>> tableColumns = catalogColumns.stream()
                 .collect(toImmutableMap(TableColumnsMetadata::getTable, TableColumnsMetadata::getColumns));
@@ -224,7 +292,7 @@ public final class MetadataListing
                     }
                 }
 
-                if (redirectionSucceeded == false) {
+                if (!redirectionSucceeded) {
                     return;
                 }
 
@@ -245,6 +313,18 @@ public final class MetadataListing
                             .collect(toImmutableList()));
         });
 
-        return result.build();
+        return result.buildOrThrow();
+    }
+
+    private static TrinoException handleListingException(RuntimeException exception, String type, String catalogName)
+    {
+        ErrorCodeSupplier result = GENERIC_INTERNAL_ERROR;
+        if (exception instanceof TrinoException trinoException) {
+            result = trinoException::getErrorCode;
+        }
+        return new TrinoException(
+                result,
+                "Error listing %s for catalog %s: %s".formatted(type, catalogName, exception.getMessage()),
+                exception);
     }
 }

@@ -49,7 +49,7 @@ public class TimestampDecoder
     public void decode(SearchHit hit, Supplier<Object> getter, BlockBuilder output)
     {
         DocumentField documentField = hit.getFields().get(path);
-        Object value = null;
+        Object value;
 
         if (documentField != null) {
             if (documentField.getValues().size() > 1) {
@@ -66,8 +66,7 @@ public class TimestampDecoder
         }
         else {
             LocalDateTime timestamp;
-            if (value instanceof String) {
-                String valueString = (String) value;
+            if (value instanceof String valueString) {
                 Long epochMillis = Longs.tryParse(valueString);
                 if (epochMillis != null) {
                     timestamp = LocalDateTime.ofInstant(Instant.ofEpochMilli(epochMillis), UTC);

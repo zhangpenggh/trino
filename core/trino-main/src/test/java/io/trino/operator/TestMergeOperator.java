@@ -21,7 +21,8 @@ import io.airlift.http.client.HttpClient;
 import io.airlift.http.client.testing.TestingHttpClient;
 import io.airlift.node.NodeInfo;
 import io.trino.FeaturesConfig;
-import io.trino.execution.Lifespan;
+import io.trino.exchange.DirectExchangeInput;
+import io.trino.exchange.ExchangeManagerRegistry;
 import io.trino.execution.StageId;
 import io.trino.execution.TaskId;
 import io.trino.execution.buffer.PagesSerdeFactory;
@@ -38,7 +39,6 @@ import org.testng.annotations.AfterMethod;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 
-import java.net.URI;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ScheduledExecutorService;
@@ -49,6 +49,7 @@ import static com.google.common.collect.Iterables.getOnlyElement;
 import static io.airlift.concurrent.Threads.daemonThreadsNamed;
 import static io.trino.RowPagesBuilder.rowPagesBuilder;
 import static io.trino.SessionTestUtils.TEST_SESSION;
+import static io.trino.collect.cache.SafeCaches.buildNonEvictableCache;
 import static io.trino.operator.OperatorAssertion.assertOperatorIsBlocked;
 import static io.trino.operator.OperatorAssertion.assertOperatorIsUnblocked;
 import static io.trino.operator.PageAssertions.assertPageEquals;
@@ -58,6 +59,7 @@ import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.testing.TestingTaskContext.createTaskContext;
 import static java.util.concurrent.Executors.newSingleThreadScheduledExecutor;
+import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertNull;
 import static org.testng.Assert.assertTrue;
@@ -74,7 +76,7 @@ public class TestMergeOperator
     private ScheduledExecutorService executor;
     private PagesSerdeFactory serdeFactory;
     private HttpClient httpClient;
-    private ExchangeClientFactory exchangeClientFactory;
+    private DirectExchangeClientFactory exchangeClientFactory;
     private OrderingCompiler orderingCompiler;
 
     private LoadingCache<TaskId, TestingTaskBuffer> taskBuffers;
@@ -85,9 +87,15 @@ public class TestMergeOperator
         executor = newSingleThreadScheduledExecutor(daemonThreadsNamed("test-merge-operator-%s"));
         serdeFactory = new TestingPagesSerdeFactory();
 
-        taskBuffers = CacheBuilder.newBuilder().build(CacheLoader.from(TestingTaskBuffer::new));
-        httpClient = new TestingHttpClient(new TestingExchangeHttpClientHandler(taskBuffers), executor);
-        exchangeClientFactory = new ExchangeClientFactory(new NodeInfo("test"), new FeaturesConfig(), new ExchangeClientConfig(), httpClient, executor);
+        taskBuffers = buildNonEvictableCache(CacheBuilder.newBuilder(), CacheLoader.from(TestingTaskBuffer::new));
+        httpClient = new TestingHttpClient(new TestingExchangeHttpClientHandler(taskBuffers, serdeFactory), executor);
+        exchangeClientFactory = new DirectExchangeClientFactory(
+                new NodeInfo("test"),
+                new FeaturesConfig(),
+                new DirectExchangeClientConfig(),
+                httpClient,
+                executor,
+                new ExchangeManagerRegistry());
         orderingCompiler = new OrderingCompiler(new TypeOperators());
     }
 
@@ -355,11 +363,11 @@ public class TestMergeOperator
 
     private static Split createRemoteSplit(TaskId taskId)
     {
-        return new Split(ExchangeOperator.REMOTE_CONNECTOR_ID, new RemoteSplit(taskId, URI.create("http://localhost/" + taskId)), Lifespan.taskWide());
+        return new Split(ExchangeOperator.REMOTE_CATALOG_HANDLE, new RemoteSplit(new DirectExchangeInput(taskId, "http://localhost/" + taskId)));
     }
 
     private static List<Page> pullAvailablePages(Operator operator)
-            throws InterruptedException
+            throws Exception
     {
         long endTime = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
         List<Page> outputPages = new ArrayList<>();
@@ -380,6 +388,11 @@ public class TestMergeOperator
         // verify state
         assertFalse(operator.needsInput(), "Operator still wants input");
         assertTrue(operator.isFinished(), "Expected operator to be finished");
+
+        operator.close();
+        operator.getOperatorContext().destroy();
+
+        assertEquals(getOnlyElement(operator.getOperatorContext().getNestedOperatorStats()).getUserMemoryReservation().toBytes(), 0);
 
         return outputPages;
     }

@@ -39,8 +39,7 @@ public class TestJdbcCachingConnectorSmokeTest
                 .put("metadata.cache-ttl", "10m")
                 .put("metadata.cache-missing", "true")
                 .put("case-insensitive-name-matching", "true")
-                .put("allow-drop-table", "true")
-                .build();
+                .buildOrThrow();
         this.h2SqlExecutor = new JdbcSqlExecutor(properties.get("connection-url"), new Properties());
         return createH2QueryRunner(REQUIRED_TPCH_TABLES, properties);
     }
@@ -109,8 +108,8 @@ public class TestJdbcCachingConnectorSmokeTest
 
         // H2 stores unquoted names as uppercase. So this query should fail
         assertThatThrownBy(() -> h2SqlExecutor.execute("SELECT * FROM tpch.\"cached_name\""))
-                .hasRootCauseMessage("Table \"cached_name\" not found; SQL statement:\n" +
-                        "SELECT * FROM tpch.\"cached_name\" [42102-200]");
+                .hasRootCauseMessage("Table \"cached_name\" not found (candidates are: \"CACHED_NAME\"); SQL statement:\n" +
+                        "SELECT * FROM tpch.\"cached_name\" [42103-214]");
         // H2 stores unquoted names as uppercase. So this query should succeed
         h2SqlExecutor.execute("SELECT * FROM tpch.\"CACHED_NAME\"");
 
@@ -131,7 +130,6 @@ public class TestJdbcCachingConnectorSmokeTest
     {
         switch (connectorBehavior) {
             case SUPPORTS_RENAME_TABLE_ACROSS_SCHEMAS:
-            case SUPPORTS_RENAME_SCHEMA:
                 return false;
 
             default:

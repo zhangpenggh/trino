@@ -20,11 +20,13 @@ import com.google.common.util.concurrent.ListenableFuture;
 import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
 import io.trino.Session;
+import io.trino.client.NodeVersion;
 import io.trino.execution.ExecutionFailureInfo;
 import io.trino.execution.QueryInfo;
 import io.trino.execution.QueryState;
 import io.trino.execution.QueryStats;
 import io.trino.execution.StateMachine.StateChangeListener;
+import io.trino.operator.RetryPolicy;
 import io.trino.server.BasicQueryInfo;
 import io.trino.spi.ErrorCode;
 import io.trino.spi.QueryId;
@@ -36,7 +38,6 @@ import java.util.Optional;
 import java.util.concurrent.Executor;
 
 import static com.google.common.util.concurrent.Futures.immediateVoidFuture;
-import static io.trino.memory.LocalMemoryManager.GENERAL_POOL;
 import static io.trino.server.DynamicFilterService.DynamicFiltersStats;
 import static io.trino.util.Failures.toFailure;
 import static java.util.Objects.requireNonNull;
@@ -58,7 +59,8 @@ public class FailedDispatchQuery
             URI self,
             Optional<ResourceGroupId> resourceGroup,
             Throwable cause,
-            Executor executor)
+            Executor executor,
+            NodeVersion version)
     {
         requireNonNull(session, "session is null");
         requireNonNull(query, "query is null");
@@ -67,7 +69,7 @@ public class FailedDispatchQuery
         requireNonNull(cause, "cause is null");
         requireNonNull(executor, "executor is null");
 
-        this.fullQueryInfo = immediateFailureQueryInfo(session, query, preparedQuery, self, resourceGroup, cause);
+        this.fullQueryInfo = immediateFailureQueryInfo(session, query, preparedQuery, self, resourceGroup, cause, version);
         this.basicQueryInfo = new BasicQueryInfo(fullQueryInfo);
         this.session = requireNonNull(session, "session is null");
         this.executor = requireNonNull(executor, "executor is null");
@@ -207,15 +209,14 @@ public class FailedDispatchQuery
             Optional<String> preparedQuery,
             URI self,
             Optional<ResourceGroupId> resourceGroupId,
-            Throwable throwable)
+            Throwable throwable,
+            NodeVersion version)
     {
         ExecutionFailureInfo failureCause = toFailure(throwable);
         QueryInfo queryInfo = new QueryInfo(
                 session.getQueryId(),
                 session.toSessionRepresentation(),
                 QueryState.FAILED,
-                GENERAL_POOL,
-                false,
                 self,
                 ImmutableList.of(),
                 query,
@@ -242,7 +243,10 @@ public class FailedDispatchQuery
                 ImmutableList.of(),
                 true,
                 resourceGroupId,
-                Optional.empty());
+                Optional.empty(),
+                RetryPolicy.NONE,
+                false,
+                version);
 
         return queryInfo;
     }
@@ -273,7 +277,7 @@ public class FailedDispatchQuery
                 0,
                 0,
                 0,
-                DataSize.ofBytes(0),
+                0,
                 DataSize.ofBytes(0),
                 DataSize.ofBytes(0),
                 DataSize.ofBytes(0),
@@ -284,22 +288,40 @@ public class FailedDispatchQuery
                 DataSize.ofBytes(0),
                 DataSize.ofBytes(0),
                 false,
+                new Duration(0, MILLISECONDS),
+                new Duration(0, MILLISECONDS),
                 new Duration(0, MILLISECONDS),
                 new Duration(0, MILLISECONDS),
                 new Duration(0, MILLISECONDS),
                 false,
                 ImmutableSet.of(),
                 DataSize.ofBytes(0),
+                DataSize.ofBytes(0),
+                0,
                 0,
                 new Duration(0, MILLISECONDS),
+                new Duration(0, MILLISECONDS),
+                DataSize.ofBytes(0),
                 DataSize.ofBytes(0),
                 0,
-                DataSize.ofBytes(0),
                 0,
                 DataSize.ofBytes(0),
-                0,
                 DataSize.ofBytes(0),
                 0,
+                0,
+                DataSize.ofBytes(0),
+                DataSize.ofBytes(0),
+                0,
+                0,
+                new Duration(0, MILLISECONDS),
+                new Duration(0, MILLISECONDS),
+                DataSize.ofBytes(0),
+                DataSize.ofBytes(0),
+                0,
+                0,
+                new Duration(0, MILLISECONDS),
+                new Duration(0, MILLISECONDS),
+                DataSize.ofBytes(0),
                 DataSize.ofBytes(0),
                 ImmutableList.of(),
                 DynamicFiltersStats.EMPTY,

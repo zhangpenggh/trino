@@ -14,9 +14,11 @@
 package io.trino.spi.security;
 
 import io.trino.spi.TrinoException;
+import io.trino.spi.function.FunctionKind;
 
 import java.security.Principal;
 import java.util.Collection;
+import java.util.Locale;
 import java.util.Optional;
 import java.util.Set;
 
@@ -118,6 +120,26 @@ public class AccessDeniedException
         throw new AccessDeniedException(format("Cannot access catalog %s%s", catalogName, formatExtraInfo(extraInfo)));
     }
 
+    public static void denyCreateCatalog(String catalogName)
+    {
+        denyCreateCatalog(catalogName, null);
+    }
+
+    public static void denyCreateCatalog(String catalogName, String extraInfo)
+    {
+        throw new AccessDeniedException(format("Cannot create catalog %s%s", catalogName, formatExtraInfo(extraInfo)));
+    }
+
+    public static void denyDropCatalog(String catalogName)
+    {
+        denyDropCatalog(catalogName, null);
+    }
+
+    public static void denyDropCatalog(String catalogName, String extraInfo)
+    {
+        throw new AccessDeniedException(format("Cannot drop catalog %s%s", catalogName, formatExtraInfo(extraInfo)));
+    }
+
     public static void denyCreateSchema(String schemaName)
     {
         denyCreateSchema(schemaName, null);
@@ -150,7 +172,12 @@ public class AccessDeniedException
 
     public static void denySetSchemaAuthorization(String schemaName, TrinoPrincipal principal)
     {
-        throw new AccessDeniedException(format("Cannot set authorization for schema %s to %s", schemaName, principal));
+        denySetSchemaAuthorization(schemaName, principal, null);
+    }
+
+    public static void denySetSchemaAuthorization(String schemaName, TrinoPrincipal principal, String extraInfo)
+    {
+        throw new AccessDeniedException(format("Cannot set authorization for schema %s to %s%s", schemaName, principal, formatExtraInfo(extraInfo)));
     }
 
     public static void denyShowSchemas()
@@ -165,7 +192,12 @@ public class AccessDeniedException
 
     public static void denyShowCreateSchema(String schemaName)
     {
-        throw new AccessDeniedException(format("Cannot show create schema for %s", schemaName));
+        denyShowCreateSchema(schemaName, null);
+    }
+
+    public static void denyShowCreateSchema(String schemaName, String extraInfo)
+    {
+        throw new AccessDeniedException(format("Cannot show create schema for %s%s", schemaName, formatExtraInfo(extraInfo)));
     }
 
     public static void denyShowCreateTable(String tableName)
@@ -228,6 +260,16 @@ public class AccessDeniedException
         throw new AccessDeniedException(format("Cannot comment table to %s%s", tableName, formatExtraInfo(extraInfo)));
     }
 
+    public static void denyCommentView(String viewName)
+    {
+        denyCommentView(viewName, null);
+    }
+
+    public static void denyCommentView(String viewName, String extraInfo)
+    {
+        throw new AccessDeniedException(format("Cannot comment view to %s%s", viewName, formatExtraInfo(extraInfo)));
+    }
+
     public static void denyCommentColumn(String tableName)
     {
         denyCommentColumn(tableName, null);
@@ -253,6 +295,11 @@ public class AccessDeniedException
         throw new AccessDeniedException(format("Cannot show columns of table %s", tableName));
     }
 
+    public static void denyShowColumns(String tableName, String extraInfo)
+    {
+        throw new AccessDeniedException(format("Cannot show columns of table %s%s", tableName, formatExtraInfo(extraInfo)));
+    }
+
     public static void denyAddColumn(String tableName)
     {
         denyAddColumn(tableName, null);
@@ -273,9 +320,24 @@ public class AccessDeniedException
         throw new AccessDeniedException(format("Cannot drop a column from table %s%s", tableName, formatExtraInfo(extraInfo)));
     }
 
+    public static void denyAlterColumn(String tableName)
+    {
+        denyAlterColumn(tableName, null);
+    }
+
+    public static void denyAlterColumn(String tableName, String extraInfo)
+    {
+        throw new AccessDeniedException(format("Cannot alter a column for table %s%s", tableName, formatExtraInfo(extraInfo)));
+    }
+
     public static void denySetTableAuthorization(String tableName, TrinoPrincipal principal)
     {
-        throw new AccessDeniedException(format("Cannot set authorization for table %s to %s", tableName, principal));
+        denySetTableAuthorization(tableName, principal, null);
+    }
+
+    public static void denySetTableAuthorization(String tableName, TrinoPrincipal principal, String extraInfo)
+    {
+        throw new AccessDeniedException(format("Cannot set authorization for table %s to %s%s", tableName, principal, formatExtraInfo(extraInfo)));
     }
 
     public static void denyRenameColumn(String tableName)
@@ -385,7 +447,22 @@ public class AccessDeniedException
 
     public static void denySetViewAuthorization(String viewName, TrinoPrincipal principal)
     {
-        throw new AccessDeniedException(format("Cannot set authorization for view %s to %s", viewName, principal));
+        denySetViewAuthorization(viewName, principal, null);
+    }
+
+    public static void denySetViewAuthorization(String viewName, TrinoPrincipal principal, String extraInfo)
+    {
+        throw new AccessDeniedException(format("Cannot set authorization for view %s to %s%s", viewName, principal, formatExtraInfo(extraInfo)));
+    }
+
+    public static void denySetViewComment(String viewName)
+    {
+        denySetViewComment(viewName, null);
+    }
+
+    public static void denySetViewComment(String viewName, String extraInfo)
+    {
+        throw new AccessDeniedException(format("Cannot set comment for view %s%s", viewName, formatExtraInfo(extraInfo)));
     }
 
     public static void denyDropView(String viewName)
@@ -426,6 +503,16 @@ public class AccessDeniedException
     public static void denyRefreshMaterializedView(String materializedViewName, String extraInfo)
     {
         throw new AccessDeniedException(format("Cannot refresh materialized view %s%s", materializedViewName, formatExtraInfo(extraInfo)));
+    }
+
+    public static void denySetMaterializedViewProperties(String materializedViewName)
+    {
+        denySetMaterializedViewProperties(materializedViewName, null);
+    }
+
+    public static void denySetMaterializedViewProperties(String materializedViewName, String extraInfo)
+    {
+        throw new AccessDeniedException(format("Cannot set properties of materialized view %s%s", materializedViewName, formatExtraInfo(extraInfo)));
     }
 
     public static void denyDropMaterializedView(String materializedViewName)
@@ -590,12 +677,22 @@ public class AccessDeniedException
 
     public static void denyExecuteProcedure(String procedureName)
     {
-        throw new AccessDeniedException(format("Cannot execute procedure %s", procedureName));
+        denyExecuteProcedure(procedureName, null);
+    }
+
+    public static void denyExecuteProcedure(String procedureName, String extraInfo)
+    {
+        throw new AccessDeniedException(format("Cannot execute procedure %s%s", procedureName, formatExtraInfo(extraInfo)));
     }
 
     public static void denyExecuteFunction(String functionName)
     {
         throw new AccessDeniedException(format("Cannot execute function %s", functionName));
+    }
+
+    public static void denyExecuteFunction(String functionName, FunctionKind functionKind, String extraInfo)
+    {
+        throw new AccessDeniedException(format("Cannot execute %s function %s%s", functionKind.name().toLowerCase(Locale.ROOT), functionName, formatExtraInfo(extraInfo)));
     }
 
     public static void denyExecuteTableProcedure(String tableName, String procedureName)

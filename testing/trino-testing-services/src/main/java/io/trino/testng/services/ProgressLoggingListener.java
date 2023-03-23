@@ -13,8 +13,11 @@
  */
 package io.trino.testng.services;
 
-import com.google.common.base.Joiner;
 import io.airlift.log.Logger;
+import org.testng.IClassListener;
+import org.testng.IInvokedMethod;
+import org.testng.IInvokedMethodListener;
+import org.testng.ITestClass;
 import org.testng.ITestContext;
 import org.testng.ITestListener;
 import org.testng.ITestResult;
@@ -22,10 +25,11 @@ import org.testng.ITestResult;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 
+import static io.trino.testng.services.Listeners.formatTestName;
 import static java.lang.String.format;
 
 public class ProgressLoggingListener
-        implements ITestListener
+        implements IClassListener, ITestListener, IInvokedMethodListener
 {
     private static final Logger LOGGER = Logger.get(ProgressLoggingListener.class);
     private final boolean enabled;
@@ -51,18 +55,32 @@ public class ProgressLoggingListener
     }
 
     @Override
-    public void onStart(ITestContext context)
-    {
-    }
+    public void onStart(ITestContext context) {}
 
     @Override
-    public void onTestStart(ITestResult testCase)
+    public void beforeInvocation(IInvokedMethod method, ITestResult testResult)
     {
         if (!enabled) {
             return;
         }
-        LOGGER.info("[TEST START] %s", formatTestName(testCase));
+        boolean testMethod = method.isTestMethod();
+        boolean configurationMethod = method.isConfigurationMethod();
+        if (testMethod) {
+            LOGGER.info("[TEST START] %s", formatTestName(testResult));
+        }
+        if (configurationMethod) {
+            LOGGER.info("[CONFIGURATION] %s", method);
+        }
+        if (!testMethod && !configurationMethod) {
+            LOGGER.info("[UNKNOWN THING] %s for %s", method, formatTestName(testResult));
+        }
     }
+
+    @Override
+    public void afterInvocation(IInvokedMethod method, ITestResult testResult) {}
+
+    @Override
+    public void onTestStart(ITestResult testCase) {}
 
     @Override
     public void onTestSuccess(ITestResult testCase)
@@ -97,27 +115,29 @@ public class ProgressLoggingListener
     }
 
     @Override
-    public void onTestFailedButWithinSuccessPercentage(ITestResult testCase)
+    public void onTestFailedButWithinSuccessPercentage(ITestResult testCase) {}
+
+    @Override
+    public void onFinish(ITestContext context) {}
+
+    @Override
+    public void onBeforeClass(ITestClass testClass)
     {
+        if (!enabled) {
+            return;
+        }
+
+        LOGGER.info("[BEFORE CLASS] %s", formatTestName(testClass));
     }
 
     @Override
-    public void onFinish(ITestContext context)
+    public void onAfterClass(ITestClass testClass)
     {
-    }
-
-    private String formatTestName(ITestResult testCase)
-    {
-        return format("%s.%s%s", testCase.getTestClass().getName(), testCase.getName(), formatTestParameters(testCase));
-    }
-
-    private String formatTestParameters(ITestResult testCase)
-    {
-        Object[] parameters = testCase.getParameters();
-        if (parameters == null || parameters.length == 0) {
-            return "";
+        if (!enabled) {
+            return;
         }
-        return format(" [%s]", Joiner.on(", ").join(parameters));
+
+        LOGGER.info("[AFTER CLASS] %s", formatTestName(testClass));
     }
 
     private static String formatDuration(ITestResult testCase)

@@ -19,12 +19,10 @@ import io.trino.tempto.configuration.Configuration;
 import org.intellij.lang.annotations.Language;
 import org.testng.annotations.Test;
 
-import static com.google.common.collect.Iterables.getOnlyElement;
 import static io.trino.tempto.assertions.QueryAssert.Row.row;
 import static io.trino.tempto.assertions.QueryAssert.assertThat;
 import static io.trino.tempto.fulfillment.table.TableRequirements.immutableTable;
 import static io.trino.tempto.fulfillment.table.hive.tpch.TpchTableDefinitions.ORDERS;
-import static io.trino.tempto.query.QueryExecutor.query;
 import static io.trino.tests.product.TestGroups.HIVE_COMPRESSION;
 import static io.trino.tests.product.utils.QueryExecutors.onHive;
 import static io.trino.tests.product.utils.QueryExecutors.onTrino;
@@ -74,7 +72,7 @@ public class TestHiveCompression
                 tableName));
         onHive().executeQuery(format("INSERT INTO %s VALUES(1, 'test data')", tableName));
 
-        assertThat(query("SELECT * FROM " + tableName)).containsExactlyInOrder(row(1, "test data"));
+        assertThat(onTrino().executeQuery("SELECT * FROM " + tableName)).containsExactlyInOrder(row(1, "test data"));
 
         onHive().executeQuery("DROP TABLE " + tableName);
     }
@@ -102,9 +100,9 @@ public class TestHiveCompression
                         "WITH (format='PARQUET')",
                 tableName));
 
-        String catalog = (String) getOnlyElement(getOnlyElement(onTrino().executeQuery("SELECT CURRENT_CATALOG").rows()));
+        String catalog = (String) onTrino().executeQuery("SELECT CURRENT_CATALOG").getOnlyValue();
         onTrino().executeQuery("SET SESSION " + catalog + ".compression_codec = 'SNAPPY'");
-        onTrino().executeQuery("SET SESSION " + catalog + ".experimental_parquet_optimized_writer_enabled = " + optimizedParquetWriter);
+        onTrino().executeQuery("SET SESSION " + catalog + ".parquet_optimized_writer_enabled = " + optimizedParquetWriter);
         onTrino().executeQuery(format("INSERT INTO %s VALUES(1, 'test data')", tableName));
 
         assertThat(onTrino().executeQuery("SELECT * FROM " + tableName)).containsExactlyInOrder(row(1, "test data"));
@@ -128,7 +126,7 @@ public class TestHiveCompression
             assertThat(onTrino().executeQuery("SELECT sum(o_orderkey) FROM test_read_compressed"))
                     .containsExactlyInOrder(row(4499987250000L));
 
-            assertThat((String) onTrino().executeQuery("SELECT regexp_replace(\"$path\", '.*/') FROM test_read_compressed LIMIT 1").row(0).get(0))
+            assertThat((String) onTrino().executeQuery("SELECT regexp_replace(\"$path\", '.*/') FROM test_read_compressed LIMIT 1").getOnlyValue())
                     .matches(expectedFileNamePattern);
         }
         finally {

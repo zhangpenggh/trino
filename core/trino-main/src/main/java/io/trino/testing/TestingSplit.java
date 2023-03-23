@@ -21,9 +21,14 @@ import io.trino.spi.connector.ConnectorSplit;
 
 import java.util.List;
 
+import static io.airlift.slice.SizeOf.estimatedSizeOf;
+import static io.airlift.slice.SizeOf.instanceSize;
+
 public class TestingSplit
         implements ConnectorSplit
 {
+    private static final int INSTANCE_SIZE = instanceSize(TestingSplit.class);
+
     private static final HostAddress localHost = HostAddress.fromString("127.0.0.1");
 
     private final boolean remotelyAccessible;
@@ -69,5 +74,12 @@ public class TestingSplit
     public Object getInfo()
     {
         return this;
+    }
+
+    @Override
+    public long getRetainedSizeInBytes()
+    {
+        return INSTANCE_SIZE
+                + estimatedSizeOf(addresses, HostAddress::getRetainedSizeInBytes);
     }
 }

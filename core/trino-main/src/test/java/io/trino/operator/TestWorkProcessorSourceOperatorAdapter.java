@@ -15,13 +15,13 @@ package io.trino.operator;
 
 import com.google.common.collect.ImmutableMap;
 import com.google.common.util.concurrent.MoreExecutors;
+import io.airlift.units.Duration;
 import io.trino.Session;
 import io.trino.memory.context.MemoryTrackingContext;
 import io.trino.metadata.Split;
 import io.trino.operator.WorkProcessorSourceOperatorAdapter.AdapterWorkProcessorSourceOperatorFactory;
 import io.trino.plugin.base.metrics.LongCount;
 import io.trino.spi.Page;
-import io.trino.spi.connector.UpdatablePageSource;
 import io.trino.spi.metrics.Metrics;
 import io.trino.sql.planner.plan.PlanNodeId;
 import io.trino.testing.TestingTaskContext;
@@ -29,13 +29,12 @@ import org.testng.annotations.AfterClass;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
 
-import java.util.Optional;
 import java.util.concurrent.ScheduledExecutorService;
-import java.util.function.Supplier;
 
 import static com.google.common.collect.Iterables.getOnlyElement;
 import static io.trino.SessionTestUtils.TEST_SESSION;
 import static java.util.concurrent.Executors.newSingleThreadScheduledExecutor;
+import static java.util.concurrent.TimeUnit.NANOSECONDS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestWorkProcessorSourceOperatorAdapter
@@ -71,16 +70,22 @@ public class TestWorkProcessorSourceOperatorAdapter
         operator.getOutput();
         assertThat(operator.isFinished()).isFalse();
         assertThat(getOnlyElement(context.getNestedOperatorStats()).getMetrics().getMetrics())
-                .hasSize(2)
+                .hasSize(5)
                 .containsEntry("testOperatorMetric", new LongCount(1));
-        assertThat(getOnlyElement(context.getNestedOperatorStats()).getConnectorMetrics().getMetrics()).isEqualTo(ImmutableMap.of("testConnectorMetric", new LongCount(2)));
+        assertThat(getOnlyElement(context.getNestedOperatorStats()).getConnectorMetrics().getMetrics()).isEqualTo(ImmutableMap.of(
+                "testConnectorMetric", new LongCount(2)));
+        assertThat(getOnlyElement(context.getNestedOperatorStats()).getPhysicalInputReadTime())
+                .isEqualTo(new Duration(7, NANOSECONDS));
 
         operator.getOutput();
         assertThat(operator.isFinished()).isTrue();
         assertThat(getOnlyElement(context.getNestedOperatorStats()).getMetrics().getMetrics())
-                .hasSize(2)
+                .hasSize(5)
                 .containsEntry("testOperatorMetric", new LongCount(2));
-        assertThat(getOnlyElement(context.getNestedOperatorStats()).getConnectorMetrics().getMetrics()).isEqualTo(ImmutableMap.of("testConnectorMetric", new LongCount(3)));
+        assertThat(getOnlyElement(context.getNestedOperatorStats()).getConnectorMetrics().getMetrics()).isEqualTo(ImmutableMap.of(
+                "testConnectorMetric", new LongCount(3)));
+        assertThat(getOnlyElement(context.getNestedOperatorStats()).getPhysicalInputReadTime())
+                .isEqualTo(new Duration(7, NANOSECONDS));
     }
 
     private static class TestWorkProcessorOperatorFactory
@@ -139,16 +144,16 @@ public class TestWorkProcessorSourceOperatorAdapter
         }
 
         @Override
+        public Duration getReadTime()
+        {
+            return new Duration(7, NANOSECONDS);
+        }
+
+        @Override
         public WorkProcessor<Page> getOutputPages()
         {
             return WorkProcessor.of(new Page(0))
                     .withProcessEntryMonitor(() -> count++);
-        }
-
-        @Override
-        public Supplier<Optional<UpdatablePageSource>> getUpdatablePageSourceSupplier()
-        {
-            return null;
         }
     }
 }

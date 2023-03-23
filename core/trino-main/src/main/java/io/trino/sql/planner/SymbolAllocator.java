@@ -24,6 +24,8 @@ import io.trino.sql.tree.GroupingOperation;
 import io.trino.sql.tree.Identifier;
 import io.trino.sql.tree.SymbolReference;
 
+import javax.annotation.Nullable;
+
 import java.util.HashMap;
 import java.util.Map;
 
@@ -67,7 +69,7 @@ public class SymbolAllocator
         return newSymbol("$hashValue", BigintType.BIGINT);
     }
 
-    public Symbol newSymbol(String nameHint, Type type, String suffix)
+    public Symbol newSymbol(String nameHint, Type type, @Nullable String suffix)
     {
         requireNonNull(nameHint, "nameHint is null");
         requireNonNull(type, "type is null");
@@ -92,13 +94,11 @@ public class SymbolAllocator
             unique = unique + "$" + suffix;
         }
 
-        String attempt = unique;
-        while (symbols.containsKey(new Symbol(attempt))) {
-            attempt = unique + "_" + nextId();
+        Symbol symbol = new Symbol(unique);
+        while (symbols.putIfAbsent(symbol, type) != null) {
+            symbol = new Symbol(unique + "_" + nextId());
         }
 
-        Symbol symbol = new Symbol(attempt);
-        symbols.put(symbol, type);
         return symbol;
     }
 
@@ -110,15 +110,14 @@ public class SymbolAllocator
     public Symbol newSymbol(Expression expression, Type type, String suffix)
     {
         String nameHint = "expr";
-        if (expression instanceof Identifier) {
-            nameHint = ((Identifier) expression).getValue();
+        if (expression instanceof Identifier identifier) {
+            nameHint = identifier.getValue();
         }
-        else if (expression instanceof FunctionCall) {
-            FunctionCall functionCall = (FunctionCall) expression;
+        else if (expression instanceof FunctionCall functionCall) {
             nameHint = ResolvedFunction.extractFunctionName(functionCall.getName());
         }
-        else if (expression instanceof SymbolReference) {
-            nameHint = ((SymbolReference) expression).getName();
+        else if (expression instanceof SymbolReference symbolReference) {
+            nameHint = symbolReference.getName();
         }
         else if (expression instanceof GroupingOperation) {
             nameHint = "grouping";

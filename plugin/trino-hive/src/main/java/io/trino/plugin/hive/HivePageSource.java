@@ -16,12 +16,17 @@ package io.trino.plugin.hive;
 import com.google.common.collect.ImmutableList;
 import io.trino.plugin.hive.HivePageSourceProvider.BucketAdaptation;
 import io.trino.plugin.hive.HivePageSourceProvider.ColumnMapping;
+import io.trino.plugin.hive.coercions.CharCoercer;
 import io.trino.plugin.hive.coercions.DoubleToFloatCoercer;
 import io.trino.plugin.hive.coercions.FloatToDoubleCoercer;
 import io.trino.plugin.hive.coercions.IntegerNumberToVarcharCoercer;
 import io.trino.plugin.hive.coercions.IntegerNumberUpscaleCoercer;
 import io.trino.plugin.hive.coercions.VarcharCoercer;
 import io.trino.plugin.hive.coercions.VarcharToIntegerNumberCoercer;
+import io.trino.plugin.hive.type.Category;
+import io.trino.plugin.hive.type.ListTypeInfo;
+import io.trino.plugin.hive.type.MapTypeInfo;
+import io.trino.plugin.hive.type.TypeInfo;
 import io.trino.plugin.hive.util.HiveBucketing.BucketingVersion;
 import io.trino.spi.Page;
 import io.trino.spi.TrinoException;
@@ -38,16 +43,16 @@ import io.trino.spi.block.RunLengthEncodedBlock;
 import io.trino.spi.connector.ConnectorPageSource;
 import io.trino.spi.connector.RecordCursor;
 import io.trino.spi.metrics.Metrics;
+import io.trino.spi.type.ArrayType;
+import io.trino.spi.type.CharType;
 import io.trino.spi.type.DecimalType;
 import io.trino.spi.type.MapType;
+import io.trino.spi.type.RowType;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeManager;
 import io.trino.spi.type.VarcharType;
 import it.unimi.dsi.fastutil.ints.IntArrayList;
 import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.hive.serde2.typeinfo.ListTypeInfo;
-import org.apache.hadoop.hive.serde2.typeinfo.MapTypeInfo;
-import org.apache.hadoop.hive.serde2.typeinfo.TypeInfo;
 
 import javax.annotation.Nullable;
 
@@ -62,6 +67,7 @@ import java.util.function.Function;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.collect.ImmutableList.toImmutableList;
+import static io.trino.plugin.base.util.Closables.closeAllSuppress;
 import static io.trino.plugin.hive.HiveColumnHandle.isRowIdColumnHandle;
 import static io.trino.plugin.hive.HiveErrorCode.HIVE_CURSOR_ERROR;
 import static io.trino.plugin.hive.HiveErrorCode.HIVE_INVALID_BUCKET_FILES;
@@ -76,13 +82,11 @@ import static io.trino.plugin.hive.HiveType.HIVE_SHORT;
 import static io.trino.plugin.hive.coercions.DecimalCoercers.createDecimalToDecimalCoercer;
 import static io.trino.plugin.hive.coercions.DecimalCoercers.createDecimalToDoubleCoercer;
 import static io.trino.plugin.hive.coercions.DecimalCoercers.createDecimalToRealCoercer;
+import static io.trino.plugin.hive.coercions.DecimalCoercers.createDecimalToVarcharCoercer;
 import static io.trino.plugin.hive.coercions.DecimalCoercers.createDoubleToDecimalCoercer;
 import static io.trino.plugin.hive.coercions.DecimalCoercers.createRealToDecimalCoercer;
 import static io.trino.plugin.hive.util.HiveBucketing.getHiveBucket;
 import static io.trino.plugin.hive.util.HiveUtil.extractStructFieldTypes;
-import static io.trino.plugin.hive.util.HiveUtil.isArrayType;
-import static io.trino.plugin.hive.util.HiveUtil.isMapType;
-import static io.trino.plugin.hive.util.HiveUtil.isRowType;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.block.ColumnarArray.toColumnarArray;
 import static io.trino.spi.block.ColumnarMap.toColumnarMap;
@@ -95,6 +99,10 @@ import static java.util.Objects.requireNonNull;
 public class HivePageSource
         implements ConnectorPageSource
 {
+    public static final int ORIGINAL_TRANSACTION_CHANNEL = 0;
+    public static final int BUCKET_CHANNEL = 1;
+    public static final int ROW_ID_CHANNEL = 2;
+
     private final List<ColumnMapping> columnMappings;
     private final Optional<BucketAdapter> bucketAdapter;
     private final Optional<BucketValidator> bucketValidator;
@@ -243,11 +251,11 @@ public class HivePageSource
             return page;
         }
         catch (TrinoException e) {
-            closeWithSuppression(e);
+            closeAllSuppress(e, this);
             throw e;
         }
         catch (RuntimeException e) {
-            closeWithSuppression(e);
+            closeAllSuppress(e, this);
             throw new TrinoException(HIVE_CURSOR_ERROR, e);
         }
     }
@@ -270,29 +278,15 @@ public class HivePageSource
     }
 
     @Override
-    public long getSystemMemoryUsage()
+    public long getMemoryUsage()
     {
-        return delegate.getSystemMemoryUsage();
+        return delegate.getMemoryUsage();
     }
 
     @Override
     public Metrics getMetrics()
     {
         return delegate.getMetrics();
-    }
-
-    protected void closeWithSuppression(Throwable throwable)
-    {
-        requireNonNull(throwable, "throwable is null");
-        try {
-            close();
-        }
-        catch (RuntimeException e) {
-            // Self-suppression not permitted
-            if (throwable != e) {
-                throwable.addSuppressed(e);
-            }
-        }
     }
 
     public ConnectorPageSource getPageSource()
@@ -309,20 +303,22 @@ public class HivePageSource
         Type fromType = fromHiveType.getType(typeManager);
         Type toType = toHiveType.getType(typeManager);
 
-        if (toType instanceof VarcharType && (fromHiveType.equals(HIVE_BYTE) || fromHiveType.equals(HIVE_SHORT) || fromHiveType.equals(HIVE_INT) || fromHiveType.equals(HIVE_LONG))) {
-            return Optional.of(new IntegerNumberToVarcharCoercer<>(fromType, (VarcharType) toType));
+        if (toType instanceof VarcharType toVarcharType && (fromHiveType.equals(HIVE_BYTE) || fromHiveType.equals(HIVE_SHORT) || fromHiveType.equals(HIVE_INT) || fromHiveType.equals(HIVE_LONG))) {
+            return Optional.of(new IntegerNumberToVarcharCoercer<>(fromType, toVarcharType));
         }
-        if (fromType instanceof VarcharType && (toHiveType.equals(HIVE_BYTE) || toHiveType.equals(HIVE_SHORT) || toHiveType.equals(HIVE_INT) || toHiveType.equals(HIVE_LONG))) {
-            return Optional.of(new VarcharToIntegerNumberCoercer<>((VarcharType) fromType, toType));
+        if (fromType instanceof VarcharType fromVarcharType && (toHiveType.equals(HIVE_BYTE) || toHiveType.equals(HIVE_SHORT) || toHiveType.equals(HIVE_INT) || toHiveType.equals(HIVE_LONG))) {
+            return Optional.of(new VarcharToIntegerNumberCoercer<>(fromVarcharType, toType));
         }
-        if (fromType instanceof VarcharType && toType instanceof VarcharType) {
-            VarcharType toVarcharType = (VarcharType) toType;
-            VarcharType fromVarcharType = (VarcharType) fromType;
-
+        if (fromType instanceof VarcharType fromVarcharType && toType instanceof VarcharType toVarcharType) {
             if (narrowerThan(toVarcharType, fromVarcharType)) {
                 return Optional.of(new VarcharCoercer(fromVarcharType, toVarcharType));
             }
-
+            return Optional.empty();
+        }
+        if (fromType instanceof CharType fromCharType && toType instanceof CharType toCharType) {
+            if (narrowerThan(toCharType, fromCharType)) {
+                return Optional.of(new CharCoercer(fromCharType, toCharType));
+            }
             return Optional.empty();
         }
         if (fromHiveType.equals(HIVE_BYTE) && (toHiveType.equals(HIVE_SHORT) || toHiveType.equals(HIVE_INT) || toHiveType.equals(HIVE_LONG))) {
@@ -340,29 +336,35 @@ public class HivePageSource
         if (fromHiveType.equals(HIVE_DOUBLE) && toHiveType.equals(HIVE_FLOAT)) {
             return Optional.of(new DoubleToFloatCoercer());
         }
-        if (fromType instanceof DecimalType && toType instanceof DecimalType) {
-            return Optional.of(createDecimalToDecimalCoercer((DecimalType) fromType, (DecimalType) toType));
+        if (fromType instanceof DecimalType fromDecimalType && toType instanceof DecimalType toDecimalType) {
+            return Optional.of(createDecimalToDecimalCoercer(fromDecimalType, toDecimalType));
         }
-        if (fromType instanceof DecimalType && toType == DOUBLE) {
-            return Optional.of(createDecimalToDoubleCoercer((DecimalType) fromType));
+        if (fromType instanceof DecimalType fromDecimalType && toType == DOUBLE) {
+            return Optional.of(createDecimalToDoubleCoercer(fromDecimalType));
         }
-        if (fromType instanceof DecimalType && toType == REAL) {
-            return Optional.of(createDecimalToRealCoercer((DecimalType) fromType));
+        if (fromType instanceof DecimalType fromDecimalType && toType == REAL) {
+            return Optional.of(createDecimalToRealCoercer(fromDecimalType));
         }
-        if (fromType == DOUBLE && toType instanceof DecimalType) {
-            return Optional.of(createDoubleToDecimalCoercer((DecimalType) toType));
+        if (fromType instanceof DecimalType fromDecimalType && toType instanceof VarcharType toVarcharType) {
+            return Optional.of(createDecimalToVarcharCoercer(fromDecimalType, toVarcharType));
         }
-        if (fromType == REAL && toType instanceof DecimalType) {
-            return Optional.of(createRealToDecimalCoercer((DecimalType) toType));
+        if (fromType == DOUBLE && toType instanceof DecimalType toDecimalType) {
+            return Optional.of(createDoubleToDecimalCoercer(toDecimalType));
         }
-        if (isArrayType(fromType) && isArrayType(toType)) {
+        if (fromType == REAL && toType instanceof DecimalType toDecimalType) {
+            return Optional.of(createRealToDecimalCoercer(toDecimalType));
+        }
+        if ((fromType instanceof ArrayType) && (toType instanceof ArrayType)) {
             return Optional.of(new ListCoercer(typeManager, fromHiveType, toHiveType));
         }
-        if (isMapType(fromType) && isMapType(toType)) {
+        if ((fromType instanceof MapType) && (toType instanceof MapType)) {
             return Optional.of(new MapCoercer(typeManager, fromHiveType, toHiveType));
         }
-        if (isRowType(fromType) && isRowType(toType)) {
-            return Optional.of(new StructCoercer(typeManager, fromHiveType, toHiveType));
+        if ((fromType instanceof RowType) && (toType instanceof RowType)) {
+            HiveType fromHiveTypeStruct = (fromHiveType.getCategory() == Category.UNION) ? HiveType.toHiveType(fromType) : fromHiveType;
+            HiveType toHiveTypeStruct = (toHiveType.getCategory() == Category.UNION) ? HiveType.toHiveType(toType) : toHiveType;
+
+            return Optional.of(new StructCoercer(typeManager, fromHiveTypeStruct, toHiveTypeStruct));
         }
 
         throw new TrinoException(NOT_SUPPORTED, format("Unsupported coercion from %s to %s", fromHiveType, toHiveType));
@@ -376,6 +378,13 @@ public class HivePageSource
             return !first.isUnbounded();
         }
         return first.getBoundedLength() < second.getBoundedLength();
+    }
+
+    public static boolean narrowerThan(CharType first, CharType second)
+    {
+        requireNonNull(first, "first is null");
+        requireNonNull(second, "second is null");
+        return first.getLength() < second.getLength();
     }
 
     private static class ListCoercer
@@ -422,7 +431,7 @@ public class HivePageSource
         {
             requireNonNull(typeManager, "typeManager is null");
             requireNonNull(fromHiveType, "fromHiveType is null");
-            this.toType = requireNonNull(toHiveType, "toHiveType is null").getType(typeManager);
+            this.toType = toHiveType.getType(typeManager);
             HiveType fromKeyHiveType = HiveType.valueOf(((MapTypeInfo) fromHiveType.getTypeInfo()).getMapKeyTypeInfo().getTypeName());
             HiveType fromValueHiveType = HiveType.valueOf(((MapTypeInfo) fromHiveType.getTypeInfo()).getMapValueTypeInfo().getTypeName());
             HiveType toKeyHiveType = HiveType.valueOf(((MapTypeInfo) toHiveType.getTypeInfo()).getMapKeyTypeInfo().getTypeName());
@@ -489,7 +498,7 @@ public class HivePageSource
                     fields[i] = rowBlock.getField(i);
                 }
                 else {
-                    fields[i] = new DictionaryBlock(nullBlocks[i], ids);
+                    fields[i] = DictionaryBlock.create(ids.length, nullBlocks[i], ids);
                 }
             }
             boolean[] valueIsNull = null;

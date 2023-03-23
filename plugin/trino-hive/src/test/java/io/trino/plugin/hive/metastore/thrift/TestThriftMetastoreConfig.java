@@ -50,11 +50,13 @@ public class TestThriftMetastoreConfig
                 .setTruststorePath(null)
                 .setTruststorePassword(null)
                 .setImpersonationEnabled(false)
+                .setUseSparkTableStatisticsFallback(true)
                 .setDelegationTokenCacheTtl(new Duration(1, HOURS))
                 .setDelegationTokenCacheMaximumSize(1000)
                 .setDeleteFilesOnDrop(false)
                 .setMaxWaitForTransactionLock(new Duration(10, MINUTES))
-                .setAssumeCanonicalPartitionKeys(false));
+                .setAssumeCanonicalPartitionKeys(false)
+                .setWriteStatisticsThreads(20));
     }
 
     @Test
@@ -64,7 +66,7 @@ public class TestThriftMetastoreConfig
         Path keystoreFile = Files.createTempFile(null, null);
         Path truststoreFile = Files.createTempFile(null, null);
 
-        Map<String, String> properties = new ImmutableMap.Builder<String, String>()
+        Map<String, String> properties = ImmutableMap.<String, String>builder()
                 .put("hive.metastore-timeout", "20s")
                 .put("hive.metastore.thrift.client.socks-proxy", "localhost:1234")
                 .put("hive.metastore.thrift.client.max-retries", "15")
@@ -82,8 +84,10 @@ public class TestThriftMetastoreConfig
                 .put("hive.metastore.thrift.delegation-token.cache-maximum-size", "9999")
                 .put("hive.metastore.thrift.delete-files-on-drop", "true")
                 .put("hive.metastore.thrift.txn-lock-max-wait", "5m")
+                .put("hive.metastore.thrift.write-statistics-threads", "10")
                 .put("hive.metastore.thrift.assume-canonical-partition-keys", "true")
-                .build();
+                .put("hive.metastore.thrift.use-spark-table-statistics-fallback", "false")
+                .buildOrThrow();
 
         ThriftMetastoreConfig expected = new ThriftMetastoreConfig()
                 .setMetastoreTimeout(new Duration(20, SECONDS))
@@ -103,7 +107,9 @@ public class TestThriftMetastoreConfig
                 .setDelegationTokenCacheMaximumSize(9999)
                 .setDeleteFilesOnDrop(true)
                 .setMaxWaitForTransactionLock(new Duration(5, MINUTES))
-                .setAssumeCanonicalPartitionKeys(true);
+                .setAssumeCanonicalPartitionKeys(true)
+                .setWriteStatisticsThreads(10)
+                .setUseSparkTableStatisticsFallback(false);
 
         assertFullMapping(properties, expected);
     }

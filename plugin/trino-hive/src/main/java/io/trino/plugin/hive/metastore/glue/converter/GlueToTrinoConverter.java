@@ -32,6 +32,9 @@ import io.trino.plugin.hive.util.HiveBucketing;
 import io.trino.plugin.hive.util.HiveBucketing.BucketingVersion;
 import io.trino.spi.TrinoException;
 import io.trino.spi.security.PrincipalType;
+import org.gaul.modernizer_maven_annotations.SuppressModernizer;
+
+import javax.annotation.Nullable;
 
 import java.util.List;
 import java.util.Locale;
@@ -41,12 +44,17 @@ import java.util.function.Function;
 import java.util.function.UnaryOperator;
 
 import static com.google.common.base.MoreObjects.firstNonNull;
+import static com.google.common.base.Strings.emptyToNull;
 import static com.google.common.base.Strings.nullToEmpty;
 import static io.trino.plugin.hive.HiveErrorCode.HIVE_INVALID_METADATA;
+import static io.trino.plugin.hive.HiveErrorCode.HIVE_UNSUPPORTED_FORMAT;
+import static io.trino.plugin.hive.HiveType.HIVE_INT;
+import static io.trino.plugin.hive.TableType.EXTERNAL_TABLE;
 import static io.trino.plugin.hive.metastore.util.Memoizers.memoizeLast;
+import static io.trino.plugin.hive.util.HiveUtil.isDeltaLakeTable;
+import static io.trino.plugin.hive.util.HiveUtil.isIcebergTable;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
-import static org.apache.hadoop.hive.metastore.TableType.EXTERNAL_TABLE;
 
 public final class GlueToTrinoConverter
 {
@@ -54,11 +62,27 @@ public final class GlueToTrinoConverter
 
     private GlueToTrinoConverter() {}
 
+    public static String getTableType(com.amazonaws.services.glue.model.Table glueTable)
+    {
+        // Athena treats missing table type as EXTERNAL_TABLE.
+        return firstNonNull(getTableTypeNullable(glueTable), EXTERNAL_TABLE.name());
+    }
+
+    @Nullable
+    @SuppressModernizer // Usage of `Table.getTableType` is not allowed. Only this method can call that.
+    public static String getTableTypeNullable(com.amazonaws.services.glue.model.Table glueTable)
+    {
+        return glueTable.getTableType();
+    }
+
     public static Database convertDatabase(com.amazonaws.services.glue.model.Database glueDb)
     {
         return Database.builder()
                 .setDatabaseName(glueDb.getName())
-                .setLocation(Optional.ofNullable(glueDb.getLocationUri()))
+                // Currently it's not possible to create a Glue database with empty location string ""
+                // (validation error detected: Value '' at 'database.locationUri' failed to satisfy constraint: Member must have length greater than or equal to 1)
+                // However, it has been observed that Glue databases with empty location do exist in the wild.
+                .setLocation(Optional.ofNullable(emptyToNull(glueDb.getLocationUri())))
                 .setComment(Optional.ofNullable(glueDb.getDescription()))
                 .setParameters(firstNonNull(glueDb.getParameters(), ImmutableMap.of()))
                 .setOwnerName(Optional.of(PUBLIC_OWNER))
@@ -68,48 +92,56 @@ public final class GlueToTrinoConverter
 
     public static Table convertTable(com.amazonaws.services.glue.model.Table glueTable, String dbName)
     {
-        requireNonNull(glueTable.getStorageDescriptor(), "Table StorageDescriptor is null");
         Map<String, String> tableParameters = convertParameters(glueTable.getParameters());
-        StorageDescriptor sd = glueTable.getStorageDescriptor();
-
         Table.Builder tableBuilder = Table.builder()
                 .setDatabaseName(dbName)
                 .setTableName(glueTable.getName())
                 .setOwner(Optional.ofNullable(glueTable.getOwner()))
-                // Athena treats missing table type as EXTERNAL_TABLE.
-                .setTableType(firstNonNull(glueTable.getTableType(), EXTERNAL_TABLE.name()))
-                .setDataColumns(convertColumns(sd.getColumns(), sd.getSerdeInfo().getSerializationLibrary()))
+                .setTableType(getTableType(glueTable))
                 .setParameters(tableParameters)
                 .setViewOriginalText(Optional.ofNullable(glueTable.getViewOriginalText()))
                 .setViewExpandedText(Optional.ofNullable(glueTable.getViewExpandedText()));
 
-        if (glueTable.getPartitionKeys() != null) {
-            tableBuilder.setPartitionColumns(convertColumns(glueTable.getPartitionKeys(), sd.getSerdeInfo().getSerializationLibrary()));
+        StorageDescriptor sd = glueTable.getStorageDescriptor();
+
+        if (isIcebergTable(tableParameters) || (sd == null && isDeltaLakeTable(tableParameters))) {
+            // Iceberg tables do not need to read the StorageDescriptor field, but we still need to return dummy properties for compatibility
+            // Delta Lake tables only need to provide a dummy properties if a StorageDescriptor was not explicitly configured.
+            tableBuilder.setDataColumns(ImmutableList.of(new Column("dummy", HIVE_INT, Optional.empty())));
+            tableBuilder.getStorageBuilder().setStorageFormat(StorageFormat.fromHiveStorageFormat(HiveStorageFormat.PARQUET));
         }
         else {
-            tableBuilder.setPartitionColumns(ImmutableList.of());
+            if (sd == null) {
+                throw new TrinoException(HIVE_UNSUPPORTED_FORMAT, format("Table StorageDescriptor is null for table %s.%s (%s)", dbName, glueTable.getName(), glueTable));
+            }
+            tableBuilder.setDataColumns(convertColumns(sd.getColumns(), sd.getSerdeInfo().getSerializationLibrary()));
+            if (glueTable.getPartitionKeys() != null) {
+                tableBuilder.setPartitionColumns(convertColumns(glueTable.getPartitionKeys(), sd.getSerdeInfo().getSerializationLibrary()));
+            }
+            else {
+                tableBuilder.setPartitionColumns(ImmutableList.of());
+            }
+            // No benefit to memoizing here, just reusing the implementation
+            new StorageConverter().setStorageBuilder(sd, tableBuilder.getStorageBuilder(), tableParameters);
         }
-        // No benefit to memoizing here, just reusing the implementation
-        new StorageConverter().setStorageBuilder(sd, tableBuilder.getStorageBuilder(), tableParameters);
+
         return tableBuilder.build();
     }
 
-    private static Column convertColumn(com.amazonaws.services.glue.model.Column glueColumn, String serDe)
+    private static Column convertColumn(com.amazonaws.services.glue.model.Column glueColumn, String serde)
     {
         // OpenCSVSerde deserializes columns from csv file into strings, so we set the column type from the metastore
         // to string to avoid cast exceptions.
-        if (HiveStorageFormat.CSV.getSerDe().equals(serDe)) {
+        if (HiveStorageFormat.CSV.getSerde().equals(serde)) {
             //TODO(https://github.com/trinodb/trino/issues/7240) Add tests
             return new Column(glueColumn.getName(), HiveType.HIVE_STRING, Optional.ofNullable(glueColumn.getComment()));
         }
-        else {
-            return new Column(glueColumn.getName(), HiveType.valueOf(glueColumn.getType().toLowerCase(Locale.ENGLISH)), Optional.ofNullable(glueColumn.getComment()));
-        }
+        return new Column(glueColumn.getName(), HiveType.valueOf(glueColumn.getType().toLowerCase(Locale.ENGLISH)), Optional.ofNullable(glueColumn.getComment()));
     }
 
-    private static List<Column> convertColumns(List<com.amazonaws.services.glue.model.Column> glueColumns, String serDe)
+    private static List<Column> convertColumns(List<com.amazonaws.services.glue.model.Column> glueColumns, String serde)
     {
-        return mappedCopy(glueColumns, glueColumn -> convertColumn(glueColumn, serDe));
+        return mappedCopy(glueColumns, glueColumn -> convertColumn(glueColumn, serde));
     }
 
     private static Map<String, String> convertParameters(Map<String, String> parameters)
@@ -147,7 +179,7 @@ public final class GlueToTrinoConverter
             this.tableName = requireNonNull(table.getTableName(), "tableName is null");
             this.tableParameters = convertParameters(table.getParameters());
             this.columnsConverter = memoizeLast(glueColumns -> convertColumns(glueColumns,
-                    table.getStorage().getStorageFormat().getSerDe()));
+                    table.getStorage().getStorageFormat().getSerde()));
         }
 
         @Override

@@ -13,24 +13,26 @@
  */
 package io.trino.sql.query;
 
-import org.testng.annotations.AfterClass;
-import org.testng.annotations.BeforeClass;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
 
+@TestInstance(PER_CLASS)
 public class TestMergeProjectWithValues
 {
     private QueryAssertions assertions;
 
-    @BeforeClass
+    @BeforeAll
     public void init()
     {
         assertions = new QueryAssertions();
     }
 
-    @AfterClass(alwaysRun = true)
+    @AfterAll
     public void teardown()
     {
         assertions.close();
@@ -46,8 +48,7 @@ public class TestMergeProjectWithValues
         assertThat(assertions.query("SELECT a, b + 1, 'x' FROM (VALUES (1, 10, true), (null, null, null), (3, 30, true)) t(a, b, c)"))
                 .matches("VALUES (1, 11, 'x'), (null, null, 'x'), (3, 31, 'x')");
 
-        // cannot decorrelate values
-        assertThatThrownBy(() -> assertions.query("SELECT (SELECT a * 10 FROM (VALUES x) t(a)) FROM (VALUES 1, 2, 3) t2(x)"))
-                .hasMessage("line 1:9: Given correlated subquery is not supported");
+        assertThat(assertions.query("SELECT (SELECT a * 10 FROM (VALUES x) t(a)) FROM (VALUES 1, 2, 3) t2(x)"))
+                .matches("VALUES 10, 20, 30");
     }
 }

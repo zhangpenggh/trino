@@ -15,12 +15,12 @@ package io.trino.sql.planner.sanity;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
-import io.trino.connector.CatalogName;
 import io.trino.execution.warnings.WarningCollector;
 import io.trino.metadata.TableHandle;
 import io.trino.plugin.tpch.TpchColumnHandle;
 import io.trino.plugin.tpch.TpchTableHandle;
 import io.trino.plugin.tpch.TpchTransactionHandle;
+import io.trino.spi.connector.CatalogHandle;
 import io.trino.sql.PlannerContext;
 import io.trino.sql.planner.PlanNodeIdAllocator;
 import io.trino.sql.planner.TypeAnalyzer;
@@ -31,7 +31,6 @@ import io.trino.sql.planner.plan.PlanNode;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
 
-import java.util.Optional;
 import java.util.function.Function;
 
 import static io.trino.spi.type.BigintType.BIGINT;
@@ -53,12 +52,11 @@ public class TestValidateStreamingAggregations
         plannerContext = getQueryRunner().getPlannerContext();
         typeAnalyzer = createTestingTypeAnalyzer(plannerContext);
 
-        CatalogName catalogName = getCurrentConnectorId();
+        CatalogHandle catalogHandle = getCurrentCatalogHandle();
         nationTableHandle = new TableHandle(
-                catalogName,
+                catalogHandle,
                 new TpchTableHandle("sf1", "nation", 1.0),
-                TpchTransactionHandle.INSTANCE,
-                Optional.empty());
+                TpchTransactionHandle.INSTANCE);
     }
 
     @Test

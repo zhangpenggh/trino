@@ -44,10 +44,11 @@ import static io.airlift.concurrent.MoreFutures.getFutureValue;
 import static io.airlift.concurrent.MoreFutures.tryGetFutureValue;
 import static io.airlift.testing.Assertions.assertEqualsIgnoreOrder;
 import static io.trino.operator.PageAssertions.assertPageEquals;
-import static io.trino.testing.assertions.Assert.assertEquals;
 import static io.trino.util.StructuralTestUtil.appendToBlockBuilder;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.concurrent.TimeUnit.SECONDS;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.fail;
 
 public final class OperatorAssertion
@@ -162,8 +163,15 @@ public final class OperatorAssertion
 
     public static List<Page> toPages(OperatorFactory operatorFactory, DriverContext driverContext, List<Page> input, boolean revokeMemoryWhenAddingPages)
     {
+        return toPages(operatorFactory, driverContext, input, revokeMemoryWhenAddingPages, true);
+    }
+
+    public static List<Page> toPages(OperatorFactory operatorFactory, DriverContext driverContext, List<Page> input, boolean revokeMemoryWhenAddingPages, boolean closeOperatorFactory)
+    {
         try (Operator operator = operatorFactory.createOperator(driverContext)) {
-            operatorFactory.noMoreOperators();
+            if (closeOperatorFactory) {
+                operatorFactory.noMoreOperators();
+            }
             return toPages(operator, input.iterator(), revokeMemoryWhenAddingPages);
         }
         catch (Exception e) {
@@ -225,6 +233,17 @@ public final class OperatorAssertion
         assertOperatorEquals(operatorFactory, driverContext, input, expected, false, ImmutableList.of(), revokeMemoryWhenAddingPages);
     }
 
+    public static void assertOperatorEquals(
+            OperatorFactory operatorFactory,
+            DriverContext driverContext,
+            List<Page> input,
+            MaterializedResult expected,
+            boolean revokeMemoryWhenAddingPages,
+            boolean closeOperatorFactory)
+    {
+        assertOperatorEquals(operatorFactory, driverContext, input, expected, false, ImmutableList.of(), revokeMemoryWhenAddingPages, closeOperatorFactory);
+    }
+
     public static void assertOperatorEquals(OperatorFactory operatorFactory, DriverContext driverContext, List<Page> input, MaterializedResult expected, boolean hashEnabled, List<Integer> hashChannels)
     {
         assertOperatorEquals(operatorFactory, driverContext, input, expected, hashEnabled, hashChannels, true);
@@ -239,13 +258,34 @@ public final class OperatorAssertion
             List<Integer> hashChannels,
             boolean revokeMemoryWhenAddingPages)
     {
-        List<Page> pages = toPages(operatorFactory, driverContext, input, revokeMemoryWhenAddingPages);
+        assertOperatorEquals(
+                operatorFactory,
+                driverContext,
+                input,
+                expected,
+                hashEnabled,
+                hashChannels,
+                revokeMemoryWhenAddingPages,
+                true);
+    }
+
+    public static void assertOperatorEquals(
+            OperatorFactory operatorFactory,
+            DriverContext driverContext,
+            List<Page> input,
+            MaterializedResult expected,
+            boolean hashEnabled,
+            List<Integer> hashChannels,
+            boolean revokeMemoryWhenAddingPages,
+            boolean closeOperatorFactory)
+    {
+        List<Page> pages = toPages(operatorFactory, driverContext, input, revokeMemoryWhenAddingPages, closeOperatorFactory);
         if (hashEnabled && !hashChannels.isEmpty()) {
             // Drop the hashChannel for all pages
             pages = dropChannel(pages, hashChannels);
         }
         MaterializedResult actual = toMaterializedResult(driverContext.getSession(), expected.getTypes(), pages);
-        assertEquals(actual, expected);
+        assertThat(actual).containsExactlyElementsOf(expected);
     }
 
     public static void assertOperatorEqualsIgnoreOrder(

@@ -13,18 +13,21 @@
  */
 package io.trino.plugin.hive.metastore;
 
-import com.linkedin.coral.hive.hive2rel.HiveMetastoreClient;
+import com.linkedin.coral.common.HiveMetastoreClient;
+import io.trino.hive.thrift.metastore.Database;
+import io.trino.hive.thrift.metastore.FieldSchema;
+import io.trino.hive.thrift.metastore.SerDeInfo;
+import io.trino.hive.thrift.metastore.StorageDescriptor;
+import io.trino.hive.thrift.metastore.Table;
 import io.trino.plugin.hive.CoralTableRedirectionResolver;
-import io.trino.plugin.hive.authentication.HiveIdentity;
-import io.trino.plugin.hive.metastore.thrift.ThriftMetastoreUtil;
 import io.trino.spi.connector.SchemaTableName;
-import org.apache.hadoop.hive.metastore.api.Database;
-import org.apache.hadoop.hive.metastore.api.Table;
 
 import java.util.List;
 import java.util.Optional;
 
 import static io.trino.plugin.hive.metastore.PrincipalPrivileges.NO_PRIVILEGES;
+import static io.trino.plugin.hive.metastore.thrift.ThriftMetastoreUtil.toMetastoreApiDatabase;
+import static io.trino.plugin.hive.metastore.thrift.ThriftMetastoreUtil.toMetastoreApiTable;
 import static java.util.Objects.requireNonNull;
 
 /**
@@ -36,16 +39,13 @@ public class CoralSemiTransactionalHiveMSCAdapter
         implements HiveMetastoreClient
 {
     private final SemiTransactionalHiveMetastore delegate;
-    private final HiveIdentity identity;
     private final CoralTableRedirectionResolver tableRedirection;
 
     public CoralSemiTransactionalHiveMSCAdapter(
             SemiTransactionalHiveMetastore coralHiveMetastoreClient,
-            HiveIdentity identity,
             CoralTableRedirectionResolver tableRedirection)
     {
         this.delegate = requireNonNull(coralHiveMetastoreClient, "coralHiveMetastoreClient is null");
-        this.identity = requireNonNull(identity, "identity is null");
         this.tableRedirection = requireNonNull(tableRedirection, "tableRedirection is null");
     }
 
@@ -57,9 +57,11 @@ public class CoralSemiTransactionalHiveMSCAdapter
 
     // returning null for missing entry is as per Coral's requirements
     @Override
-    public Database getDatabase(String dbName)
+    public org.apache.hadoop.hive.metastore.api.Database getDatabase(String dbName)
     {
-        return delegate.getDatabase(dbName).map(ThriftMetastoreUtil::toMetastoreApiDatabase).orElse(null);
+        return delegate.getDatabase(dbName)
+                .map(database -> toHiveDatabase(toMetastoreApiDatabase(database)))
+                .orElse(null);
     }
 
     @Override
@@ -74,12 +76,75 @@ public class CoralSemiTransactionalHiveMSCAdapter
         if (!dbName.isEmpty() && !tableName.isEmpty()) {
             Optional<Table> redirected = tableRedirection.redirect(new SchemaTableName(dbName, tableName));
             if (redirected.isPresent()) {
-                return redirected.get();
+                return toHiveTable(redirected.get());
             }
         }
 
-        return delegate.getTable(identity, dbName, tableName)
-                .map(value -> ThriftMetastoreUtil.toMetastoreApiTable(value, NO_PRIVILEGES))
+        return delegate.getTable(dbName, tableName)
+                .map(value -> toHiveTable(toMetastoreApiTable(value, NO_PRIVILEGES)))
                 .orElse(null);
+    }
+
+    private static org.apache.hadoop.hive.metastore.api.Database toHiveDatabase(Database database)
+    {
+        var result = new org.apache.hadoop.hive.metastore.api.Database();
+        result.setName(database.getName());
+        result.setDescription(database.getDescription());
+        result.setLocationUri(database.getLocationUri());
+        result.setParameters(database.getParameters());
+        return result;
+    }
+
+    private static org.apache.hadoop.hive.metastore.api.Table toHiveTable(Table table)
+    {
+        var result = new org.apache.hadoop.hive.metastore.api.Table();
+        result.setDbName(table.getDbName());
+        result.setTableName(table.getTableName());
+        result.setTableType(table.getTableType());
+        result.setViewOriginalText(table.getViewOriginalText());
+        result.setViewExpandedText(table.getViewExpandedText());
+        result.setPartitionKeys(table.getPartitionKeys().stream()
+                .map(CoralSemiTransactionalHiveMSCAdapter::toHiveFieldSchema)
+                .toList());
+        result.setParameters(table.getParameters());
+        result.setSd(toHiveStorageDescriptor(table.getSd()));
+        return result;
+    }
+
+    private static org.apache.hadoop.hive.metastore.api.StorageDescriptor toHiveStorageDescriptor(StorageDescriptor storage)
+    {
+        var result = new org.apache.hadoop.hive.metastore.api.StorageDescriptor();
+        result.setCols(storage.getCols().stream()
+                .map(CoralSemiTransactionalHiveMSCAdapter::toHiveFieldSchema)
+                .toList());
+        result.setBucketCols(storage.getBucketCols());
+        result.setNumBuckets(storage.getNumBuckets());
+        result.setInputFormat(storage.getInputFormat());
+        result.setOutputFormat(storage.getInputFormat());
+        result.setSerdeInfo(toHiveSerdeInfo(storage.getSerdeInfo()));
+        result.setLocation(storage.getLocation());
+        result.setParameters(storage.getParameters());
+        return result;
+    }
+
+    private static org.apache.hadoop.hive.metastore.api.SerDeInfo toHiveSerdeInfo(SerDeInfo info)
+    {
+        var result = new org.apache.hadoop.hive.metastore.api.SerDeInfo();
+        result.setName(info.getName());
+        result.setDescription(info.getDescription());
+        result.setSerializationLib(info.getSerializationLib());
+        result.setSerializerClass(info.getSerializerClass());
+        result.setDeserializerClass(info.getDeserializerClass());
+        result.setParameters(info.getParameters());
+        return result;
+    }
+
+    private static org.apache.hadoop.hive.metastore.api.FieldSchema toHiveFieldSchema(FieldSchema field)
+    {
+        var result = new org.apache.hadoop.hive.metastore.api.FieldSchema();
+        result.setName(field.getName());
+        result.setType(field.getType());
+        result.setComment(field.getComment());
+        return result;
     }
 }

@@ -22,27 +22,30 @@ import io.trino.spi.connector.ConnectorSplit;
 import java.net.URI;
 import java.util.List;
 
+import static io.airlift.slice.SizeOf.estimatedSizeOf;
+import static io.airlift.slice.SizeOf.instanceSize;
 import static java.util.Objects.requireNonNull;
 
 public class ExampleSplit
         implements ConnectorSplit
 {
-    private final URI uri;
+    private static final int INSTANCE_SIZE = instanceSize(ExampleSplit.class);
+
+    private final String uri;
     private final boolean remotelyAccessible;
     private final List<HostAddress> addresses;
 
     @JsonCreator
-    public ExampleSplit(
-            @JsonProperty("uri") URI uri)
+    public ExampleSplit(@JsonProperty("uri") String uri)
     {
         this.uri = requireNonNull(uri, "uri is null");
 
         remotelyAccessible = true;
-        addresses = ImmutableList.of(HostAddress.fromUri(uri));
+        addresses = ImmutableList.of(HostAddress.fromUri(URI.create(uri)));
     }
 
     @JsonProperty
-    public URI getUri()
+    public String getUri()
     {
         return uri;
     }
@@ -64,5 +67,13 @@ public class ExampleSplit
     public Object getInfo()
     {
         return this;
+    }
+
+    @Override
+    public long getRetainedSizeInBytes()
+    {
+        return INSTANCE_SIZE
+                + estimatedSizeOf(uri)
+                + estimatedSizeOf(addresses, HostAddress::getRetainedSizeInBytes);
     }
 }

@@ -18,6 +18,7 @@ import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 import io.airlift.units.DataSize;
 import io.airlift.units.DataSize.Unit;
+import io.trino.hive.orc.OrcConf;
 import io.trino.orc.OrcTester.Format;
 import io.trino.orc.metadata.CompressionKind;
 import io.trino.orc.metadata.StripeInformation;
@@ -31,22 +32,22 @@ import org.apache.hadoop.hive.ql.io.orc.OrcOutputFormat;
 import org.apache.hadoop.hive.serde2.objectinspector.ObjectInspector;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.mapred.JobConf;
-import org.apache.orc.OrcConf;
 import org.testng.annotations.AfterClass;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
 
 import java.io.File;
 import java.io.IOException;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.Random;
+import java.util.function.Function;
 import java.util.stream.Stream;
 
 import static io.airlift.testing.Assertions.assertGreaterThanOrEqual;
 import static io.airlift.testing.Assertions.assertInstanceOf;
+import static io.trino.hadoop.ConfigurationInstantiator.newEmptyConfiguration;
 import static io.trino.memory.context.AggregatedMemoryContext.newSimpleAggregatedMemoryContext;
 import static io.trino.orc.OrcReader.INITIAL_BATCH_SIZE;
 import static io.trino.orc.OrcRecordReader.LinearProbeRangeFinder.createTinyStripesRangeFinder;
@@ -54,12 +55,11 @@ import static io.trino.orc.OrcRecordReader.wrapWithCacheIfTinyStripes;
 import static io.trino.orc.OrcTester.Format.ORC_12;
 import static io.trino.orc.OrcTester.HIVE_STORAGE_TIME_ZONE;
 import static io.trino.orc.OrcTester.READER_OPTIONS;
-import static io.trino.orc.OrcTester.writeOrcFileColumnHive;
+import static io.trino.orc.OrcTester.writeOrcColumnsHiveFile;
 import static io.trino.orc.metadata.CompressionKind.NONE;
 import static io.trino.orc.metadata.CompressionKind.ZLIB;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static java.lang.String.format;
-import static org.apache.hadoop.hive.serde2.objectinspector.primitive.PrimitiveObjectInspectorFactory.javaStringObjectInspector;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertNotNull;
 import static org.testng.Assert.fail;
@@ -76,12 +76,14 @@ public class TestCachingOrcDataSource
     {
         tempFile = new TempFile();
         Random random = new Random();
-        Iterator<String> iterator = Stream.generate(() -> Long.toHexString(random.nextLong())).limit(POSITION_COUNT).iterator();
-        writeOrcFileColumnHive(
+        writeOrcColumnsHiveFile(
                 tempFile.getFile(),
-                createOrcRecordWriter(tempFile.getFile(), ORC_12, ZLIB, javaStringObjectInspector),
-                VARCHAR,
-                iterator);
+                ORC_12,
+                ZLIB,
+                ImmutableList.of("test"),
+                ImmutableList.of(VARCHAR),
+                Stream.generate(() -> (Function<Integer, Object>) (fieldIndex) -> Long.toHexString(random.nextLong()))
+                        .limit(POSITION_COUNT).iterator());
     }
 
     @AfterClass(alwaysRun = true)
@@ -89,6 +91,7 @@ public class TestCachingOrcDataSource
             throws Exception
     {
         tempFile.close();
+        tempFile = null;
     }
 
     @Test
@@ -242,7 +245,7 @@ public class TestCachingOrcDataSource
     private static FileSinkOperator.RecordWriter createOrcRecordWriter(File outputFile, Format format, CompressionKind compression, ObjectInspector columnObjectInspector)
             throws IOException
     {
-        JobConf jobConf = new JobConf();
+        JobConf jobConf = new JobConf(newEmptyConfiguration());
         OrcConf.WRITE_FORMAT.setString(jobConf, format == ORC_12 ? "0.12" : "0.11");
         OrcConf.COMPRESS.setString(jobConf, compression.name());
 

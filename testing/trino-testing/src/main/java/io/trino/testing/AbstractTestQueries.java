@@ -15,8 +15,8 @@ package io.trino.testing;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
-import io.trino.metadata.FunctionListBuilder;
-import io.trino.metadata.SqlFunction;
+import io.trino.metadata.FunctionBundle;
+import io.trino.metadata.InternalFunctionBundle;
 import io.trino.tpch.TpchTable;
 import org.apache.commons.math3.stat.descriptive.DescriptiveStatistics;
 import org.testng.annotations.DataProvider;
@@ -35,7 +35,6 @@ import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.testing.MaterializedResult.resultBuilder;
 import static io.trino.testing.QueryAssertions.assertContains;
 import static io.trino.testing.StatefulSleepingSum.STATEFUL_SLEEPING_SUM;
-import static io.trino.testing.assertions.Assert.assertEquals;
 import static io.trino.testing.assertions.Assert.assertEventually;
 import static io.trino.tpch.TpchTable.CUSTOMER;
 import static io.trino.tpch.TpchTable.NATION;
@@ -45,6 +44,7 @@ import static java.lang.String.format;
 import static java.util.stream.Collectors.joining;
 import static java.util.stream.IntStream.range;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertTrue;
 
 public abstract class AbstractTestQueries
@@ -53,13 +53,13 @@ public abstract class AbstractTestQueries
     protected static final List<TpchTable<?>> REQUIRED_TPCH_TABLES = ImmutableList.of(CUSTOMER, NATION, ORDERS, REGION);
 
     // We can just use the default type registry, since we don't use any parametric types
-    protected static final List<SqlFunction> CUSTOM_FUNCTIONS = new FunctionListBuilder()
+    protected static final FunctionBundle CUSTOM_FUNCTIONS = InternalFunctionBundle.builder()
             .aggregates(CustomSum.class)
             .window(CustomRank.class)
             .scalars(CustomAdd.class)
             .scalars(CreateHll.class)
             .functions(APPLY_FUNCTION, INVOKE_FUNCTION, STATEFUL_SLEEPING_SUM)
-            .getFunctions();
+            .build();
 
     @Test
     public void testAggregationOverUnknown()
@@ -225,7 +225,8 @@ public abstract class AbstractTestQueries
         assertQuery("SELECT COUNT(1) FROM orders");
 
         assertQuery("SELECT COUNT(NULLIF(orderstatus, 'F')) FROM orders");
-        assertQuery("SELECT COUNT(CAST(NULL AS BIGINT)) FROM orders"); // todo: make COUNT(null) work
+        assertQuery("SELECT COUNT(NULL) FROM orders", "VALUES 0");
+        assertQuery("SELECT COUNT(CAST(NULL AS BIGINT)) FROM orders", "VALUES 0");
     }
 
     @Test

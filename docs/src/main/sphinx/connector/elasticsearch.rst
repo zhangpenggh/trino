@@ -2,22 +2,23 @@
 Elasticsearch connector
 =======================
 
-Overview
---------
+.. raw:: html
+
+  <img src="../_static/img/elasticsearch.png" class="connector-logo">
 
 The Elasticsearch Connector allows access to `Elasticsearch <https://www.elastic.co/products/elasticsearch>`_ data from Trino.
 This document describes how to setup the Elasticsearch Connector to run SQL queries against Elasticsearch.
 
 .. note::
 
-    Elasticsearch 6.0.0 or later is required.
+    Elasticsearch (6.6.0 or later) or OpenSearch (1.1.0 or later) is required.
 
 Configuration
 -------------
 
 To configure the Elasticsearch connector, create a catalog properties file
-``etc/catalog/elasticsearch.properties`` with the following contents,
-replacing the properties as appropriate:
+``etc/catalog/example.properties`` with the following contents, replacing the
+properties as appropriate for your setup:
 
 .. code-block:: text
 
@@ -27,158 +28,151 @@ replacing the properties as appropriate:
     elasticsearch.default-schema-name=default
 
 Configuration properties
-------------------------
+^^^^^^^^^^^^^^^^^^^^^^^^
 
-The following configuration properties are available:
+.. list-table:: Elasticsearch configuration properties
+    :widths: 35, 55, 10
+    :header-rows: 1
 
-``elasticsearch.host``
-^^^^^^^^^^^^^^^^^^^^^^
-
-Hostname of the Elasticsearch node to connect to.
-
-This property is required.
-
-``elasticsearch.port``
-^^^^^^^^^^^^^^^^^^^^^^
-
-Specifies the port of the Elasticsearch node to connect to.
-
-This property is optional; the default is ``9200``.
-
-``elasticsearch.default-schema-name``
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-Defines the schema that contains all tables defined without
-a qualifying schema name.
-
-This property is optional; the default is ``default``.
-
-``elasticsearch.scroll-size``
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-This property defines the maximum number of hits that can be returned with each
-Elasticsearch scroll request.
-
-This property is optional; the default is ``1000``.
-
-``elasticsearch.scroll-timeout``
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-This property defines the amount of time (ms) Elasticsearch keeps the `search context alive`_ for scroll requests
-
-This property is optional; the default is ``1m``.
-
-.. _search context alive: https://www.elastic.co/guide/en/elasticsearch/reference/current/search-request-scroll.html#scroll-search-context
-
-``elasticsearch.request-timeout``
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-This property defines the timeout value for all Elasticsearch requests.
-
-This property is optional; the default is ``10s``.
-
-``elasticsearch.connect-timeout``
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-This property defines the timeout value for all Elasticsearch connection attempts.
-
-This property is optional; the default is ``1s``.
-
-``elasticsearch.backoff-init-delay``
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-This property defines the minimum duration between backpressure retry attempts for a single request to Elasticsearch.
-Setting it too low might overwhelm an already struggling ES cluster.
-
-This property is optional; the default is ``500ms``.
-
-``elasticsearch.backoff-max-delay``
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-This property defines the maximum duration between backpressure retry attempts for a single request to Elasticsearch.
-
-This property is optional; the default is ``20s``.
-
-``elasticsearch.max-retry-time``
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-This property defines the maximum duration across all retry attempts for a single request to Elasticsearch.
-
-This property is optional; the default is ``20s``.
-
-``elasticsearch.node-refresh-interval``
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-This property controls how often the list of available Elasticsearch nodes is refreshed.
-
-This property is optional; the default is ``1m``.
-
-``elasticsearch.ignore-publish-address``
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-Enable or disable using the address published by Elasticsearch to connect for
-queries.
+    * - Property name
+      - Description
+      - Default
+    * - ``elasticsearch.host``
+      - The comma-separated list of host names for the Elasticsearch node to
+        connect to. This property is required.
+      -
+    * - ``elasticsearch.port``
+      - Port of the Elasticsearch node to connect to.
+      - ``9200``
+    * - ``elasticsearch.default-schema-name``
+      - The schema that contains all tables defined without a qualifying schema
+        name.
+      - ``default``
+    * - ``elasticsearch.scroll-size``
+      - Sets the maximum number of hits that can be returned with each
+        Elasticsearch scroll request.
+      - ``1000``
+    * - ``elasticsearch.scroll-timeout``
+      - Amount of time Elasticsearch keeps the
+        `search context <https://www.elastic.co/guide/en/elasticsearch/reference/current/search-request-scroll.html#scroll-search-context>`_
+        alive for scroll requests.
+      - ``1m``
+    * - ``elasticsearch.request-timeout``
+      - Timeout value for all Elasticsearch requests.
+      - ``10s``
+    * - ``elasticsearch.connect-timeout``
+      - Timeout value for all Elasticsearch connection attempts.
+      - ``1s``
+    * - ``elasticsearch.backoff-init-delay``
+      - The minimum duration between backpressure retry attempts for a single
+        request to Elasticsearch. Setting it too low might overwhelm an already
+        struggling ES cluster.
+      - ``500ms``
+    * - ``elasticsearch.backoff-max-delay``
+      - The maximum duration between backpressure retry attempts for a single
+        request to Elasticsearch.
+      - ``20s``
+    * - ``elasticsearch.max-retry-time``
+      - The maximum duration across all retry attempts for a single request to
+        Elasticsearch.
+      - ``20s``
+    * - ``elasticsearch.node-refresh-interval``
+      - How often the list of available Elasticsearch nodes is refreshed.
+      - ``1m``
+    * - ``elasticsearch.ignore-publish-address``
+      - Disables using the address published by Elasticsearch to connect for
+        queries.
+      -
 
 TLS security
 ------------
 
-The Elasticsearch connector provides additional security options to support Elasticsearch clusters that have been configured to use TLS.
+The Elasticsearch connector provides additional security options to support
+Elasticsearch clusters that have been configured to use TLS.
 
-The connector supports key stores and trust stores in PEM or Java Key Store (JKS) format. The allowed configuration values are:
+If your cluster has globally-trusted certificates, you should only need to
+enable TLS. If you require custom configuration for certificates, the connector
+supports key stores and trust stores in PEM or Java Key Store (JKS) format.
 
-``elasticsearch.tls.keystore-path``
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+The allowed configuration values are:
 
-The path to the PEM or JKS key store. This file must be readable by the operating system user running Trino.
+.. list-table:: TLS Security Properties
+    :widths: 40, 60
+    :header-rows: 1
 
-This property is optional.
+    * - Property name
+      - Description
+    * - ``elasticsearch.tls.enabled``
+      - Enables TLS security.
+    * - ``elasticsearch.tls.keystore-path``
+      - The path to the PEM or JKS key store. This file must be readable by the
+        operating system user running Trino.
+    * - ``elasticsearch.tls.truststore-path``
+      - The path to PEM or JKS trust store. This file must be readable by the
+        operating system user running Trino.
+    * - ``elasticsearch.tls.keystore-password``
+      - The key password for the key store specified by
+        ``elasticsearch.tls.keystore-path``.
+    * - ``elasticsearch.tls.truststore-password``
+      - The key password for the trust store specified by
+        ``elasticsearch.tls.truststore-path``.
 
-``elasticsearch.tls.truststore-path``
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+.. _elasticesearch-type-mapping:
 
-The path to PEM or JKS trust store. This file must be readable by the operating system user running Trino.
+Type mapping
+------------
 
-This property is optional.
+Because Trino and Elasticsearch each support types that the other does not, this
+connector :ref:`maps some types <type-mapping-overview>` when reading data.
 
-``elasticsearch.tls.keystore-password``
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Elasticsearch type to Trino type mapping
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-The key password for the key store specified by ``elasticsearch.tls.keystore-path``.
+The connector maps Elasticsearch types to the corresponding Trino types
+according to the following table:
 
-This property is optional.
+.. list-table:: Elasticsearch type to Trino type mapping
+  :widths: 30, 30, 50
+  :header-rows: 1
 
-``elasticsearch.tls.truststore-password``
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  * - Elasticsearch type
+    - Trino type
+    - Notes
+  * - ``BOOLEAN``
+    - ``BOOLEAN``
+    -
+  * - ``DOUBLE``
+    - ``DOUBLE``
+    -
+  * - ``FLOAT``
+    - ``REAL``
+    -
+  * - ``BYTE``
+    - ``TINYINT``
+    -
+  * - ``SHORT``
+    - ``SMALLINT``
+    -
+  * - ``INTEGER``
+    - ``INTEGER``
+    -
+  * - ``LONG``
+    - ``BIGINT``
+    -
+  * - ``KEYWORD``
+    - ``VARCHAR``
+    -
+  * - ``TEXT``
+    - ``VARCHAR``
+    -
+  * - ``DATE``
+    - ``TIMESTAMP``
+    - For more information, see :ref:`elasticsearch-date-types`.
+  * - ``IPADDRESS``
+    - ``IP``
+    -
 
-The key password for the trust store specified by ``elasticsearch.tls.truststore-path``.
-
-This property is optional.
-
-Data types
-----------
-
-The data type mappings are as follows:
-
-Primitive types
-^^^^^^^^^^^^^^^
-
-============= =============
-Elasticsearch Trino
-============= =============
-``binary``    ``VARBINARY``
-``boolean``   ``BOOLEAN``
-``double``    ``DOUBLE``
-``float``     ``REAL``
-``byte``      ``TINYINT``
-``short``     ``SMALLINT``
-``integer``   ``INTEGER``
-``long``      ``BIGINT``
-``keyword``   ``VARCHAR``
-``text``      ``VARCHAR``
-``date``      ``TIMESTAMP``
-``ip``        ``IPADDRESS``
-(all others)  (unsupported)
-============= =============
+No other types are supported.
 
 .. _elasticsearch-array-types:
 
@@ -232,6 +226,8 @@ property definition to the ``_meta.trino`` property of the target index mapping.
 
     It is not allowed to use ``asRawJson`` and ``isArray`` flags simultaneously for the same column.
 
+.. _elasticsearch-date-types:
+
 Date types
 ^^^^^^^^^^
 
@@ -251,7 +247,7 @@ Raw JSON transform
 ^^^^^^^^^^^^^^^^^^
 
 There are many occurrences where documents in Elasticsearch have more complex
-structures that are not represented in the mapping. For instance, a single
+structures that are not represented in the mapping. For example, a single
 ``keyword`` field can have widely different content including a single
 ``keyword`` value, an array, or a multidimensional ``keyword`` array with any
 level of nesting.
@@ -380,28 +376,6 @@ Elasticsearch Trino         Supports
 (all others)  (unsupported) (unsupported)
 ============= ============= =============
 
-Pass-through queries
---------------------
-
-The Elasticsearch connector allows you to embed any valid Elasticsearch query,
-that uses the `Elasticsearch Query DSL
-<https://www.elastic.co/guide/en/elasticsearch/reference/current/query-dsl.html>`_
-in your SQL query.
-
-The results can then be used in any SQL statement, wrapping the Elasticsearch
-query. The syntax extends the syntax of the enhanced Elasticsearch table names
-with the following::
-
-    SELECT * FROM es.default."<index>$query:<es-query>"
-
-The Elasticsearch query string ``es-query`` is base32-encoded to avoid having to
-deal with escaping quotes and case sensitivity issues in table identifiers.
-
-The result of these query tables is a table with a single row and a single
-column named ``result`` of type VARCHAR. It contains the JSON payload returned
-by Elasticsearch, and can be processed with the :doc:`built-in JSON functions
-</functions/json>`.
-
 AWS authorization
 -----------------
 
@@ -409,7 +383,7 @@ To enable AWS authorization using IAM policies, the ``elasticsearch.security`` o
 Additionally, the following options need to be configured appropriately:
 
 ================================================ ==================================================================
-Property Name                                    Description
+Property name                                    Description
 ================================================ ==================================================================
 ``elasticsearch.aws.region``                     AWS region or the Elasticsearch endpoint. This option is required.
 
@@ -432,7 +406,7 @@ To enable password authentication, the ``elasticsearch.security`` option needs t
 Additionally the following options need to be configured appropriately:
 
 ================================================ ==================================================================
-Property Name                                    Description
+Property name                                    Description
 ================================================ ==================================================================
 ``elasticsearch.auth.user``                      User name to use to connect to Elasticsearch.
 ``elasticsearch.auth.password``                  Password to use to connect to Elasticsearch.
@@ -446,3 +420,54 @@ SQL support
 The connector provides :ref:`globally available <sql-globally-available>` and
 :ref:`read operation <sql-read-operations>` statements to access data and
 metadata in the Elasticsearch catalog.
+
+Table functions
+---------------
+
+The connector provides specific :doc:`table functions </functions/table>` to
+access Elasticsearch.
+
+.. _elasticsearch-raw-query-function:
+
+``raw_query(varchar) -> table``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The ``raw_query`` function allows you to query the underlying database directly.
+This function requires `Elastic Query DSL
+<https://www.elastic.co/guide/en/elasticsearch/reference/current/query-dsl.html>`_
+syntax, because the full query is pushed down and processed in Elasticsearch.
+This can be useful for accessing native features which are not available in
+Trino or for improving query performance in situations where running a query
+natively may be faster.
+
+.. include:: polymorphic-table-function-ordering.fragment
+
+The ``raw_query`` function requires three parameters:
+
+* ``schema``: The schema in the catalog that the query is to be executed on.
+* ``index``: The index in Elasticsearch to be searched.
+* ``query``: The query to be executed, written in Elastic Query DSL.
+
+Once executed, the query returns a single row containing the resulting JSON
+payload returned by Elasticsearch.
+
+For example, query the ``example`` catalog and use the ``raw_query`` table
+function to search for documents in the ``orders`` index where the country name
+is ``ALGERIA``::
+
+    SELECT
+      *
+    FROM
+      TABLE(
+        example.system.raw_query(
+          schema => 'sales',
+          index => 'orders',
+          query => '{
+            "query": {
+              "match": {
+                "name": "ALGERIA"
+              }
+            }
+          }'
+        )
+      );

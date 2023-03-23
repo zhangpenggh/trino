@@ -43,7 +43,6 @@ import static com.google.common.util.concurrent.MoreExecutors.newDirectExecutorS
 import static io.airlift.concurrent.MoreFutures.getFutureValue;
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.airlift.testing.Closeables.closeAll;
-import static io.trino.spi.connector.NotPartitionedPartitionHandle.NOT_PARTITIONED;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.spi.type.VarcharType.createVarcharType;
@@ -91,6 +90,8 @@ public class TestJdbcRecordSetProvider
         closeAll(
                 database,
                 () -> executor.shutdownNow());
+        database = null;
+        executor = null;
     }
 
     @Test
@@ -116,7 +117,7 @@ public class TestJdbcRecordSetProvider
                 .put("ten", 10L)
                 .put("eleven", 11L)
                 .put("twelve", 12L)
-                .build());
+                .buildOrThrow());
     }
 
     @Test
@@ -195,14 +196,16 @@ public class TestJdbcRecordSetProvider
         jdbcTableHandle = new JdbcTableHandle(
                 jdbcTableHandle.getRelationHandle(),
                 domain,
+                ImmutableList.of(),
                 Optional.empty(),
                 OptionalLong.empty(),
                 Optional.empty(),
                 jdbcTableHandle.getOtherReferencedTables(),
-                jdbcTableHandle.getNextSyntheticColumnId());
+                jdbcTableHandle.getNextSyntheticColumnId(),
+                Optional.empty());
 
         ConnectorSplitSource splits = jdbcClient.getSplits(SESSION, jdbcTableHandle);
-        JdbcSplit split = (JdbcSplit) getOnlyElement(getFutureValue(splits.getNextBatch(NOT_PARTITIONED, 1000)).getSplits());
+        JdbcSplit split = (JdbcSplit) getOnlyElement(getFutureValue(splits.getNextBatch(1000)).getSplits());
 
         ConnectorTransactionHandle transaction = new JdbcTransactionHandle();
         JdbcRecordSetProvider recordSetProvider = new JdbcRecordSetProvider(jdbcClient, executor);

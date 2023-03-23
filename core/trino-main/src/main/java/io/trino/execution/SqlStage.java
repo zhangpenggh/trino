@@ -15,6 +15,7 @@ package io.trino.execution;
 
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Multimap;
+import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
 import io.trino.Session;
 import io.trino.execution.StateMachine.StateChangeListener;
@@ -80,22 +81,22 @@ public final class SqlStage
             Session session,
             boolean summarizeTaskInfo,
             NodeTaskMap nodeTaskMap,
-            Executor executor,
+            Executor stateMachineExecutor,
             SplitSchedulerStats schedulerStats)
     {
         requireNonNull(stageId, "stageId is null");
         requireNonNull(fragment, "fragment is null");
-        checkArgument(fragment.getPartitioningScheme().getBucketToPartition().isEmpty(), "bucket to partition is not expected to be set at this point");
+        checkArgument(fragment.getOutputPartitioningScheme().getBucketToPartition().isEmpty(), "bucket to partition is not expected to be set at this point");
         requireNonNull(tables, "tables is null");
         requireNonNull(remoteTaskFactory, "remoteTaskFactory is null");
         requireNonNull(session, "session is null");
         requireNonNull(nodeTaskMap, "nodeTaskMap is null");
-        requireNonNull(executor, "executor is null");
+        requireNonNull(stateMachineExecutor, "stateMachineExecutor is null");
         requireNonNull(schedulerStats, "schedulerStats is null");
 
         SqlStage sqlStage = new SqlStage(
                 session,
-                new StageStateMachine(stageId, fragment, tables, executor, schedulerStats),
+                new StageStateMachine(stageId, fragment, tables, stateMachineExecutor, schedulerStats),
                 remoteTaskFactory,
                 nodeTaskMap,
                 summarizeTaskInfo);
@@ -135,23 +136,37 @@ public final class SqlStage
         return stateMachine.getStageId();
     }
 
+    public StageState getState()
+    {
+        return stateMachine.getState();
+    }
+
     public synchronized void finish()
     {
-        stateMachine.transitionToFinished();
-        tasks.values().forEach(RemoteTask::cancel);
+        if (stateMachine.transitionToFinished()) {
+            tasks.values().forEach(RemoteTask::cancel);
+        }
     }
 
     public synchronized void abort()
     {
-        stateMachine.transitionToAborted();
-        tasks.values().forEach(RemoteTask::abort);
+        if (stateMachine.transitionToAborted()) {
+            tasks.values().forEach(RemoteTask::abort);
+        }
     }
 
     public synchronized void fail(Throwable throwable)
     {
         requireNonNull(throwable, "throwable is null");
-        stateMachine.transitionToFailed(throwable);
-        tasks.values().forEach(RemoteTask::abort);
+        if (stateMachine.transitionToFailed(throwable)) {
+            tasks.values().forEach(RemoteTask::abort);
+        }
+    }
+
+    public void failTaskRemotely(TaskId taskId, Throwable failureCause)
+    {
+        RemoteTask task = requireNonNull(tasks.get(taskId), () -> "task not found: " + taskId);
+        task.failRemotely(failureCause);
     }
 
     /**
@@ -212,8 +227,8 @@ public final class SqlStage
             Optional<int[]> bucketToPartition,
             OutputBuffers outputBuffers,
             Multimap<PlanNodeId, Split> splits,
-            Multimap<PlanNodeId, Lifespan> noMoreSplitsForLifespan,
-            Set<PlanNodeId> noMoreSplits)
+            Set<PlanNodeId> noMoreSplits,
+            Optional<DataSize> estimatedMemory)
     {
         if (stateMachine.getState().isDone()) {
             return Optional.empty();
@@ -232,9 +247,9 @@ public final class SqlStage
                 outputBuffers,
                 nodeTaskMap.createPartitionedSplitCountTracker(node, taskId),
                 outboundDynamicFilterIds,
+                estimatedMemory,
                 summarizeTaskInfo);
 
-        noMoreSplitsForLifespan.forEach(task::noMoreSplits);
         noMoreSplits.forEach(task::noMoreSplits);
 
         tasks.put(taskId, task);
@@ -292,22 +307,31 @@ public final class SqlStage
             implements StateChangeListener<TaskStatus>
     {
         private long previousUserMemory;
-        private long previousSystemMemory;
         private long previousRevocableMemory;
+        private boolean finalUsageReported;
 
         @Override
         public synchronized void stateChanged(TaskStatus taskStatus)
         {
+            if (finalUsageReported) {
+                return;
+            }
             long currentUserMemory = taskStatus.getMemoryReservation().toBytes();
-            long currentSystemMemory = taskStatus.getSystemMemoryReservation().toBytes();
             long currentRevocableMemory = taskStatus.getRevocableMemoryReservation().toBytes();
             long deltaUserMemoryInBytes = currentUserMemory - previousUserMemory;
             long deltaRevocableMemoryInBytes = currentRevocableMemory - previousRevocableMemory;
-            long deltaTotalMemoryInBytes = (currentUserMemory + currentSystemMemory + currentRevocableMemory) - (previousUserMemory + previousSystemMemory + previousRevocableMemory);
+            long deltaTotalMemoryInBytes = (currentUserMemory + currentRevocableMemory) - (previousUserMemory + previousRevocableMemory);
             previousUserMemory = currentUserMemory;
-            previousSystemMemory = currentSystemMemory;
             previousRevocableMemory = currentRevocableMemory;
             stateMachine.updateMemoryUsage(deltaUserMemoryInBytes, deltaRevocableMemoryInBytes, deltaTotalMemoryInBytes);
+
+            if (taskStatus.getState().isDone()) {
+                // if task is finished perform final memory update to 0
+                stateMachine.updateMemoryUsage(-currentUserMemory, -currentRevocableMemory, -(currentUserMemory + currentRevocableMemory));
+                previousUserMemory = 0;
+                previousRevocableMemory = 0;
+                finalUsageReported = true;
+            }
         }
     }
 }

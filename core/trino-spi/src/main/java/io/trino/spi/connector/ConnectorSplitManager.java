@@ -13,43 +13,29 @@
  */
 package io.trino.spi.connector;
 
+import io.trino.spi.Experimental;
+import io.trino.spi.function.SchemaFunctionName;
+import io.trino.spi.ptf.ConnectorTableFunctionHandle;
+
 public interface ConnectorSplitManager
 {
-    @Deprecated
-    default ConnectorSplitSource getSplits(
-            ConnectorTransactionHandle transactionHandle,
-            ConnectorSession session,
-            ConnectorTableLayoutHandle layout,
-            SplitSchedulingStrategy splitSchedulingStrategy)
-    {
-        throw new UnsupportedOperationException();
-    }
-
-    @Deprecated
     default ConnectorSplitSource getSplits(
             ConnectorTransactionHandle transaction,
             ConnectorSession session,
             ConnectorTableHandle table,
-            SplitSchedulingStrategy splitSchedulingStrategy,
-            DynamicFilter dynamicFilter)
-    {
-        throw new UnsupportedOperationException();
-    }
-
-    default ConnectorSplitSource getSplits(
-            ConnectorTransactionHandle transaction,
-            ConnectorSession session,
-            ConnectorTableHandle table,
-            SplitSchedulingStrategy splitSchedulingStrategy,
             DynamicFilter dynamicFilter,
             Constraint constraint)
     {
-        return getSplits(transaction, session, table, splitSchedulingStrategy, dynamicFilter);
+        throw new UnsupportedOperationException();
     }
 
-    enum SplitSchedulingStrategy
+    @Experimental(eta = "2023-03-31")
+    default ConnectorSplitSource getSplits(
+            ConnectorTransactionHandle transaction,
+            ConnectorSession session,
+            SchemaFunctionName name,
+            ConnectorTableFunctionHandle function)
     {
-        UNGROUPED_SCHEDULING,
-        GROUPED_SCHEDULING,
+        throw new UnsupportedOperationException();
     }
 }

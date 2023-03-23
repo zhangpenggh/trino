@@ -29,7 +29,6 @@ import io.trino.spi.block.Block;
 import io.trino.spi.type.MapType;
 import io.trino.spi.type.Type;
 import it.unimi.dsi.fastutil.ints.IntArrayList;
-import org.openjdk.jol.info.ClassLayout;
 
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
@@ -40,6 +39,7 @@ import java.time.ZoneId;
 import java.util.Optional;
 
 import static com.google.common.base.MoreObjects.toStringHelper;
+import static io.airlift.slice.SizeOf.instanceSize;
 import static io.trino.orc.OrcReader.fullyProjectedLayout;
 import static io.trino.orc.metadata.Stream.StreamKind.LENGTH;
 import static io.trino.orc.metadata.Stream.StreamKind.PRESENT;
@@ -54,7 +54,7 @@ import static java.util.Objects.requireNonNull;
 public class MapColumnReader
         implements ColumnReader
 {
-    private static final int INSTANCE_SIZE = ClassLayout.parseClass(MapColumnReader.class).instanceSize();
+    private static final int INSTANCE_SIZE = instanceSize(MapColumnReader.class);
 
     private final MapType type;
     private final OrcColumn column;
@@ -78,7 +78,7 @@ public class MapColumnReader
 
     private boolean rowGroupOpen;
 
-    public MapColumnReader(Type type, OrcColumn column, AggregatedMemoryContext systemMemoryContext, OrcBlockFactory blockFactory, FieldMapperFactory fieldMapperFactory)
+    public MapColumnReader(Type type, OrcColumn column, AggregatedMemoryContext memoryContext, OrcBlockFactory blockFactory, FieldMapperFactory fieldMapperFactory)
             throws OrcCorruptionException
     {
         requireNonNull(type, "type is null");
@@ -91,14 +91,14 @@ public class MapColumnReader
                 this.type.getKeyType(),
                 column.getNestedColumns().get(0),
                 fullyProjectedLayout(),
-                systemMemoryContext,
+                memoryContext,
                 blockFactory,
                 fieldMapperFactory);
         this.valueColumnReader = createColumnReader(
                 this.type.getValueType(),
                 column.getNestedColumns().get(1),
                 fullyProjectedLayout(),
-                systemMemoryContext,
+                memoryContext,
                 blockFactory,
                 fieldMapperFactory);
     }

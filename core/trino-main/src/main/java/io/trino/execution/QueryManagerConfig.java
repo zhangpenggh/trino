@@ -29,6 +29,8 @@ import javax.validation.constraints.NotNull;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 
+import static com.google.common.base.Preconditions.checkArgument;
+import static io.airlift.units.DataSize.Unit.GIGABYTE;
 import static java.util.concurrent.TimeUnit.MINUTES;
 import static java.util.concurrent.TimeUnit.SECONDS;
 
@@ -43,26 +45,36 @@ import static java.util.concurrent.TimeUnit.SECONDS;
         "query.remote-task.max-consecutive-error-count"})
 public class QueryManagerConfig
 {
+    public static final long AVAILABLE_HEAP_MEMORY = Runtime.getRuntime().maxMemory();
+    public static final int MAX_TASK_RETRY_ATTEMPTS = 126;
+
     private int scheduleSplitBatchSize = 1000;
     private int minScheduleSplitBatchSize = 100;
     private int maxConcurrentQueries = 1000;
     private int maxQueuedQueries = 5000;
 
-    private int initialHashPartitions = 100;
+    private int maxHashPartitionCount = 100;
+    private int minHashPartitionCount = 4;
+    private int maxWriterTasksCount = 100;
     private Duration minQueryExpireAge = new Duration(15, TimeUnit.MINUTES);
     private int maxQueryHistory = 100;
     private int maxQueryLength = 1_000_000;
-    private int maxStageCount = 100;
+    private int maxStageCount = 150;
     private int stageCountWarningThreshold = 50;
 
     private Duration clientTimeout = new Duration(5, TimeUnit.MINUTES);
 
     private int queryManagerExecutorPoolSize = 5;
+    private int queryExecutorPoolSize = 1000;
+    private int maxStateMachineCallbackThreads = 5;
 
+    /**
+     * default value is overwritten for fault tolerant execution in {@link #applyFaultTolerantExecutionDefaults()}
+     */
     private Duration remoteTaskMaxErrorDuration = new Duration(5, TimeUnit.MINUTES);
     private int remoteTaskMaxCallbackThreads = 1000;
 
-    private String queryExecutionPolicy = "all-at-once";
+    private String queryExecutionPolicy = "phased";
     private Duration queryMaxRunTime = new Duration(100, TimeUnit.DAYS);
     private Duration queryMaxExecutionTime = new Duration(100, TimeUnit.DAYS);
     private Duration queryMaxPlanningTime = new Duration(10, TimeUnit.MINUTES);
@@ -73,9 +85,27 @@ public class QueryManagerConfig
     private Duration requiredWorkersMaxWait = new Duration(5, TimeUnit.MINUTES);
 
     private RetryPolicy retryPolicy = RetryPolicy.NONE;
-    private int retryAttempts = 4;
+    private int queryRetryAttempts = 4;
+    private int taskRetryAttemptsPerTask = 4;
     private Duration retryInitialDelay = new Duration(10, SECONDS);
     private Duration retryMaxDelay = new Duration(1, MINUTES);
+    private double retryDelayScaleFactor = 2.0;
+
+    private int maxTasksWaitingForExecutionPerQuery = 10;
+    private int maxTasksWaitingForNodePerStage = 5;
+
+    private boolean enabledAdaptiveTaskRequestSize = true;
+    private DataSize maxRemoteTaskRequestSize = DataSize.of(8, DataSize.Unit.MEGABYTE);
+    private DataSize remoteTaskRequestSizeHeadroom = DataSize.of(2, DataSize.Unit.MEGABYTE);
+    private int remoteTaskGuaranteedSplitPerTask = 3;
+
+    private DataSize faultTolerantExecutionTargetTaskInputSize = DataSize.of(4, GIGABYTE);
+
+    private int faultTolerantExecutionTargetTaskSplitCount = 64;
+    private int faultTolerantExecutionMaxTaskSplitCount = 256;
+    private DataSize faultTolerantExecutionTaskDescriptorStorageMaxMemory = DataSize.ofBytes(Math.round(AVAILABLE_HEAP_MEMORY * 0.15));
+    private int faultTolerantExecutionPartitionCount = 50;
+    private boolean faultTolerantExecutionForcePreferredWritePartitioningEnabled = true;
 
     @Min(1)
     public int getScheduleSplitBatchSize()
@@ -134,15 +164,45 @@ public class QueryManagerConfig
     }
 
     @Min(1)
-    public int getInitialHashPartitions()
+    public int getMaxHashPartitionCount()
     {
-        return initialHashPartitions;
+        return maxHashPartitionCount;
     }
 
-    @Config("query.initial-hash-partitions")
-    public QueryManagerConfig setInitialHashPartitions(int initialHashPartitions)
+    @Config("query.max-hash-partition-count")
+    @LegacyConfig({"query.initial-hash-partitions", "query.hash-partition-count"})
+    @ConfigDescription("Maximum number of partitions for distributed joins and aggregations")
+    public QueryManagerConfig setMaxHashPartitionCount(int maxHashPartitionCount)
     {
-        this.initialHashPartitions = initialHashPartitions;
+        this.maxHashPartitionCount = maxHashPartitionCount;
+        return this;
+    }
+
+    @Min(1)
+    public int getMinHashPartitionCount()
+    {
+        return minHashPartitionCount;
+    }
+
+    @Config("query.min-hash-partition-count")
+    @ConfigDescription("Minimum number of partitions for distributed joins and aggregations")
+    public QueryManagerConfig setMinHashPartitionCount(int minHashPartitionCount)
+    {
+        this.minHashPartitionCount = minHashPartitionCount;
+        return this;
+    }
+
+    @Min(1)
+    public int getMaxWriterTasksCount()
+    {
+        return maxWriterTasksCount;
+    }
+
+    @Config("query.max-writer-task-count")
+    @ConfigDescription("Maximum number of tasks that will participate in writing data")
+    public QueryManagerConfig setMaxWriterTasksCount(int maxWritersNodesCount)
+    {
+        this.maxWriterTasksCount = maxWritersNodesCount;
         return this;
     }
 
@@ -238,6 +298,33 @@ public class QueryManagerConfig
     public QueryManagerConfig setQueryManagerExecutorPoolSize(int queryManagerExecutorPoolSize)
     {
         this.queryManagerExecutorPoolSize = queryManagerExecutorPoolSize;
+        return this;
+    }
+
+    @Min(1)
+    public int getQueryExecutorPoolSize()
+    {
+        return queryExecutorPoolSize;
+    }
+
+    @Config("query.executor-pool-size")
+    public QueryManagerConfig setQueryExecutorPoolSize(int queryExecutorPoolSize)
+    {
+        this.queryExecutorPoolSize = queryExecutorPoolSize;
+        return this;
+    }
+
+    @Min(1)
+    public int getMaxStateMachineCallbackThreads()
+    {
+        return maxStateMachineCallbackThreads;
+    }
+
+    @Config("query.max-state-machine-callback-threads")
+    @ConfigDescription("The maximum number of threads allowed to run query and stage state machine listener callbacks concurrently for each query")
+    public QueryManagerConfig setMaxStateMachineCallbackThreads(int maxStateMachineCallbackThreads)
+    {
+        this.maxStateMachineCallbackThreads = maxStateMachineCallbackThreads;
         return this;
     }
 
@@ -402,15 +489,30 @@ public class QueryManagerConfig
     }
 
     @Min(0)
-    public int getRetryAttempts()
+    public int getQueryRetryAttempts()
     {
-        return retryAttempts;
+        return queryRetryAttempts;
     }
 
-    @Config("retry-attempts")
-    public QueryManagerConfig setRetryAttempts(int retryAttempts)
+    @Config("query-retry-attempts")
+    @LegacyConfig("retry-attempts")
+    public QueryManagerConfig setQueryRetryAttempts(int queryRetryAttempts)
     {
-        this.retryAttempts = retryAttempts;
+        this.queryRetryAttempts = queryRetryAttempts;
+        return this;
+    }
+
+    @Min(0)
+    @Max(MAX_TASK_RETRY_ATTEMPTS)
+    public int getTaskRetryAttemptsPerTask()
+    {
+        return taskRetryAttemptsPerTask;
+    }
+
+    @Config("task-retry-attempts-per-task")
+    public QueryManagerConfig setTaskRetryAttemptsPerTask(int taskRetryAttemptsPerTask)
+    {
+        this.taskRetryAttemptsPerTask = taskRetryAttemptsPerTask;
         return this;
     }
 
@@ -440,5 +542,186 @@ public class QueryManagerConfig
     {
         this.retryMaxDelay = retryMaxDelay;
         return this;
+    }
+
+    @NotNull
+    public double getRetryDelayScaleFactor()
+    {
+        return retryDelayScaleFactor;
+    }
+
+    @Config("retry-delay-scale-factor")
+    @ConfigDescription("Factor by which retry delay is scaled on subsequent failures")
+    public QueryManagerConfig setRetryDelayScaleFactor(double retryDelayScaleFactor)
+    {
+        checkArgument(retryDelayScaleFactor >= 1.0, "retry-delay-scale-factor must be greater than or equal to 1");
+        this.retryDelayScaleFactor = retryDelayScaleFactor;
+        return this;
+    }
+
+    @Min(1)
+    public int getMaxTasksWaitingForExecutionPerQuery()
+    {
+        return maxTasksWaitingForExecutionPerQuery;
+    }
+
+    @Config("max-tasks-waiting-for-execution-per-query")
+    @ConfigDescription("Maximum number of tasks waiting to be scheduled per query. Split enumeration is paused by the scheduler when this threshold is crossed")
+    public QueryManagerConfig setMaxTasksWaitingForExecutionPerQuery(int maxTasksWaitingForExecutionPerQuery)
+    {
+        this.maxTasksWaitingForExecutionPerQuery = maxTasksWaitingForExecutionPerQuery;
+        return this;
+    }
+
+    @Min(1)
+    public int getMaxTasksWaitingForNodePerStage()
+    {
+        return maxTasksWaitingForNodePerStage;
+    }
+
+    @Config("max-tasks-waiting-for-node-per-stage")
+    @ConfigDescription("Maximum possible number of tasks waiting for node allocation per stage before scheduling of new tasks for stage is paused")
+    public QueryManagerConfig setMaxTasksWaitingForNodePerStage(int maxTasksWaitingForNodePerStage)
+    {
+        this.maxTasksWaitingForNodePerStage = maxTasksWaitingForNodePerStage;
+        return this;
+    }
+
+    public boolean isEnabledAdaptiveTaskRequestSize()
+    {
+        return enabledAdaptiveTaskRequestSize;
+    }
+
+    @Config("query.remote-task.enable-adaptive-request-size")
+    public QueryManagerConfig setEnabledAdaptiveTaskRequestSize(boolean enabledAdaptiveTaskRequestSize)
+    {
+        this.enabledAdaptiveTaskRequestSize = enabledAdaptiveTaskRequestSize;
+        return this;
+    }
+
+    @NotNull
+    public DataSize getMaxRemoteTaskRequestSize()
+    {
+        return maxRemoteTaskRequestSize;
+    }
+
+    @Config("query.remote-task.max-request-size")
+    public QueryManagerConfig setMaxRemoteTaskRequestSize(DataSize maxRemoteTaskRequestSize)
+    {
+        this.maxRemoteTaskRequestSize = maxRemoteTaskRequestSize;
+        return this;
+    }
+
+    @NotNull
+    public DataSize getRemoteTaskRequestSizeHeadroom()
+    {
+        return remoteTaskRequestSizeHeadroom;
+    }
+
+    @Config("query.remote-task.request-size-headroom")
+    public QueryManagerConfig setRemoteTaskRequestSizeHeadroom(DataSize remoteTaskRequestSizeHeadroom)
+    {
+        this.remoteTaskRequestSizeHeadroom = remoteTaskRequestSizeHeadroom;
+        return this;
+    }
+
+    @Min(1)
+    public int getRemoteTaskGuaranteedSplitPerTask()
+    {
+        return remoteTaskGuaranteedSplitPerTask;
+    }
+
+    @Config("query.remote-task.guaranteed-splits-per-task")
+    public QueryManagerConfig setRemoteTaskGuaranteedSplitPerTask(int remoteTaskGuaranteedSplitPerTask)
+    {
+        this.remoteTaskGuaranteedSplitPerTask = remoteTaskGuaranteedSplitPerTask;
+        return this;
+    }
+
+    @NotNull
+    public DataSize getFaultTolerantExecutionTargetTaskInputSize()
+    {
+        return faultTolerantExecutionTargetTaskInputSize;
+    }
+
+    @Config("fault-tolerant-execution-target-task-input-size")
+    @ConfigDescription("Target size in bytes of all task inputs for a single fault tolerant task")
+    public QueryManagerConfig setFaultTolerantExecutionTargetTaskInputSize(DataSize faultTolerantExecutionTargetTaskInputSize)
+    {
+        this.faultTolerantExecutionTargetTaskInputSize = faultTolerantExecutionTargetTaskInputSize;
+        return this;
+    }
+
+    @Min(1)
+    public int getFaultTolerantExecutionTargetTaskSplitCount()
+    {
+        return faultTolerantExecutionTargetTaskSplitCount;
+    }
+
+    @Config("fault-tolerant-execution-target-task-split-count")
+    @ConfigDescription("Target number of splits for a single fault tolerant task (split weight aware)")
+    public QueryManagerConfig setFaultTolerantExecutionTargetTaskSplitCount(int faultTolerantExecutionTargetTaskSplitCount)
+    {
+        this.faultTolerantExecutionTargetTaskSplitCount = faultTolerantExecutionTargetTaskSplitCount;
+        return this;
+    }
+
+    @Min(1)
+    public int getFaultTolerantExecutionMaxTaskSplitCount()
+    {
+        return faultTolerantExecutionMaxTaskSplitCount;
+    }
+
+    @Config("fault-tolerant-execution-max-task-split-count")
+    @ConfigDescription("Maximal number of splits for a single fault tolerant task (count based)")
+    public QueryManagerConfig setFaultTolerantExecutionMaxTaskSplitCount(int faultTolerantExecutionMaxTaskSplitCount)
+    {
+        this.faultTolerantExecutionMaxTaskSplitCount = faultTolerantExecutionMaxTaskSplitCount;
+        return this;
+    }
+
+    @NotNull
+    public DataSize getFaultTolerantExecutionTaskDescriptorStorageMaxMemory()
+    {
+        return faultTolerantExecutionTaskDescriptorStorageMaxMemory;
+    }
+
+    @Config("fault-tolerant-execution-task-descriptor-storage-max-memory")
+    @ConfigDescription("Maximum amount of memory to be used to store task descriptors for fault tolerant queries on coordinator")
+    public QueryManagerConfig setFaultTolerantExecutionTaskDescriptorStorageMaxMemory(DataSize faultTolerantExecutionTaskDescriptorStorageMaxMemory)
+    {
+        this.faultTolerantExecutionTaskDescriptorStorageMaxMemory = faultTolerantExecutionTaskDescriptorStorageMaxMemory;
+        return this;
+    }
+
+    @Min(1)
+    public int getFaultTolerantExecutionPartitionCount()
+    {
+        return faultTolerantExecutionPartitionCount;
+    }
+
+    @Config("fault-tolerant-execution-partition-count")
+    @ConfigDescription("Number of partitions for distributed joins and aggregations executed with fault tolerant execution enabled")
+    public QueryManagerConfig setFaultTolerantExecutionPartitionCount(int faultTolerantExecutionPartitionCount)
+    {
+        this.faultTolerantExecutionPartitionCount = faultTolerantExecutionPartitionCount;
+        return this;
+    }
+
+    public boolean isFaultTolerantExecutionForcePreferredWritePartitioningEnabled()
+    {
+        return faultTolerantExecutionForcePreferredWritePartitioningEnabled;
+    }
+
+    @Config("experimental.fault-tolerant-execution-force-preferred-write-partitioning-enabled")
+    public QueryManagerConfig setFaultTolerantExecutionForcePreferredWritePartitioningEnabled(boolean faultTolerantExecutionForcePreferredWritePartitioningEnabled)
+    {
+        this.faultTolerantExecutionForcePreferredWritePartitioningEnabled = faultTolerantExecutionForcePreferredWritePartitioningEnabled;
+        return this;
+    }
+
+    public void applyFaultTolerantExecutionDefaults()
+    {
+        remoteTaskMaxErrorDuration = new Duration(1, MINUTES);
     }
 }

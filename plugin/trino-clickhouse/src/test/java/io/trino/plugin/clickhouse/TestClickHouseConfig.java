@@ -48,9 +48,9 @@ public class TestClickHouseConfig
     @Test
     public void testExplicitPropertyMappings()
     {
-        Map<String, String> properties = new ImmutableMap.Builder<String, String>()
+        Map<String, String> properties = ImmutableMap.<String, String>builder()
                 .put("clickhouse.map-string-as-varchar", "true")
-                .build();
+                .buildOrThrow();
 
         ClickHouseConfig expected = new ClickHouseConfig()
                 .setMapStringAsVarchar(true);

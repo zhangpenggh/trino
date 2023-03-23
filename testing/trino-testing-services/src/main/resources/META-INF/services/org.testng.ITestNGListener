@@ -1,3 +1,4 @@
+io.trino.testng.services.ManageTestResources
 io.trino.testng.services.ReportOrphanedExecutors
 io.trino.testng.services.ReportPrivateMethods
 io.trino.testng.services.ReportUnannotatedMethods
@@ -7,3 +8,4 @@ io.trino.testng.services.LogTestDurationListener
 io.trino.testng.services.RetryAnnotationTransformer
 io.trino.testng.services.FlakyAnnotationVerifier
 io.trino.testng.services.ProgressLoggingListener
+io.trino.testng.services.ReportInnerTestClasses

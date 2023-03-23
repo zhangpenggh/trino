@@ -13,16 +13,13 @@
  */
 package io.trino.parquet.reader;
 
-import io.airlift.slice.Slice;
-import io.trino.parquet.RichColumnDescriptor;
+import io.trino.parquet.PrimitiveField;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.type.DecimalType;
-import io.trino.spi.type.Decimals;
+import io.trino.spi.type.Int128;
 import io.trino.spi.type.Type;
 import org.apache.parquet.io.ParquetDecodingException;
 import org.apache.parquet.io.api.Binary;
-
-import java.math.BigInteger;
 
 import static io.trino.spi.type.DecimalConversions.longToLongCast;
 import static io.trino.spi.type.DecimalConversions.longToShortCast;
@@ -34,23 +31,21 @@ public class LongDecimalColumnReader
 {
     private final DecimalType parquetDecimalType;
 
-    LongDecimalColumnReader(RichColumnDescriptor descriptor, DecimalType parquetDecimalType)
+    LongDecimalColumnReader(PrimitiveField field, DecimalType parquetDecimalType)
     {
-        super(descriptor);
+        super(field);
         this.parquetDecimalType = requireNonNull(parquetDecimalType, "parquetDecimalType is null");
     }
 
     @Override
     protected void readValue(BlockBuilder blockBuilder, Type trinoType)
     {
-        if (!(trinoType instanceof DecimalType)) {
-            throw new ParquetDecodingException(format("Unsupported Trino column type (%s) for Parquet column (%s)", trinoType, columnDescriptor));
+        if (!(trinoType instanceof DecimalType trinoDecimalType)) {
+            throw new ParquetDecodingException(format("Unsupported Trino column type (%s) for Parquet column (%s)", trinoType, field.getDescriptor()));
         }
 
-        DecimalType trinoDecimalType = (DecimalType) trinoType;
-
         Binary binary = valuesReader.readBytes();
-        Slice value = Decimals.encodeUnscaledValue(new BigInteger(binary.getBytes()));
+        Int128 value = Int128.fromBigEndian(binary.getBytes());
 
         if (trinoDecimalType.isShort()) {
             trinoType.writeLong(blockBuilder, longToShortCast(
@@ -61,7 +56,7 @@ public class LongDecimalColumnReader
                     trinoDecimalType.getScale()));
         }
         else {
-            trinoType.writeSlice(blockBuilder, longToLongCast(
+            trinoType.writeObject(blockBuilder, longToLongCast(
                     value,
                     parquetDecimalType.getPrecision(),
                     parquetDecimalType.getScale(),

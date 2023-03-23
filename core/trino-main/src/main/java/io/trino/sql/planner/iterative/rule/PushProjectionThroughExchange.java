@@ -172,7 +172,8 @@ public class PushProjectionThroughExchange
                 outputBuilder.build(),
                 exchange.getPartitioningScheme().getHashColumn(),
                 exchange.getPartitioningScheme().isReplicateNullsAndAny(),
-                exchange.getPartitioningScheme().getBucketToPartition());
+                exchange.getPartitioningScheme().getBucketToPartition(),
+                exchange.getPartitioningScheme().getPartitionCount());
 
         PlanNode result = new ExchangeNode(
                 exchange.getId(),
@@ -198,6 +199,6 @@ public class PushProjectionThroughExchange
         for (int i = 0; i < exchange.getOutputSymbols().size(); i++) {
             outputToInputMap.put(exchange.getOutputSymbols().get(i), exchange.getInputs().get(sourceIndex).get(i));
         }
-        return outputToInputMap.build();
+        return outputToInputMap.buildOrThrow();
     }
 }

@@ -37,6 +37,7 @@ import io.trino.spi.type.DateType;
 import io.trino.spi.type.DecimalType;
 import io.trino.spi.type.Decimals;
 import io.trino.spi.type.DoubleType;
+import io.trino.spi.type.Int128;
 import io.trino.spi.type.IntegerType;
 import io.trino.spi.type.LongTimestamp;
 import io.trino.spi.type.MapType;
@@ -81,9 +82,6 @@ import static io.trino.spi.StandardErrorCode.INVALID_FUNCTION_ARGUMENT;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.spi.type.DateType.DATE;
-import static io.trino.spi.type.Decimals.decodeUnscaledValue;
-import static io.trino.spi.type.Decimals.encodeUnscaledValue;
-import static io.trino.spi.type.Decimals.isShortDecimal;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.RealType.REAL;
@@ -134,9 +132,7 @@ public final class JsonUtil
         if (json.length() <= MAX_JSON_LENGTH_IN_ERROR_MESSAGE) {
             return json.toStringUtf8();
         }
-        else {
-            return json.slice(0, MAX_JSON_LENGTH_IN_ERROR_MESSAGE).toStringUtf8() + "...(truncated)";
-        }
+        return json.slice(0, MAX_JSON_LENGTH_IN_ERROR_MESSAGE).toStringUtf8() + "...(truncated)";
     }
 
     public static boolean canCastToJson(Type type)
@@ -159,8 +155,7 @@ public final class JsonUtil
         if (type instanceof ArrayType) {
             return canCastToJson(((ArrayType) type).getElementType());
         }
-        if (type instanceof MapType) {
-            MapType mapType = (MapType) type;
+        if (type instanceof MapType mapType) {
             return (mapType.getKeyType() instanceof UnknownType ||
                     isValidJsonObjectKeyType(mapType.getKeyType())) &&
                     canCastToJson(mapType.getValueType());
@@ -232,13 +227,12 @@ public final class JsonUtil
             if (type instanceof DoubleType) {
                 return (block, position) -> String.valueOf(type.getDouble(block, position));
             }
-            if (type instanceof DecimalType) {
-                DecimalType decimalType = (DecimalType) type;
-                if (isShortDecimal(decimalType)) {
+            if (type instanceof DecimalType decimalType) {
+                if (decimalType.isShort()) {
                     return (block, position) -> Decimals.toString(decimalType.getLong(block, position), decimalType.getScale());
                 }
                 return (block, position) -> Decimals.toString(
-                        decodeUnscaledValue(type.getSlice(block, position)),
+                        ((Int128) type.getObject(block, position)).toBigInteger(),
                         decimalType.getScale());
             }
             if (type instanceof VarcharType) {
@@ -256,7 +250,7 @@ public final class JsonUtil
         void writeJsonValue(JsonGenerator jsonGenerator, Block block, int position)
                 throws IOException;
 
-        static JsonGeneratorWriter createJsonGeneratorWriter(Type type, boolean legacyRowToJson)
+        static JsonGeneratorWriter createJsonGeneratorWriter(Type type)
         {
             if (type instanceof UnknownType) {
                 return new UnknownJsonGeneratorWriter();
@@ -273,11 +267,11 @@ public final class JsonUtil
             if (type instanceof DoubleType) {
                 return new DoubleJsonGeneratorWriter();
             }
-            if (type instanceof DecimalType) {
-                if (isShortDecimal(type)) {
-                    return new ShortDecimalJsonGeneratorWriter((DecimalType) type);
+            if (type instanceof DecimalType decimalType) {
+                if (decimalType.isShort()) {
+                    return new ShortDecimalJsonGeneratorWriter(decimalType);
                 }
-                return new LongDeicmalJsonGeneratorWriter((DecimalType) type);
+                return new LongDecimalJsonGeneratorWriter(decimalType);
             }
             if (type instanceof VarcharType) {
                 return new VarcharJsonGeneratorWriter(type);
@@ -285,32 +279,30 @@ public final class JsonUtil
             if (type instanceof JsonType) {
                 return new JsonJsonGeneratorWriter();
             }
-            if (type instanceof TimestampType) {
-                return new TimestampJsonGeneratorWriter((TimestampType) type);
+            if (type instanceof TimestampType timestampType) {
+                return new TimestampJsonGeneratorWriter(timestampType);
             }
             if (type instanceof DateType) {
                 return new DateGeneratorWriter();
             }
-            if (type instanceof ArrayType) {
-                ArrayType arrayType = (ArrayType) type;
+            if (type instanceof ArrayType arrayType) {
                 return new ArrayJsonGeneratorWriter(
                         arrayType,
-                        createJsonGeneratorWriter(arrayType.getElementType(), legacyRowToJson));
+                        createJsonGeneratorWriter(arrayType.getElementType()));
             }
-            if (type instanceof MapType) {
-                MapType mapType = (MapType) type;
+            if (type instanceof MapType mapType) {
                 return new MapJsonGeneratorWriter(
                         mapType,
                         createObjectKeyProvider(mapType.getKeyType()),
-                        createJsonGeneratorWriter(mapType.getValueType(), legacyRowToJson));
+                        createJsonGeneratorWriter(mapType.getValueType()));
             }
-            if (type instanceof RowType) {
+            if (type instanceof RowType rowType) {
                 List<Type> fieldTypes = type.getTypeParameters();
                 List<JsonGeneratorWriter> fieldWriters = new ArrayList<>(fieldTypes.size());
                 for (int i = 0; i < fieldTypes.size(); i++) {
-                    fieldWriters.add(createJsonGeneratorWriter(fieldTypes.get(i), legacyRowToJson));
+                    fieldWriters.add(createJsonGeneratorWriter(fieldTypes.get(i)));
                 }
-                return new RowJsonGeneratorWriter((RowType) type, fieldWriters, legacyRowToJson);
+                return new RowJsonGeneratorWriter(rowType, fieldWriters);
             }
 
             throw new TrinoException(INVALID_FUNCTION_ARGUMENT, format("Unsupported type: %s", type));
@@ -427,12 +419,12 @@ public final class JsonUtil
         }
     }
 
-    private static class LongDeicmalJsonGeneratorWriter
+    private static class LongDecimalJsonGeneratorWriter
             implements JsonGeneratorWriter
     {
         private final DecimalType type;
 
-        public LongDeicmalJsonGeneratorWriter(DecimalType type)
+        public LongDecimalJsonGeneratorWriter(DecimalType type)
         {
             this.type = type;
         }
@@ -446,7 +438,7 @@ public final class JsonUtil
             }
             else {
                 BigDecimal value = new BigDecimal(
-                        decodeUnscaledValue(type.getSlice(block, position)),
+                        ((Int128) type.getObject(block, position)).toBigInteger(),
                         type.getScale());
                 jsonGenerator.writeNumber(value);
             }
@@ -621,13 +613,11 @@ public final class JsonUtil
     {
         private final RowType type;
         private final List<JsonGeneratorWriter> fieldWriters;
-        private final boolean legacyRowToJson;
 
-        public RowJsonGeneratorWriter(RowType type, List<JsonGeneratorWriter> fieldWriters, boolean legacyRowToJson)
+        public RowJsonGeneratorWriter(RowType type, List<JsonGeneratorWriter> fieldWriters)
         {
             this.type = type;
             this.fieldWriters = fieldWriters;
-            this.legacyRowToJson = legacyRowToJson;
         }
 
         @Override
@@ -640,22 +630,13 @@ public final class JsonUtil
             else {
                 Block rowBlock = type.getObject(block, position);
 
-                if (legacyRowToJson) {
-                    jsonGenerator.writeStartArray();
-                    for (int i = 0; i < rowBlock.getPositionCount(); i++) {
-                        fieldWriters.get(i).writeJsonValue(jsonGenerator, rowBlock, i);
-                    }
-                    jsonGenerator.writeEndArray();
+                List<TypeSignatureParameter> typeSignatureParameters = type.getTypeSignature().getParameters();
+                jsonGenerator.writeStartObject();
+                for (int i = 0; i < rowBlock.getPositionCount(); i++) {
+                    jsonGenerator.writeFieldName(typeSignatureParameters.get(i).getNamedTypeSignature().getName().orElse(""));
+                    fieldWriters.get(i).writeJsonValue(jsonGenerator, rowBlock, i);
                 }
-                else {
-                    List<TypeSignatureParameter> typeSignatureParameters = type.getTypeSignature().getParameters();
-                    jsonGenerator.writeStartObject();
-                    for (int i = 0; i < rowBlock.getPositionCount(); i++) {
-                        jsonGenerator.writeFieldName(typeSignatureParameters.get(i).getNamedTypeSignature().getName().orElse(""));
-                        fieldWriters.get(i).writeJsonValue(jsonGenerator, rowBlock, i);
-                    }
-                    jsonGenerator.writeEndObject();
-                }
+                jsonGenerator.writeEndObject();
             }
         }
     }
@@ -851,14 +832,14 @@ public final class JsonUtil
         return bigDecimal != null ? bigDecimal.unscaledValue().longValue() : null;
     }
 
-    public static Slice currentTokenAsLongDecimal(JsonParser parser, int precision, int scale)
+    public static Int128 currentTokenAsLongDecimal(JsonParser parser, int precision, int scale)
             throws IOException
     {
         BigDecimal bigDecimal = currentTokenAsJavaDecimal(parser, precision, scale);
         if (bigDecimal == null) {
             return null;
         }
-        return encodeUnscaledValue(bigDecimal.unscaledValue());
+        return Int128.valueOf(bigDecimal.unscaledValue());
     }
 
     // TODO: Instead of having BigDecimal as an intermediate step,
@@ -928,12 +909,12 @@ public final class JsonUtil
             if (type instanceof DoubleType) {
                 return new DoubleBlockBuilderAppender();
             }
-            if (type instanceof DecimalType) {
-                if (isShortDecimal(type)) {
-                    return new ShortDecimalBlockBuilderAppender((DecimalType) type);
+            if (type instanceof DecimalType decimalType) {
+                if (decimalType.isShort()) {
+                    return new ShortDecimalBlockBuilderAppender(decimalType);
                 }
 
-                return new LongDecimalBlockBuilderAppender((DecimalType) type);
+                return new LongDecimalBlockBuilderAppender(decimalType);
             }
             if (type instanceof VarcharType) {
                 return new VarcharBlockBuilderAppender(type);
@@ -944,18 +925,15 @@ public final class JsonUtil
                     JSON.writeSlice(blockBuilder, Slices.utf8Slice(json));
                 };
             }
-            if (type instanceof ArrayType) {
-                return new ArrayBlockBuilderAppender(createBlockBuilderAppender(((ArrayType) type).getElementType()));
+            if (type instanceof ArrayType arrayType) {
+                return new ArrayBlockBuilderAppender(createBlockBuilderAppender(arrayType.getElementType()));
             }
-            if (type instanceof MapType) {
-                MapType mapType = (MapType) type;
+            if (type instanceof MapType mapType) {
                 return new MapBlockBuilderAppender(
                         createBlockBuilderAppender(mapType.getKeyType()),
-                        createBlockBuilderAppender(mapType.getValueType()),
-                        mapType.getKeyType());
+                        createBlockBuilderAppender(mapType.getValueType()));
             }
-            if (type instanceof RowType) {
-                RowType rowType = (RowType) type;
+            if (type instanceof RowType rowType) {
                 List<Field> rowFields = rowType.getFields();
                 BlockBuilderAppender[] fieldAppenders = new BlockBuilderAppender[rowFields.size()];
                 for (int i = 0; i < fieldAppenders.length; i++) {
@@ -1126,13 +1104,13 @@ public final class JsonUtil
         public void append(JsonParser parser, BlockBuilder blockBuilder)
                 throws IOException
         {
-            Slice result = currentTokenAsLongDecimal(parser, type.getPrecision(), type.getScale());
+            Int128 result = currentTokenAsLongDecimal(parser, type.getPrecision(), type.getScale());
 
             if (result == null) {
                 blockBuilder.appendNull();
             }
             else {
-                type.writeSlice(blockBuilder, result);
+                type.writeObject(blockBuilder, result);
             }
         }
     }
@@ -1196,13 +1174,11 @@ public final class JsonUtil
     {
         final BlockBuilderAppender keyAppender;
         final BlockBuilderAppender valueAppender;
-        final Type keyType;
 
-        MapBlockBuilderAppender(BlockBuilderAppender keyAppender, BlockBuilderAppender valueAppender, Type keyType)
+        MapBlockBuilderAppender(BlockBuilderAppender keyAppender, BlockBuilderAppender valueAppender)
         {
             this.keyAppender = keyAppender;
             this.valueAppender = valueAppender;
-            this.keyType = keyType;
         }
 
         @Override

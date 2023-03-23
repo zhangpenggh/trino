@@ -28,6 +28,7 @@ import java.util.PriorityQueue;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import java.util.function.Function;
+import java.util.function.Supplier;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
@@ -110,7 +111,7 @@ public final class WorkProcessorUtils
     static <T> WorkProcessor<T> mergeSorted(Iterable<WorkProcessor<T>> processorIterable, Comparator<T> comparator)
     {
         requireNonNull(comparator, "comparator is null");
-        Iterator<WorkProcessor<T>> processorIterator = requireNonNull(processorIterable, "processorIterable is null").iterator();
+        Iterator<WorkProcessor<T>> processorIterator = processorIterable.iterator();
         checkArgument(processorIterator.hasNext(), "There must be at least one base processor");
         PriorityQueue<ElementAndProcessor<T>> queue = new PriorityQueue<>(2, comparing(ElementAndProcessor::getElement, comparator));
 
@@ -179,6 +180,46 @@ public final class WorkProcessorUtils
             lastProcessYielded = false;
 
             return getNextState(processor);
+        }
+    }
+
+    static <T> WorkProcessor<T> blocking(WorkProcessor<T> processor, Supplier<ListenableFuture<Void>> futureSupplier)
+    {
+        return WorkProcessor.create(new BlockingProcess<>(processor, futureSupplier));
+    }
+
+    private static class BlockingProcess<T>
+            implements WorkProcessor.Process<T>
+    {
+        final WorkProcessor<T> processor;
+        final Supplier<ListenableFuture<Void>> futureSupplier;
+        ProcessState<T> state;
+
+        BlockingProcess(WorkProcessor<T> processor, Supplier<ListenableFuture<Void>> futureSupplier)
+        {
+            this.processor = requireNonNull(processor, "processor is null");
+            this.futureSupplier = requireNonNull(futureSupplier, "futureSupplier is null");
+        }
+
+        @Override
+        public ProcessState<T> process()
+        {
+            if (state == null) {
+                state = getNextState(processor);
+            }
+
+            ListenableFuture<Void> future = futureSupplier.get();
+            if (!future.isDone()) {
+                if (state.getType() == ProcessState.Type.YIELD) {
+                    // clear yielded state to continue computations in the next iteration
+                    state = null;
+                }
+                return ProcessState.blocked(future);
+            }
+
+            ProcessState<T> result = state;
+            state = null;
+            return result;
         }
     }
 

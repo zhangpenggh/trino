@@ -34,6 +34,7 @@ import io.trino.spi.type.DateType;
 import io.trino.spi.type.DecimalType;
 import io.trino.spi.type.DoubleType;
 import io.trino.spi.type.FixedWidthType;
+import io.trino.spi.type.Int128;
 import io.trino.spi.type.IntegerType;
 import io.trino.spi.type.RealType;
 import io.trino.spi.type.SmallintType;
@@ -47,9 +48,6 @@ import java.util.Arrays;
 import java.util.List;
 
 import static com.google.common.base.Preconditions.checkArgument;
-import static io.trino.spi.type.Decimals.encodeScaledValue;
-import static io.trino.spi.type.Decimals.isLongDecimal;
-import static java.math.BigDecimal.ZERO;
 import static java.util.Objects.requireNonNull;
 
 public final class BlackHolePageSourceProvider
@@ -107,9 +105,6 @@ public final class BlackHolePageSourceProvider
         if (type instanceof VarcharType && !((VarcharType) type).isUnbounded()) {
             slice = constantSlice.slice(0, Math.min(((VarcharType) type).getBoundedLength(), constantSlice.length()));
         }
-        else if (isLongDecimal(type)) {
-            slice = encodeScaledValue(ZERO);
-        }
         else {
             slice = constantSlice;
         }
@@ -136,6 +131,9 @@ public final class BlackHolePageSourceProvider
             else if (javaType == Slice.class) {
                 requireNonNull(slice, "slice is null");
                 type.writeSlice(builder, slice, 0, slice.length());
+            }
+            else if (type instanceof DecimalType decimalType && !decimalType.isShort()) {
+                type.writeObject(builder, Int128.ZERO);
             }
             else {
                 throw new UnsupportedOperationException("Unknown javaType: " + javaType.getName());

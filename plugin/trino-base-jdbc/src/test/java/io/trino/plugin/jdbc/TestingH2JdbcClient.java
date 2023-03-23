@@ -14,8 +14,14 @@
 package io.trino.plugin.jdbc;
 
 import com.google.common.collect.ImmutableSet;
-import io.trino.plugin.base.expression.AggregateFunctionRewriter;
-import io.trino.plugin.jdbc.expression.ImplementCountAll;
+import dev.failsafe.Failsafe;
+import dev.failsafe.RetryPolicy;
+import io.airlift.log.Logger;
+import io.trino.plugin.base.aggregation.AggregateFunctionRewriter;
+import io.trino.plugin.jdbc.aggregation.ImplementCountAll;
+import io.trino.plugin.jdbc.expression.JdbcConnectorExpressionRewriterBuilder;
+import io.trino.plugin.jdbc.expression.RewriteVariable;
+import io.trino.plugin.jdbc.logging.RemoteQueryModifier;
 import io.trino.plugin.jdbc.mapping.DefaultIdentifierMapping;
 import io.trino.plugin.jdbc.mapping.IdentifierMapping;
 import io.trino.spi.TrinoException;
@@ -29,7 +35,9 @@ import io.trino.spi.type.Type;
 import io.trino.spi.type.VarcharType;
 
 import java.sql.Connection;
+import java.sql.ResultSet;
 import java.sql.Types;
+import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -54,6 +62,7 @@ import static io.trino.plugin.jdbc.StandardColumnMappings.timeColumnMapping;
 import static io.trino.plugin.jdbc.StandardColumnMappings.timestampColumnMapping;
 import static io.trino.plugin.jdbc.StandardColumnMappings.tinyintColumnMapping;
 import static io.trino.plugin.jdbc.StandardColumnMappings.tinyintWriteFunction;
+import static io.trino.plugin.jdbc.StandardColumnMappings.varcharColumnMapping;
 import static io.trino.plugin.jdbc.StandardColumnMappings.varcharWriteFunction;
 import static io.trino.plugin.jdbc.TypeHandlingJdbcSessionProperties.getUnsupportedTypeHandling;
 import static io.trino.plugin.jdbc.UnsupportedTypeHandling.CONVERT_TO_VARCHAR;
@@ -67,11 +76,15 @@ import static io.trino.spi.type.SmallintType.SMALLINT;
 import static io.trino.spi.type.TimeType.TIME_MILLIS;
 import static io.trino.spi.type.TimestampType.TIMESTAMP_MILLIS;
 import static io.trino.spi.type.TinyintType.TINYINT;
+import static io.trino.spi.type.VarcharType.createUnboundedVarcharType;
 
 class TestingH2JdbcClient
         extends BaseJdbcClient
 {
+    private static final Logger log = Logger.get(TestingH2JdbcClient.class);
+
     private static final JdbcTypeHandle BIGINT_TYPE_HANDLE = new JdbcTypeHandle(Types.BIGINT, Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty());
+    private static final int MAXIMUM_VARCHAR_LENGTH = 1_000_000_000;
 
     public TestingH2JdbcClient(BaseJdbcConfig config, ConnectionFactory connectionFactory)
     {
@@ -80,7 +93,35 @@ class TestingH2JdbcClient
 
     public TestingH2JdbcClient(BaseJdbcConfig config, ConnectionFactory connectionFactory, IdentifierMapping identifierMapping)
     {
-        super(config, "\"", connectionFactory, identifierMapping);
+        super("\"", connectionFactory, new DefaultQueryBuilder(RemoteQueryModifier.NONE), config.getJdbcTypesMappedToVarchar(), identifierMapping, RemoteQueryModifier.NONE, false);
+    }
+
+    @Override
+    public Collection<String> listSchemas(Connection connection)
+    {
+        // listing schemas in H2 may fail with NullPointerException when a schema is concurrently dropped
+        return Failsafe.with(RetryPolicy.<Collection<String>>builder()
+                        .withMaxAttempts(100)
+                        .onRetry(event -> log.warn(event.getLastException(), "Failed to list schemas, retrying"))
+                        .build())
+                .get(() -> super.listSchemas(connection));
+    }
+
+    @Override
+    public Optional<String> getTableComment(ResultSet resultSet)
+    {
+        // Don't return a comment until the connector supports creating tables with comment
+        return Optional.empty();
+    }
+
+    @Override
+    public void setColumnComment(ConnectorSession session, JdbcTableHandle handle, JdbcColumnHandle column, Optional<String> comment)
+    {
+        // Ignore (not fail) when comment is empty for testing purposes.
+        // however do not allow to set non-empty comment, not to have increased expectations from the invoking test
+        if (comment.isPresent()) {
+            throw new TrinoException(NOT_SUPPORTED, "This connector does not support setting column comments");
+        }
     }
 
     @Override
@@ -93,7 +134,11 @@ class TestingH2JdbcClient
     @Override
     public Optional<JdbcExpression> implementAggregation(ConnectorSession session, AggregateFunction aggregate, Map<String, ColumnHandle> assignments)
     {
-        return new AggregateFunctionRewriter<>(this::quoted, ImmutableSet.of(new ImplementCountAll(BIGINT_TYPE_HANDLE)))
+        return new AggregateFunctionRewriter<>(
+                JdbcConnectorExpressionRewriterBuilder.newBuilder()
+                        .add(new RewriteVariable(this::quoted))
+                        .build(),
+                ImmutableSet.of(new ImplementCountAll(BIGINT_TYPE_HANDLE)))
                 .rewrite(session, aggregate, assignments);
     }
 
@@ -121,7 +166,8 @@ class TestingH2JdbcClient
             case Types.BIGINT:
                 return Optional.of(bigintColumnMapping());
 
-            case Types.REAL:
+            // both types as both are used by H2 JDBC driver
+            case Types.FLOAT, Types.REAL:
                 return Optional.of(realColumnMapping());
 
             case Types.DOUBLE:
@@ -131,6 +177,10 @@ class TestingH2JdbcClient
                 return Optional.of(defaultCharColumnMapping(typeHandle.getRequiredColumnSize(), true));
 
             case Types.VARCHAR:
+                // varchar columns get created as varchar(max_length) in H2
+                if (typeHandle.getRequiredColumnSize() == MAXIMUM_VARCHAR_LENGTH) {
+                    return Optional.of(varcharColumnMapping(createUnboundedVarcharType(), true));
+                }
                 return Optional.of(defaultVarcharColumnMapping(typeHandle.getRequiredColumnSize(), true));
 
             case Types.DATE:
@@ -175,14 +225,12 @@ class TestingH2JdbcClient
             return WriteMapping.doubleMapping("double precision", doubleWriteFunction());
         }
 
-        if (type instanceof VarcharType) {
-            VarcharType varcharType = (VarcharType) type;
+        if (type instanceof VarcharType varcharType) {
             String dataType = varcharType.isUnbounded() ? "varchar" : "varchar(" + varcharType.getBoundedLength() + ")";
             return WriteMapping.sliceMapping(dataType, varcharWriteFunction());
         }
 
-        if (type instanceof CharType) {
-            CharType charType = (CharType) type;
+        if (type instanceof CharType charType) {
             String dataType = "char(" + charType.getLength() + ")";
             return WriteMapping.sliceMapping(dataType, charWriteFunction());
         }

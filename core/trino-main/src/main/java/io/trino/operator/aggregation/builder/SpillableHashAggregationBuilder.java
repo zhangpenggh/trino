@@ -18,7 +18,6 @@ import com.google.common.io.Closer;
 import com.google.common.util.concurrent.ListenableFuture;
 import io.airlift.units.DataSize;
 import io.trino.memory.context.LocalMemoryContext;
-import io.trino.operator.HashCollisionsCounter;
 import io.trino.operator.MergeHashSort;
 import io.trino.operator.OperatorContext;
 import io.trino.operator.Work;
@@ -70,8 +69,6 @@ public class SpillableHashAggregationBuilder
     // todo get rid of that and only use revocable memory
     private long emptyHashAggregationBuilderSize;
 
-    private long hashCollisions;
-    private double expectedHashCollisions;
     private boolean producingOutput;
 
     public SpillableHashAggregationBuilder(
@@ -132,14 +129,6 @@ public class SpillableHashAggregationBuilder
     }
 
     @Override
-    public void recordHashCollisions(HashCollisionsCounter hashCollisionsCounter)
-    {
-        hashCollisionsCounter.recordHashCollision(hashCollisions, expectedHashCollisions);
-        hashCollisions = 0;
-        expectedHashCollisions = 0;
-    }
-
-    @Override
     public boolean isFull()
     {
         return false;
@@ -152,9 +141,7 @@ public class SpillableHashAggregationBuilder
             getFutureValue(spillInProgress);
             return true;
         }
-        else {
-            return false;
-        }
+        return false;
     }
 
     @Override
@@ -208,10 +195,8 @@ public class SpillableHashAggregationBuilder
         if (shouldMergeWithMemory(getSizeInMemoryWhenUnspilling())) {
             return mergeFromDiskAndMemory();
         }
-        else {
-            getFutureValue(spillToDisk());
-            return mergeFromDisk();
-        }
+        getFutureValue(spillToDisk());
+        return mergeFromDisk();
     }
 
     /**
@@ -253,7 +238,7 @@ public class SpillableHashAggregationBuilder
             spiller = Optional.of(spillerFactory.create(
                     hashAggregationBuilder.buildTypes(),
                     operatorContext.getSpillContext(),
-                    operatorContext.newAggregateSystemMemoryContext()));
+                    operatorContext.newAggregateUserMemoryContext()));
         }
 
         // start spilling process with current content of the hashAggregationBuilder builder...
@@ -270,7 +255,7 @@ public class SpillableHashAggregationBuilder
         checkState(spiller.isPresent());
 
         hashAggregationBuilder.setSpillOutput();
-        mergeHashSort = Optional.of(new MergeHashSort(operatorContext.newAggregateSystemMemoryContext(), blockTypeOperators));
+        mergeHashSort = Optional.of(new MergeHashSort(operatorContext.newAggregateUserMemoryContext(), blockTypeOperators));
 
         WorkProcessor<Page> mergedSpilledPages = mergeHashSort.get().merge(
                 groupByTypes,
@@ -290,7 +275,7 @@ public class SpillableHashAggregationBuilder
     {
         checkState(spiller.isPresent());
 
-        mergeHashSort = Optional.of(new MergeHashSort(operatorContext.newAggregateSystemMemoryContext(), blockTypeOperators));
+        mergeHashSort = Optional.of(new MergeHashSort(operatorContext.newAggregateUserMemoryContext(), blockTypeOperators));
 
         WorkProcessor<Page> mergedSpilledPages = mergeHashSort.get().merge(
                 groupByTypes,
@@ -313,7 +298,7 @@ public class SpillableHashAggregationBuilder
                 hashChannel,
                 operatorContext,
                 sortedPages,
-                operatorContext.aggregateSystemMemoryContext(),
+                operatorContext.aggregateUserMemoryContext(),
                 memoryLimitForMerge,
                 hashAggregationBuilder.getKeyChannels(),
                 joinCompiler,
@@ -325,8 +310,6 @@ public class SpillableHashAggregationBuilder
     private void rebuildHashAggregationBuilder()
     {
         if (hashAggregationBuilder != null) {
-            hashCollisions += hashAggregationBuilder.getHashCollisions();
-            expectedHashCollisions += hashAggregationBuilder.getExpectedHashCollisions();
             hashAggregationBuilder.close();
         }
 

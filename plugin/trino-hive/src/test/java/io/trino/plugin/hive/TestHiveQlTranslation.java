@@ -30,11 +30,11 @@ import java.util.stream.Stream;
 
 import static io.trino.plugin.hive.HiveErrorCode.HIVE_VIEW_TRANSLATION_ERROR;
 import static io.trino.plugin.hive.HiveToTrinoTranslator.translateHiveViewToTrino;
-import static io.trino.testing.assertions.Assert.assertEquals;
 import static io.trino.testing.assertions.TrinoExceptionAssert.assertTrinoExceptionThrownBy;
 import static java.lang.String.format;
 import static java.lang.String.join;
 import static java.util.Collections.nCopies;
+import static org.testng.Assert.assertEquals;
 
 public class TestHiveQlTranslation
 {
@@ -65,7 +65,7 @@ public class TestHiveQlTranslation
                     // just quotes
                     .put("'\\''", "''''")
                     .put("\"\\\"\"", "'\"'")
-                    .build();
+                    .buildOrThrow();
 
     private static Map<String, String> extendedColumnNames =
             ImmutableMap.<String, String>builder()
@@ -100,7 +100,7 @@ public class TestHiveQlTranslation
                     .put(
                             "\"double: two singles''\"",
                             "'double: two singles'''''")
-                    .build();
+                    .buildOrThrow();
 
     /**
      * Prepare all combinations of {@code n} of the given columns.

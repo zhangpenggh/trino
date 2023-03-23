@@ -38,8 +38,11 @@ public class PlanNodeStats
 
     private final Duration planNodeScheduledTime;
     private final Duration planNodeCpuTime;
+    private final Duration planNodeBlockedTime;
     private final long planNodeInputPositions;
     private final DataSize planNodeInputDataSize;
+    private final DataSize planNodePhysicalInputDataSize;
+    private final Duration planNodePhysicalInputReadTime;
     private final long planNodeOutputPositions;
     private final DataSize planNodeOutputDataSize;
     private final DataSize planNodeSpilledDataSize;
@@ -50,8 +53,11 @@ public class PlanNodeStats
             PlanNodeId planNodeId,
             Duration planNodeScheduledTime,
             Duration planNodeCpuTime,
+            Duration planNodeBlockedTime,
             long planNodeInputPositions,
             DataSize planNodeInputDataSize,
+            DataSize planNodePhysicalInputDataSize,
+            Duration planNodePhysicalInputReadTime,
             long planNodeOutputPositions,
             DataSize planNodeOutputDataSize,
             DataSize planNodeSpilledDataSize,
@@ -61,7 +67,10 @@ public class PlanNodeStats
 
         this.planNodeScheduledTime = requireNonNull(planNodeScheduledTime, "planNodeScheduledTime is null");
         this.planNodeCpuTime = requireNonNull(planNodeCpuTime, "planNodeCpuTime is null");
+        this.planNodeBlockedTime = requireNonNull(planNodeBlockedTime, "planNodeBlockedTime is null");
         this.planNodeInputPositions = planNodeInputPositions;
+        this.planNodePhysicalInputDataSize = planNodePhysicalInputDataSize;
+        this.planNodePhysicalInputReadTime = planNodePhysicalInputReadTime;
         this.planNodeInputDataSize = planNodeInputDataSize;
         this.planNodeOutputPositions = planNodeOutputPositions;
         this.planNodeOutputDataSize = planNodeOutputDataSize;
@@ -92,6 +101,11 @@ public class PlanNodeStats
         return planNodeCpuTime;
     }
 
+    public Duration getPlanNodeBlockedTime()
+    {
+        return planNodeBlockedTime;
+    }
+
     public Set<String> getOperatorTypes()
     {
         return operatorStats.keySet();
@@ -105,6 +119,16 @@ public class PlanNodeStats
     public DataSize getPlanNodeInputDataSize()
     {
         return planNodeInputDataSize;
+    }
+
+    public DataSize getPlanNodePhysicalInputDataSize()
+    {
+        return planNodePhysicalInputDataSize;
+    }
+
+    public Duration getPlanNodePhysicalInputReadTime()
+    {
+        return planNodePhysicalInputReadTime;
     }
 
     public long getPlanNodeOutputPositions()
@@ -162,7 +186,10 @@ public class PlanNodeStats
                 planNodeId,
                 new Duration(planNodeScheduledTime.toMillis() + other.getPlanNodeScheduledTime().toMillis(), MILLISECONDS),
                 new Duration(planNodeCpuTime.toMillis() + other.getPlanNodeCpuTime().toMillis(), MILLISECONDS),
+                new Duration(planNodeBlockedTime.toMillis() + other.getPlanNodeBlockedTime().toMillis(), MILLISECONDS),
                 planNodeInputPositions, planNodeInputDataSize,
+                succinctBytes(this.planNodePhysicalInputDataSize.toBytes() + other.planNodePhysicalInputDataSize.toBytes()),
+                new Duration(planNodePhysicalInputReadTime.toMillis() + other.getPlanNodePhysicalInputReadTime().toMillis(), MILLISECONDS),
                 planNodeOutputPositions, planNodeOutputDataSize,
                 succinctBytes(this.planNodeSpilledDataSize.toBytes() + other.planNodeSpilledDataSize.toBytes()),
                 operatorStats);

@@ -10,9 +10,11 @@ This guide is intended for Trino contributors and plugin developers.
     develop/spi-overview
     develop/connectors
     develop/example-http
-    develop/delete-and-update
+    develop/insert
+    develop/supporting-merge
     develop/types
     develop/functions
+    develop/table-functions
     develop/system-access-control
     develop/password-authenticator
     develop/certificate-authenticator

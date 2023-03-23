@@ -35,9 +35,11 @@ import java.util.Optional;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.util.concurrent.Futures.immediateVoidFuture;
+import static io.trino.execution.ParameterExtractor.bindParameters;
 import static io.trino.metadata.MetadataUtil.createQualifiedObjectName;
-import static io.trino.sql.ParameterUtils.parameterExtractor;
+import static io.trino.spi.StandardErrorCode.TABLE_ALREADY_EXISTS;
 import static io.trino.sql.SqlFormatterUtil.getFormattedSql;
+import static io.trino.sql.analyzer.SemanticExceptions.semanticException;
 import static io.trino.sql.tree.CreateView.Security.INVOKER;
 import static java.util.Objects.requireNonNull;
 
@@ -76,14 +78,26 @@ public class CreateViewTask
 
         accessControl.checkCanCreateView(session.toSecurityContext(), name);
 
+        if (metadata.isMaterializedView(session, name)) {
+            throw semanticException(TABLE_ALREADY_EXISTS, statement, "Materialized view already exists: '%s'", name);
+        }
+        if (metadata.isView(session, name)) {
+            if (!statement.isReplace()) {
+                throw semanticException(TABLE_ALREADY_EXISTS, statement, "View already exists: '%s'", name);
+            }
+        }
+        else if (metadata.getTableHandle(session, name).isPresent()) {
+            throw semanticException(TABLE_ALREADY_EXISTS, statement, "Table already exists: '%s'", name);
+        }
+
         String sql = getFormattedSql(statement.getQuery(), sqlParser);
 
-        Analysis analysis = analyzerFactory.createAnalyzer(session, parameters, parameterExtractor(statement, parameters), stateMachine.getWarningCollector())
+        Analysis analysis = analyzerFactory.createAnalyzer(session, parameters, bindParameters(statement, parameters), stateMachine.getWarningCollector())
                 .analyze(statement);
 
         List<ViewColumn> columns = analysis.getOutputDescriptor(statement.getQuery())
                 .getVisibleFields().stream()
-                .map(field -> new ViewColumn(field.getName().get(), field.getType().getTypeId()))
+                .map(field -> new ViewColumn(field.getName().get(), field.getType().getTypeId(), Optional.empty()))
                 .collect(toImmutableList());
 
         // use DEFINER security by default

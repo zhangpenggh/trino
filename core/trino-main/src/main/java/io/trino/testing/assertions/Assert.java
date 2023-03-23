@@ -18,52 +18,24 @@ import io.airlift.units.Duration;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.concurrent.TimeUnit.SECONDS;
 
-/**
- * This class provides replacements for TestNG's faulty assertion methods.
- * <p>
- * So far, the reason for having this class is the
- * <a href="https://github.com/cbeust/testng/issues/543"> TestNG #543 -
- * Unexpected Behaviour: assertEquals for Iterable</a> bug,
- * which boils down to {@code assertEquals(Iterable, Iterable)} neglecting
- * any fields on the Iterable itself (only comparing its elements). This can
- * lead to false positive results in tests using the faulty assertion.
- */
-@SuppressWarnings({"MethodOverridesStaticMethodOfSuperclass", "ExtendsUtilityClass"})
-public class Assert
-        extends org.testng.Assert
+public final class Assert
 {
     private Assert() {}
 
-    public static void assertEquals(Iterable<?> actual, Iterable<?> expected)
-    {
-        assertEquals(actual, expected, null);
-    }
-
-    public static void assertEquals(Iterable<?> actual, Iterable<?> expected, String message)
-    {
-        try {
-            //do a full, equals-based check first
-            org.testng.Assert.assertEquals((Object) actual, (Object) expected, message);
-        }
-        catch (AssertionError error) {
-            //do the check again using Iterable-dedicated variant for a better error message.
-            org.testng.Assert.assertEquals(actual, expected, message);
-            //if we're here, the Iterables differ on their fields. Use the original error message.
-            throw error;
-        }
-    }
-
-    public static void assertEventually(Runnable assertion)
+    public static <E extends Exception> void assertEventually(CheckedRunnable<E> assertion)
+            throws E
     {
         assertEventually(new Duration(30, SECONDS), assertion);
     }
 
-    public static void assertEventually(Duration timeout, Runnable assertion)
+    public static <E extends Exception> void assertEventually(Duration timeout, CheckedRunnable<E> assertion)
+            throws E
     {
         assertEventually(timeout, new Duration(50, MILLISECONDS), assertion);
     }
 
-    public static void assertEventually(Duration timeout, Duration retryFrequency, Runnable assertion)
+    public static <E extends Exception> void assertEventually(Duration timeout, Duration retryFrequency, CheckedRunnable<E> assertion)
+            throws E
     {
         long start = System.nanoTime();
         while (!Thread.currentThread().isInterrupted()) {
@@ -84,5 +56,11 @@ public class Assert
                 throw new RuntimeException(e);
             }
         }
+    }
+
+    public interface CheckedRunnable<E extends Exception>
+    {
+        void run()
+                throws E;
     }
 }

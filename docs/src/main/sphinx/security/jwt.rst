@@ -3,7 +3,7 @@ JWT authentication
 ==================
 
 Trino can be configured to authenticate client access using `JSON web tokens
-<https://en.wikipedia.org/wiki/JSON_Web_Token>`_. A JWT is a small, web-safe
+<https://wikipedia.org/wiki/JSON_Web_Token>`_. A JWT is a small, web-safe
 JSON file that contains cryptographic information similar to a certificate,
 including:
 
@@ -36,6 +36,9 @@ in a workflow like the following:
     sites who are writing their own single sign-on or proxy system to stand
     between users and the Trino coordinator, where their new system submits
     queries on behalf of users.
+
+Using :doc:`TLS <tls>` and :doc:`a configured shared secret
+</security/internal-communication>` is required for JWT authentication.
 
 Using JWT authentication
 ------------------------
@@ -122,7 +125,7 @@ either:
         protocol for short-term testing during development of your cluster.
 
 -  The path to a local file in :doc:`PEM </security/inspect-pem>` or `HMAC
-   <https://en.wikipedia.org/wiki/HMAC>`_ format that contains a single key.
+   <https://wikipedia.org/wiki/HMAC>`_ format that contains a single key.
    If the file path contains ``$KEYID``, then Trino interpolates the ``keyid``
    from the JWT into the file path before loading this key. This enables support
    for setups with multiple keys.
@@ -130,7 +133,7 @@ either:
 Using JWTs with clients
 -----------------------
 
-When using the Trino :doc:`CLI </installation/cli>`, specify a JWT as described
+When using the Trino :doc:`CLI </client/cli>`, specify a JWT as described
 in :ref:`cli-jwt-auth`.
 
 When using the Trino JDBC driver, specify a JWT with the ``accessToken``

@@ -49,9 +49,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 import static com.google.common.base.CharMatcher.whitespace;
 import static com.google.common.base.Preconditions.checkState;
-import static com.google.common.base.StandardSystemProperty.USER_HOME;
 import static com.google.common.base.Strings.isNullOrEmpty;
-import static com.google.common.base.Strings.nullToEmpty;
 import static com.google.common.io.Files.asCharSource;
 import static com.google.common.util.concurrent.Uninterruptibles.awaitUninterruptibly;
 import static io.trino.cli.Completion.commandCompleter;
@@ -166,6 +164,7 @@ public class Console
                 clientOptions.truststorePath,
                 clientOptions.truststorePassword,
                 clientOptions.truststoreType,
+                clientOptions.useSystemTruststore,
                 clientOptions.insecure,
                 clientOptions.accessToken,
                 clientOptions.user,
@@ -178,7 +177,8 @@ public class Console
                 clientOptions.krb5CredentialCachePath,
                 !clientOptions.krb5DisableRemoteServiceHostnameCanonicalization,
                 false,
-                clientOptions.externalAuthentication)) {
+                clientOptions.externalAuthentication,
+                clientOptions.externalAuthenticationRedirectHandler)) {
             if (hasQuery) {
                 return executeCommand(
                         queryRunner,
@@ -186,10 +186,19 @@ public class Console
                         query,
                         clientOptions.outputFormat,
                         clientOptions.ignoreErrors,
-                        clientOptions.progress);
+                        clientOptions.progress.orElse(false));
             }
 
-            runConsole(queryRunner, exiting);
+            Optional<String> pager = clientOptions.pager;
+            runConsole(
+                    queryRunner,
+                    exiting,
+                    clientOptions.outputFormatInteractive,
+                    clientOptions.editingMode,
+                    getHistoryFile(clientOptions.historyFile),
+                    pager,
+                    clientOptions.progress.orElse(true),
+                    clientOptions.disableAutoSuggestion);
             return true;
         }
         finally {
@@ -219,10 +228,18 @@ public class Console
         return reader.readLine("Password: ", (char) 0);
     }
 
-    private static void runConsole(QueryRunner queryRunner, AtomicBoolean exiting)
+    private static void runConsole(
+            QueryRunner queryRunner,
+            AtomicBoolean exiting,
+            OutputFormat outputFormat,
+            ClientOptions.EditingMode editingMode,
+            Optional<Path> historyFile,
+            Optional<String> pager,
+            boolean progress,
+            boolean disableAutoSuggestion)
     {
         try (TableNameCompleter tableNameCompleter = new TableNameCompleter(queryRunner);
-                InputReader reader = new InputReader(getHistoryFile(), commandCompleter(), tableNameCompleter)) {
+                InputReader reader = new InputReader(editingMode, historyFile, disableAutoSuggestion, commandCompleter(), tableNameCompleter)) {
             tableNameCompleter.populateCache();
             String remaining = "";
             while (!exiting.get()) {
@@ -282,12 +299,12 @@ public class Console
                 // execute any complete statements
                 StatementSplitter splitter = new StatementSplitter(line, STATEMENT_DELIMITERS);
                 for (Statement split : splitter.getCompleteStatements()) {
-                    OutputFormat outputFormat = OutputFormat.ALIGNED;
+                    OutputFormat currentOutputFormat = outputFormat;
                     if (split.terminator().equals("\\G")) {
-                        outputFormat = OutputFormat.VERTICAL;
+                        currentOutputFormat = OutputFormat.VERTICAL;
                     }
 
-                    process(queryRunner, split.statement(), outputFormat, tableNameCompleter::populateCache, true, true, reader.getTerminal(), System.out, System.out);
+                    process(queryRunner, split.statement(), currentOutputFormat, tableNameCompleter::populateCache, pager, progress, reader.getTerminal(), System.out, System.out);
                 }
 
                 // replace remaining with trailing partial statement
@@ -311,7 +328,7 @@ public class Console
         StatementSplitter splitter = new StatementSplitter(query);
         for (Statement split : splitter.getCompleteStatements()) {
             if (!isEmptyStatement(split.statement())) {
-                if (!process(queryRunner, split.statement(), outputFormat, () -> {}, false, showProgress, getTerminal(), System.out, System.err)) {
+                if (!process(queryRunner, split.statement(), outputFormat, () -> {}, Optional.of(""), showProgress, getTerminal(), System.out, System.err)) {
                     if (!ignoreErrors) {
                         return false;
                     }
@@ -334,7 +351,7 @@ public class Console
             String sql,
             OutputFormat outputFormat,
             Runnable schemaChanged,
-            boolean usePager,
+            Optional<String> pager,
             boolean showProgress,
             Terminal terminal,
             PrintStream out,
@@ -357,15 +374,15 @@ public class Console
         }
 
         try (Query query = queryRunner.startQuery(finalSql)) {
-            boolean success = query.renderOutput(terminal, out, errorChannel, outputFormat, usePager, showProgress);
+            boolean success = query.renderOutput(terminal, out, errorChannel, outputFormat, pager, showProgress);
 
             ClientSession session = queryRunner.getSession();
 
             // update catalog and schema if present
             if (query.getSetCatalog().isPresent() || query.getSetSchema().isPresent()) {
                 session = ClientSession.builder(session)
-                        .withCatalog(query.getSetCatalog().orElse(session.getCatalog()))
-                        .withSchema(query.getSetSchema().orElse(session.getSchema()))
+                        .catalog(query.getSetCatalog().orElse(session.getCatalog()))
+                        .schema(query.getSetSchema().orElse(session.getSchema()))
                         .build();
             }
 
@@ -377,12 +394,12 @@ public class Console
             ClientSession.Builder builder = ClientSession.builder(session);
 
             if (query.getStartedTransactionId() != null) {
-                builder = builder.withTransactionId(query.getStartedTransactionId());
+                builder = builder.transactionId(query.getStartedTransactionId());
             }
 
             // update path if present
             if (query.getSetPath().isPresent()) {
-                builder = builder.withPath(query.getSetPath().get());
+                builder = builder.path(query.getSetPath().get());
             }
 
             // update session properties if present
@@ -390,14 +407,14 @@ public class Console
                 Map<String, String> sessionProperties = new HashMap<>(session.getProperties());
                 sessionProperties.putAll(query.getSetSessionProperties());
                 sessionProperties.keySet().removeAll(query.getResetSessionProperties());
-                builder = builder.withProperties(sessionProperties);
+                builder = builder.properties(sessionProperties);
             }
 
             // update session roles
             if (!query.getSetRoles().isEmpty()) {
                 Map<String, ClientSelectedRole> roles = new HashMap<>(session.getRoles());
                 roles.putAll(query.getSetRoles());
-                builder = builder.withRoles(roles);
+                builder = builder.roles(roles);
             }
 
             // update prepared statements if present
@@ -405,7 +422,7 @@ public class Console
                 Map<String, String> preparedStatements = new HashMap<>(session.getPreparedStatements());
                 preparedStatements.putAll(query.getAddedPreparedStatements());
                 preparedStatements.keySet().removeAll(query.getDeallocatedPreparedStatements());
-                builder = builder.withPreparedStatements(preparedStatements);
+                builder = builder.preparedStatements(preparedStatements);
             }
 
             session = builder.build();
@@ -426,12 +443,11 @@ public class Console
         }
     }
 
-    private static Path getHistoryFile()
+    private static Optional<Path> getHistoryFile(String path)
     {
-        String path = System.getenv("TRINO_HISTORY_FILE");
-        if (!isNullOrEmpty(path)) {
-            return Paths.get(path);
+        if (isNullOrEmpty(path)) {
+            return Optional.empty();
         }
-        return Paths.get(nullToEmpty(USER_HOME.value()), ".trino_history");
+        return Optional.of(Paths.get(path));
     }
 }

@@ -21,11 +21,15 @@ import io.trino.spi.connector.ConnectorSplit;
 
 import java.util.List;
 
+import static io.airlift.slice.SizeOf.estimatedSizeOf;
+import static io.airlift.slice.SizeOf.instanceSize;
 import static java.util.Objects.requireNonNull;
 
 public class MongoSplit
         implements ConnectorSplit
 {
+    private static final int INSTANCE_SIZE = instanceSize(MongoSplit.class);
+
     private final List<HostAddress> addresses;
 
     @JsonCreator
@@ -51,5 +55,12 @@ public class MongoSplit
     public Object getInfo()
     {
         return this;
+    }
+
+    @Override
+    public long getRetainedSizeInBytes()
+    {
+        return INSTANCE_SIZE
+                + estimatedSizeOf(addresses, HostAddress::getRetainedSizeInBytes);
     }
 }

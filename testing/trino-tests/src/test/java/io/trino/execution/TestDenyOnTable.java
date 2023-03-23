@@ -85,7 +85,7 @@ public class TestDenyOnTable
                 .build();
         MockConnectorFactory connectorFactory = MockConnectorFactory.builder()
                 .withListSchemaNames(session -> ImmutableList.of("default"))
-                .withListTables((session, schemaName) -> "default".equalsIgnoreCase(schemaName) ? ImmutableList.of(table) : ImmutableList.of())
+                .withListTables((session, schemaName) -> "default".equalsIgnoreCase(schemaName) ? ImmutableList.of(table.getTableName()) : ImmutableList.of())
                 .withGetTableHandle((session, tableName) -> tableName.equals(table) ? new MockConnectorTableHandle(tableName) : null)
                 .build();
         queryRunner.installPlugin(new MockConnectorPlugin(connectorFactory));
@@ -99,6 +99,7 @@ public class TestDenyOnTable
     {
         assertions.close();
         assertions = null;
+        queryRunner = null; // closed by assertions.close
     }
 
     @Test(dataProvider = "privileges")
@@ -137,7 +138,7 @@ public class TestDenyOnTable
     @Test(dataProvider = "privileges")
     public void testDenyOnNonExistingTable(String privilege)
     {
-        assertThatThrownBy(() -> queryRunner.execute(admin, format("GRANT %s ON TABLE default.missing_table TO %s", privilege, randomUsername())))
+        assertThatThrownBy(() -> queryRunner.execute(admin, format("DENY %s ON TABLE default.missing_table TO %s", privilege, randomUsername())))
                 .hasMessageContaining("Table 'local.default.missing_table' does not exist");
     }
 

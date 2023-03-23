@@ -16,6 +16,7 @@ package io.trino.execution;
 
 import io.trino.Session;
 import io.trino.Session.SessionBuilder;
+import io.trino.client.NodeVersion;
 import io.trino.execution.warnings.WarningCollector;
 import io.trino.metadata.Metadata;
 import io.trino.security.AllowAllAccessControl;
@@ -115,6 +116,7 @@ public class TestRollbackTask
     private QueryStateMachine createQueryStateMachine(String query, Session session, TransactionManager transactionManager)
     {
         return QueryStateMachine.begin(
+                Optional.empty(),
                 query,
                 Optional.empty(),
                 session,
@@ -126,7 +128,9 @@ public class TestRollbackTask
                 executor,
                 metadata,
                 WarningCollector.NOOP,
-                Optional.empty());
+                Optional.empty(),
+                true,
+                new NodeVersion("test"));
     }
 
     private static SessionBuilder sessionBuilder()

@@ -34,6 +34,7 @@ import io.trino.sql.planner.iterative.GroupReference;
 import io.trino.sql.planner.iterative.Lookup;
 import io.trino.sql.planner.plan.AggregationNode;
 import io.trino.sql.planner.plan.Assignments;
+import io.trino.sql.planner.plan.DataOrganizationSpecification;
 import io.trino.sql.planner.plan.EnforceSingleRowNode;
 import io.trino.sql.planner.plan.FilterNode;
 import io.trino.sql.planner.plan.LimitNode;
@@ -44,7 +45,6 @@ import io.trino.sql.planner.plan.ProjectNode;
 import io.trino.sql.planner.plan.RowNumberNode;
 import io.trino.sql.planner.plan.TopNNode;
 import io.trino.sql.planner.plan.TopNRankingNode;
-import io.trino.sql.planner.plan.WindowNode.Specification;
 import io.trino.sql.tree.Cast;
 import io.trino.sql.tree.ComparisonExpression;
 import io.trino.sql.tree.Expression;
@@ -64,6 +64,7 @@ import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.sql.analyzer.TypeSignatureTranslator.toTypeSignature;
 import static io.trino.sql.planner.DeterminismEvaluator.isDeterministic;
 import static io.trino.sql.planner.optimizations.SymbolMapper.symbolMapper;
+import static io.trino.sql.planner.plan.AggregationNode.singleAggregation;
 import static io.trino.sql.planner.plan.AggregationNode.singleGroupingSet;
 import static io.trino.sql.planner.plan.TopNRankingNode.RankingType.ROW_NUMBER;
 import static io.trino.sql.tree.ComparisonExpression.Operator.EQUAL;
@@ -229,15 +230,11 @@ public class PlanNodeDecorrelator
             }
 
             // rewrite Limit to aggregation on constant symbols
-            AggregationNode aggregationNode = new AggregationNode(
+            AggregationNode aggregationNode = singleAggregation(
                     nodeId,
                     decorrelatedChildNode,
                     ImmutableMap.of(),
-                    singleGroupingSet(decorrelatedChildNode.getOutputSymbols()),
-                    ImmutableList.of(),
-                    AggregationNode.Step.SINGLE,
-                    Optional.empty(),
-                    Optional.empty());
+                    singleGroupingSet(decorrelatedChildNode.getOutputSymbols()));
 
             return Optional.of(new DecorrelationResult(
                     aggregationNode,
@@ -339,7 +336,7 @@ public class PlanNodeDecorrelator
                         TopNRankingNode topNRankingNode = new TopNRankingNode(
                                 node.getId(),
                                 decorrelatedChildNode,
-                                new Specification(
+                                new DataOrganizationSpecification(
                                         ImmutableList.copyOf(childDecorrelationResult.symbolsToPropagate),
                                         Optional.of(orderingScheme)),
                                 ROW_NUMBER,
@@ -391,7 +388,7 @@ public class PlanNodeDecorrelator
             if (nonConstantOrderBy.build().isEmpty()) {
                 return Optional.empty();
             }
-            return Optional.of(new OrderingScheme(nonConstantOrderBy.build(), nonConstantOrderings.build()));
+            return Optional.of(new OrderingScheme(nonConstantOrderBy.build(), nonConstantOrderings.buildOrThrow()));
         }
 
         @Override
@@ -439,18 +436,14 @@ public class PlanNodeDecorrelator
                 return Optional.empty();
             }
 
-            AggregationNode newAggregation = new AggregationNode(
-                    decorrelatedAggregation.getId(),
-                    decorrelatedAggregation.getSource(),
-                    decorrelatedAggregation.getAggregations(),
-                    AggregationNode.singleGroupingSet(ImmutableList.<Symbol>builder()
-                            .addAll(node.getGroupingKeys())
-                            .addAll(symbolsToAdd)
-                            .build()),
-                    ImmutableList.of(),
-                    decorrelatedAggregation.getStep(),
-                    decorrelatedAggregation.getHashSymbol(),
-                    decorrelatedAggregation.getGroupIdSymbol());
+            AggregationNode newAggregation = AggregationNode.builderFrom(decorrelatedAggregation)
+                    .setGroupingSets(
+                            AggregationNode.singleGroupingSet(ImmutableList.<Symbol>builder()
+                                    .addAll(node.getGroupingKeys())
+                                    .addAll(symbolsToAdd)
+                                    .build()))
+                    .setPreGroupedSymbols(ImmutableList.of())
+                    .build();
 
             return Optional.of(new DecorrelationResult(
                     newAggregation,
@@ -493,11 +486,10 @@ public class PlanNodeDecorrelator
         {
             ImmutableMultimap.Builder<Symbol, Symbol> mapping = ImmutableMultimap.builder();
             for (Expression conjunct : correlatedConjuncts) {
-                if (!(conjunct instanceof ComparisonExpression)) {
+                if (!(conjunct instanceof ComparisonExpression comparison)) {
                     continue;
                 }
 
-                ComparisonExpression comparison = (ComparisonExpression) conjunct;
                 if (!(comparison.getLeft() instanceof SymbolReference
                         && comparison.getRight() instanceof SymbolReference
                         && comparison.getOperator() == EQUAL)) {
@@ -553,10 +545,9 @@ public class PlanNodeDecorrelator
         // checks whether the expression is an injective cast over a symbol
         private boolean isSimpleInjectiveCast(Expression expression)
         {
-            if (!(expression instanceof Cast)) {
+            if (!(expression instanceof Cast cast)) {
                 return false;
             }
-            Cast cast = (Cast) expression;
             if (!(cast.getExpression() instanceof SymbolReference)) {
                 return false;
             }

@@ -13,10 +13,11 @@
  */
 package io.trino.connector;
 
+import com.google.common.collect.ImmutableList;
 import io.trino.FullConnectorSession;
 import io.trino.Session;
 import io.trino.metadata.MaterializedViewDefinition;
-import io.trino.metadata.MetadataManager;
+import io.trino.metadata.Metadata;
 import io.trino.metadata.QualifiedObjectName;
 import io.trino.metadata.TableHandle;
 import io.trino.metadata.ViewColumn;
@@ -37,12 +38,12 @@ import static java.util.Objects.requireNonNull;
 public class InternalMetadataProvider
         implements MetadataProvider
 {
-    private final MetadataManager metadataManager;
+    private final Metadata metadata;
     private final TypeManager typeManager;
 
-    public InternalMetadataProvider(MetadataManager metadataManager, TypeManager typeManager)
+    public InternalMetadataProvider(Metadata metadata, TypeManager typeManager)
     {
-        this.metadataManager = requireNonNull(metadataManager, "metadataManager is null");
+        this.metadata = requireNonNull(metadata, "metadata is null");
         this.typeManager = requireNonNull(typeManager, "typeManager is null");
     }
 
@@ -52,19 +53,19 @@ public class InternalMetadataProvider
         Session session = ((FullConnectorSession) connectorSession).getSession();
         QualifiedObjectName qualifiedName = new QualifiedObjectName(tableName.getCatalogName(), tableName.getSchemaTableName().getSchemaName(), tableName.getSchemaTableName().getTableName());
 
-        Optional<MaterializedViewDefinition> materializedView = metadataManager.getMaterializedView(session, qualifiedName);
+        Optional<MaterializedViewDefinition> materializedView = metadata.getMaterializedView(session, qualifiedName);
         if (materializedView.isPresent()) {
-            return Optional.of(new ConnectorTableSchema(tableName.getSchemaTableName(), toColumnSchema(materializedView.get().getColumns())));
+            return Optional.of(new ConnectorTableSchema(tableName.getSchemaTableName(), toColumnSchema(materializedView.get().getColumns()), ImmutableList.of()));
         }
 
-        Optional<ViewDefinition> view = metadataManager.getView(session, qualifiedName);
+        Optional<ViewDefinition> view = metadata.getView(session, qualifiedName);
         if (view.isPresent()) {
-            return Optional.of(new ConnectorTableSchema(tableName.getSchemaTableName(), toColumnSchema(view.get().getColumns())));
+            return Optional.of(new ConnectorTableSchema(tableName.getSchemaTableName(), toColumnSchema(view.get().getColumns()), ImmutableList.of()));
         }
 
-        Optional<TableHandle> tableHandle = metadataManager.getTableHandle(session, qualifiedName);
+        Optional<TableHandle> tableHandle = metadata.getTableHandle(session, qualifiedName);
         if (tableHandle.isPresent()) {
-            return Optional.of(metadataManager.getTableSchema(session, tableHandle.get()).getTableSchema());
+            return Optional.of(metadata.getTableSchema(session, tableHandle.get()).getTableSchema());
         }
 
         return Optional.empty();

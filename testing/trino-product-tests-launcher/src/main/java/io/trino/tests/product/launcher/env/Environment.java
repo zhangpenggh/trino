@@ -13,29 +13,37 @@
  */
 package io.trino.tests.product.launcher.env;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
 import com.github.dockerjava.api.command.CreateContainerCmd;
 import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.model.Bind;
 import com.github.dockerjava.api.model.HostConfig;
 import com.github.dockerjava.api.model.Ulimit;
 import com.google.common.base.Joiner;
+import com.google.common.collect.HashMultimap;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.Multimap;
 import com.google.common.collect.Streams;
+import dev.failsafe.Failsafe;
+import dev.failsafe.FailsafeExecutor;
+import dev.failsafe.RetryPolicy;
+import dev.failsafe.Timeout;
 import io.airlift.log.Logger;
 import io.trino.tests.product.launcher.testcontainers.PrintingLogConsumer;
 import io.trino.tests.product.launcher.util.ConsoleTable;
-import net.jodah.failsafe.Failsafe;
-import net.jodah.failsafe.FailsafeExecutor;
-import net.jodah.failsafe.RetryPolicy;
-import net.jodah.failsafe.Timeout;
 import org.testcontainers.containers.Network;
 import org.testcontainers.containers.output.OutputFrame;
 import org.testcontainers.lifecycle.Startables;
+import org.testcontainers.utility.MountableFile;
 
+import java.io.File;
 import java.io.FileDescriptor;
 import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
+import java.io.IOException;
 import java.io.PrintStream;
 import java.io.UncheckedIOException;
 import java.io.UnsupportedEncodingException;
@@ -57,14 +65,21 @@ import static com.google.common.base.MoreObjects.firstNonNull;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.base.Verify.verify;
 import static com.google.common.collect.ImmutableList.toImmutableList;
+import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static io.airlift.concurrent.Threads.daemonThreadsNamed;
+import static io.trino.server.PluginLoader.CONNECTOR;
+import static io.trino.server.PluginLoader.PASSWORD_AUTHENTICATOR;
 import static io.trino.tests.product.launcher.env.DockerContainer.ensurePathExists;
+import static io.trino.tests.product.launcher.env.EnvironmentContainers.COORDINATOR;
 import static io.trino.tests.product.launcher.env.EnvironmentContainers.TESTS;
+import static io.trino.tests.product.launcher.env.EnvironmentContainers.isTrinoContainer;
 import static io.trino.tests.product.launcher.env.Environments.pruneEnvironment;
+import static io.trino.tests.product.launcher.env.common.Standard.CONTAINER_TRINO_ETC;
 import static java.lang.String.format;
 import static java.time.Duration.ofMinutes;
 import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.Executors.newCachedThreadPool;
+import static org.testcontainers.utility.MountableFile.forHostPath;
 
 public final class Environment
         implements AutoCloseable
@@ -84,29 +99,33 @@ public final class Environment
     private final Map<String, DockerContainer> containers;
     private final Optional<EnvironmentListener> listener;
     private final boolean attached;
+    private final Map<String, List<String>> configuredFeatures;
 
     private Environment(
             String name,
             int startupRetries,
             Map<String, DockerContainer> containers,
             Optional<EnvironmentListener> listener,
-            boolean attached)
+            boolean attached,
+            Map<String, List<String>> configuredFeatures)
     {
         this.name = requireNonNull(name, "name is null");
         this.startupRetries = startupRetries;
         this.containers = requireNonNull(containers, "containers is null");
         this.listener = requireNonNull(listener, "listener is null");
         this.attached = attached;
+        this.configuredFeatures = requireNonNull(configuredFeatures, "configuredFeatures is null");
     }
 
     public Environment start()
     {
-        RetryPolicy<Object> retryPolicy = new RetryPolicy<>()
+        RetryPolicy<Object> retryPolicy = RetryPolicy.builder()
                 .withMaxRetries(startupRetries)
-                .onFailedAttempt(event -> log.warn(event.getLastFailure(), "Could not start environment '%s'", this))
+                .onFailedAttempt(event -> log.warn(event.getLastException(), "Could not start environment '%s'", this))
                 .onRetry(event -> log.info("Trying to start environment '%s', %d failed attempt(s)", this, event.getAttemptCount() + 1))
                 .onSuccess(event -> log.info("Environment '%s' started in %s, %d attempt(s)", this, event.getElapsedTime(), event.getAttemptCount()))
-                .onFailure(event -> log.info("Environment '%s' failed to start in attempt(s): %d: %s", this, event.getAttemptCount(), event.getFailure()));
+                .onFailure(event -> log.info("Environment '%s' failed to start in attempt(s): %d: %s", this, event.getAttemptCount(), event.getException()))
+                .build();
 
         return Failsafe
                 .with(retryPolicy)
@@ -168,11 +187,13 @@ public final class Environment
         this.listener.ifPresent(listener -> listener.environmentStopping(this));
 
         // Allow containers to take up to 5 minutes to stop
-        Timeout<Object> timeout = Timeout.of(ofMinutes(5))
-                .withCancel(true);
+        Timeout<Object> timeout = Timeout.builder(ofMinutes(5))
+                .withInterrupt()
+                .build();
 
-        RetryPolicy<Object> retry = new RetryPolicy<>()
-                .withMaxAttempts(3);
+        RetryPolicy<Object> retry = RetryPolicy.builder()
+                .withMaxAttempts(3)
+                .build();
 
         FailsafeExecutor<Object> executor = Failsafe
                 .with(timeout, retry)
@@ -257,10 +278,29 @@ public final class Environment
         return ImmutableList.copyOf(containers.values());
     }
 
+    public Map<String, List<String>> getConfiguredFeatures()
+    {
+        return configuredFeatures;
+    }
+
     @Override
     public String toString()
     {
         return name;
+    }
+
+    @JsonProperty
+    public String getName()
+    {
+        return name;
+    }
+
+    @JsonProperty
+    public List<String> getFeatures()
+    {
+        return configuredFeatures.entrySet().stream()
+                .flatMap(entry -> entry.getValue().stream().map(feature -> entry.getKey() + feature))
+                .collect(toImmutableList());
     }
 
     public static Builder builder(String name)
@@ -302,7 +342,7 @@ public final class Environment
         }
 
         if (!container.isHealthy()) {
-            log.warn("Container %s is not healthy", container.getLogicalName());
+            log.warn("Container %s is not healthy, logs of container healthcheck:\n%s", container.getLogicalName(), container.getCurrentContainerInfo().getState().getHealth().getLog());
             return false;
         }
 
@@ -336,6 +376,7 @@ public final class Environment
         private Map<String, DockerContainer> containers = new HashMap<>();
         private Optional<Path> logsBaseDir = Optional.empty();
         private boolean attached;
+        private Multimap<String, String> configuredFeatures = HashMultimap.create();
 
         public Builder(String name)
         {
@@ -349,7 +390,7 @@ public final class Environment
 
         public Builder containerDependsOn(String container, String dependencyContainer)
         {
-            checkState(containers.containsKey(container), "Container with name %s is not registered", name);
+            checkState(containers.containsKey(container), "Container with name %s is not registered", container);
             checkState(containers.containsKey(dependencyContainer), "Dependency container with name %s is not registered", dependencyContainer);
             containers.get(container).dependsOn(containers.get(dependencyContainer));
 
@@ -380,11 +421,66 @@ public final class Environment
 
             container.withCreateContainerCmdModifier(Builder::updateContainerHostConfig);
 
-            if (!container.getLogicalName().equals(TESTS)) {
-                // Tests container cannot be auto removed as we need to inspect it's exit code
+            if (!container.getLogicalName().equals(TESTS) && !container.isTemporary()) {
+                // Tests container cannot be auto removed as we need to inspect it's exit code.
+                // Temporal containers might exit earlier than the startup check polling interval.
                 container.withCreateContainerCmdModifier(Builder::setContainerAutoRemove);
             }
 
+            return this;
+        }
+
+        public Builder addConnector(String connectorName)
+        {
+            requireNonNull(connectorName, "connectorName is null");
+            checkState(connectorName.length() != 0, "Cannot register empty string as a connector in an Environment");
+            return addFeature(CONNECTOR, connectorName);
+        }
+
+        public Builder addConnector(String connectorName, MountableFile configFile)
+        {
+            requireNonNull(connectorName, "connectorName is null");
+            requireNonNull(configFile, "configFile is null");
+            return addConnector(connectorName, configFile, CONTAINER_TRINO_ETC + "/catalog/" + connectorName + ".properties");
+        }
+
+        public Builder addConnector(String connectorName, MountableFile configFile, String containerPath)
+        {
+            requireNonNull(configFile, "configFile is null");
+            requireNonNull(containerPath, "containerPath is null");
+            configureContainers(container -> {
+                if (isTrinoContainer(container.getLogicalName())) {
+                    container.withCopyFileToContainer(configFile, containerPath);
+                }
+            });
+            return addConnector(connectorName);
+        }
+
+        public Builder addPasswordAuthenticator(String name)
+        {
+            requireNonNull(name, "name is null");
+            checkState(name.length() != 0, "Cannot register empty string as a password authenticator in an Environment");
+            return addFeature(PASSWORD_AUTHENTICATOR, name);
+        }
+
+        public Builder addPasswordAuthenticator(String name, MountableFile configFile)
+        {
+            requireNonNull(name, "name is null");
+            requireNonNull(configFile, "configFile is null");
+            return addPasswordAuthenticator(name, configFile, CONTAINER_TRINO_ETC + "/password-authenticator.properties");
+        }
+
+        public Builder addPasswordAuthenticator(String name, MountableFile configFile, String containerPath)
+        {
+            requireNonNull(configFile, "catalogConfig is null");
+            requireNonNull(containerPath, "containerPath is null");
+            configureContainer(COORDINATOR, container -> container.withCopyFileToContainer(configFile, containerPath));
+            return addPasswordAuthenticator(name);
+        }
+
+        public Builder addFeature(String feature, String name)
+        {
+            configuredFeatures.put(feature, name);
             return this;
         }
 
@@ -418,7 +514,7 @@ public final class Environment
         {
             requireNonNull(logicalName, "logicalName is null");
             checkState(containers.containsKey(logicalName), "Container with name %s is not registered", logicalName);
-            requireNonNull(configurer, "configurer is null").accept(containers.get(logicalName));
+            configurer.accept(containers.get(logicalName));
             return this;
         }
 
@@ -516,7 +612,17 @@ public final class Environment
                         });
             });
 
-            return new Environment(name, startupRetries, containers, listener, attached);
+            addConfiguredFeaturesConfig();
+
+            Map<String, List<String>> configuredFeatures = this.configuredFeatures.asMap().entrySet().stream()
+                    .collect(toImmutableMap(Map.Entry::getKey, entry -> ImmutableList.copyOf(entry.getValue())));
+            return new Environment(
+                    name,
+                    startupRetries,
+                    containers,
+                    listener,
+                    attached,
+                    configuredFeatures);
         }
 
         private static Consumer<OutputFrame> writeContainerLogs(DockerContainer container, Path path)
@@ -550,6 +656,42 @@ public final class Environment
         {
             // Discard log frames
             return outputFrame -> {};
+        }
+
+        private void addConfiguredFeaturesConfig()
+        {
+            if (!containers.containsKey(TESTS)) {
+                return;
+            }
+            DockerContainer testContainer = containers.get(TESTS);
+            // write a custom tempto config with list of connectors the environment declares to have configured
+            // since it's needed in TestConfiguredFeatures
+            ObjectMapper objectMapper = new ObjectMapper(new YAMLFactory());
+            File tempFile;
+            try {
+                tempFile = File.createTempFile("tempto-configured-features-", ".yaml");
+                objectMapper.writeValue(tempFile,
+                        Map.of("databases",
+                                Map.of("presto",
+                                        Map.of(
+                                                "configured_connectors",
+                                                configuredFeatures.asMap().getOrDefault(CONNECTOR, ImmutableList.of()),
+                                                "configured_password_authenticators",
+                                                configuredFeatures.asMap().getOrDefault(PASSWORD_AUTHENTICATOR, ImmutableList.of())))));
+            }
+            catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+            String temptoConfig = "/docker/presto-product-tests/conf/tempto/tempto-configured-features.yaml";
+            testContainer.withCopyFileToContainer(forHostPath(tempFile.getPath()), temptoConfig);
+            // add custom tempto config and configured_features to arguments if there are any other groups enabled
+            String[] commandParts = testContainer.getCommandParts();
+            for (int i = 0; i < commandParts.length; i++) {
+                if (commandParts[i].equals("--config")) {
+                    commandParts[i + 1] += (commandParts[i + 1].length() == 0 ? "" : ",") + temptoConfig;
+                }
+            }
+            testContainer.setCommandParts(commandParts.clone());
         }
 
         private static Consumer<OutputFrame> combineConsumers(Consumer<OutputFrame>... consumers)

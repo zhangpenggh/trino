@@ -14,11 +14,8 @@
 package io.trino.sql;
 
 import com.google.common.collect.ImmutableMap;
-import io.trino.execution.warnings.WarningCollector;
-import io.trino.security.AllowAllAccessControl;
+import io.trino.spi.type.Decimals;
 import io.trino.spi.type.Type;
-import io.trino.sql.analyzer.ExpressionAnalyzer;
-import io.trino.sql.analyzer.Scope;
 import io.trino.sql.planner.ExpressionInterpreter;
 import io.trino.sql.planner.LiteralEncoder;
 import io.trino.sql.planner.NoOpSymbolResolver;
@@ -37,12 +34,10 @@ import java.util.Map;
 import static io.trino.SessionTestUtils.TEST_SESSION;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.DecimalType.createDecimalType;
-import static io.trino.spi.type.Decimals.encodeScaledValue;
 import static io.trino.sql.planner.TestingPlannerContext.PLANNER_CONTEXT;
 import static io.trino.sql.planner.iterative.rule.test.PlanBuilder.expression;
 import static io.trino.sql.relational.Expressions.constant;
-import static io.trino.testing.assertions.Assert.assertEquals;
-import static java.util.Collections.emptyMap;
+import static org.testng.Assert.assertEquals;
 
 public class TestSqlToRowExpressionTranslator
 {
@@ -58,7 +53,7 @@ public class TestSqlToRowExpressionTranslator
             expression = new CoalesceExpression(expression, new LongLiteral("2"));
             types.put(NodeRef.of(expression), BIGINT);
         }
-        translateAndOptimize(expression, types.build());
+        translateAndOptimize(expression, types.buildOrThrow());
     }
 
     @Test
@@ -74,13 +69,13 @@ public class TestSqlToRowExpressionTranslator
         assertEquals(translateAndOptimize(expression("CAST(NULL AS DECIMAL(35,2))")), constant(null, createDecimalType(35, 2)));
         assertEquals(
                 translateAndOptimize(expression("DECIMAL '123456789012345678901234567890'")),
-                constant(encodeScaledValue(new BigDecimal("123456789012345678901234567890")), createDecimalType(30, 0)));
+                constant(Decimals.valueOf(new BigDecimal("123456789012345678901234567890")), createDecimalType(30, 0)));
         assertEquals(
                 translateAndOptimize(expression("CAST(DECIMAL '123456789012345678901234567890' AS DECIMAL(35,2))")),
-                constant(encodeScaledValue(new BigDecimal("123456789012345678901234567890.00")), createDecimalType(35, 2)));
+                constant(Decimals.valueOf(new BigDecimal("123456789012345678901234567890.00")), createDecimalType(35, 2)));
         assertEquals(
                 translateAndOptimize(simplifyExpression(expression("CAST(DECIMAL '123456789012345678901234567890' AS DECIMAL(35,2))"))),
-                constant(encodeScaledValue(new BigDecimal("123456789012345678901234567890.00")), createDecimalType(35, 2)));
+                constant(Decimals.valueOf(new BigDecimal("123456789012345678901234567890.00")), createDecimalType(35, 2)));
     }
 
     private RowExpression translateAndOptimize(Expression expression)
@@ -90,7 +85,14 @@ public class TestSqlToRowExpressionTranslator
 
     private RowExpression translateAndOptimize(Expression expression, Map<NodeRef<Expression>, Type> types)
     {
-        return SqlToRowExpressionTranslator.translate(expression, types, ImmutableMap.of(), PLANNER_CONTEXT.getMetadata(), TEST_SESSION, true);
+        return SqlToRowExpressionTranslator.translate(
+                expression,
+                types,
+                ImmutableMap.of(),
+                PLANNER_CONTEXT.getMetadata(),
+                PLANNER_CONTEXT.getFunctionManager(),
+                TEST_SESSION,
+                true);
     }
 
     private Expression simplifyExpression(Expression expression)
@@ -105,16 +107,6 @@ public class TestSqlToRowExpressionTranslator
 
     private Map<NodeRef<Expression>, Type> getExpressionTypes(Expression expression)
     {
-        ExpressionAnalyzer expressionAnalyzer = ExpressionAnalyzer.createWithoutSubqueries(
-                PLANNER_CONTEXT,
-                new AllowAllAccessControl(),
-                TEST_SESSION,
-                TypeProvider.empty(),
-                emptyMap(),
-                node -> new IllegalStateException("Unexpected node: " + node),
-                WarningCollector.NOOP,
-                false);
-        expressionAnalyzer.analyze(expression, Scope.create());
-        return expressionAnalyzer.getExpressionTypes();
+        return ExpressionUtils.getExpressionTypes(PLANNER_CONTEXT, TEST_SESSION, expression, TypeProvider.empty());
     }
 }

@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.jdbc;
 
+import io.trino.plugin.jdbc.expression.ParameterizedExpression;
 import io.trino.spi.connector.AggregateFunction;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
@@ -24,6 +25,7 @@ import io.trino.spi.connector.JoinType;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.connector.SystemTable;
 import io.trino.spi.connector.TableScanRedirectApplicationResult;
+import io.trino.spi.expression.ConnectorExpression;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.statistics.TableStatistics;
 import io.trino.spi.type.Type;
@@ -84,6 +86,12 @@ public abstract class ForwardingJdbcClient
     }
 
     @Override
+    public JdbcTableHandle getTableHandle(ConnectorSession session, PreparedQuery preparedQuery)
+    {
+        return delegate().getTableHandle(session, preparedQuery);
+    }
+
+    @Override
     public List<JdbcColumnHandle> getColumns(ConnectorSession session, JdbcTableHandle tableHandle)
     {
         return delegate().getColumns(session, tableHandle);
@@ -120,16 +128,22 @@ public abstract class ForwardingJdbcClient
     }
 
     @Override
+    public Optional<ParameterizedExpression> convertPredicate(ConnectorSession session, ConnectorExpression expression, Map<String, ColumnHandle> assignments)
+    {
+        return delegate().convertPredicate(session, expression, assignments);
+    }
+
+    @Override
     public ConnectorSplitSource getSplits(ConnectorSession session, JdbcTableHandle layoutHandle)
     {
         return delegate().getSplits(session, layoutHandle);
     }
 
     @Override
-    public Connection getConnection(ConnectorSession session, JdbcSplit split)
+    public Connection getConnection(ConnectorSession session, JdbcSplit split, JdbcTableHandle tableHandle)
             throws SQLException
     {
-        return delegate().getConnection(session, split);
+        return delegate().getConnection(session, split, tableHandle);
     }
 
     @Override
@@ -145,7 +159,7 @@ public abstract class ForwardingJdbcClient
             JdbcTableHandle table,
             Optional<List<List<JdbcColumnHandle>>> groupingSets,
             List<JdbcColumnHandle> columns,
-            Map<String, String> columnExpressions)
+            Map<String, ParameterizedExpression> columnExpressions)
     {
         return delegate().prepareQuery(session, table, groupingSets, columns, columnExpressions);
     }
@@ -178,9 +192,9 @@ public abstract class ForwardingJdbcClient
     }
 
     @Override
-    public void commitCreateTable(ConnectorSession session, JdbcOutputTableHandle handle)
+    public void commitCreateTable(ConnectorSession session, JdbcOutputTableHandle handle, Set<Long> pageSinkIds)
     {
-        delegate().commitCreateTable(session, handle);
+        delegate().commitCreateTable(session, handle, pageSinkIds);
     }
 
     @Override
@@ -190,9 +204,9 @@ public abstract class ForwardingJdbcClient
     }
 
     @Override
-    public void finishInsertTable(ConnectorSession session, JdbcOutputTableHandle handle)
+    public void finishInsertTable(ConnectorSession session, JdbcOutputTableHandle handle, Set<Long> pageSinkIds)
     {
-        delegate().finishInsertTable(session, handle);
+        delegate().finishInsertTable(session, handle, pageSinkIds);
     }
 
     @Override
@@ -205,6 +219,12 @@ public abstract class ForwardingJdbcClient
     public void rollbackCreateTable(ConnectorSession session, JdbcOutputTableHandle handle)
     {
         delegate().rollbackCreateTable(session, handle);
+    }
+
+    @Override
+    public boolean supportsRetries()
+    {
+        return delegate().supportsRetries();
     }
 
     @Override
@@ -221,16 +241,22 @@ public abstract class ForwardingJdbcClient
     }
 
     @Override
-    public PreparedStatement getPreparedStatement(Connection connection, String sql)
+    public PreparedStatement getPreparedStatement(Connection connection, String sql, Optional<Integer> columnCount)
             throws SQLException
     {
-        return delegate().getPreparedStatement(connection, sql);
+        return delegate().getPreparedStatement(connection, sql, columnCount);
     }
 
     @Override
     public TableStatistics getTableStatistics(ConnectorSession session, JdbcTableHandle handle, TupleDomain<ColumnHandle> tupleDomain)
     {
         return delegate().getTableStatistics(session, handle, tupleDomain);
+    }
+
+    @Override
+    public TableStatistics getTableStatistics(ConnectorSession session, JdbcTableHandle handle)
+    {
+        return delegate().getTableStatistics(session, handle);
     }
 
     @Override
@@ -258,6 +284,19 @@ public abstract class ForwardingJdbcClient
     }
 
     @Override
+    public Optional<String> getTableComment(ResultSet resultSet)
+            throws SQLException
+    {
+        return delegate().getTableComment(resultSet);
+    }
+
+    @Override
+    public void setTableComment(ConnectorSession session, JdbcTableHandle handle, Optional<String> comment)
+    {
+        delegate().setTableComment(session, handle, comment);
+    }
+
+    @Override
     public void setColumnComment(ConnectorSession session, JdbcTableHandle handle, JdbcColumnHandle column, Optional<String> comment)
     {
         delegate().setColumnComment(session, handle, column, comment);
@@ -282,13 +321,19 @@ public abstract class ForwardingJdbcClient
     }
 
     @Override
+    public void setColumnType(ConnectorSession session, JdbcTableHandle handle, JdbcColumnHandle column, Type type)
+    {
+        delegate().setColumnType(session, handle, column, type);
+    }
+
+    @Override
     public void renameTable(ConnectorSession session, JdbcTableHandle handle, SchemaTableName newTableName)
     {
         delegate().renameTable(session, handle, newTableName);
     }
 
     @Override
-    public void setTableProperties(ConnectorSession session, JdbcTableHandle handle, Map<String, Object> properties)
+    public void setTableProperties(ConnectorSession session, JdbcTableHandle handle, Map<String, Optional<Object>> properties)
     {
         delegate().setTableProperties(session, handle, properties);
     }
@@ -309,6 +354,12 @@ public abstract class ForwardingJdbcClient
     public void dropSchema(ConnectorSession session, String schemaName)
     {
         delegate().dropSchema(session, schemaName);
+    }
+
+    @Override
+    public void renameSchema(ConnectorSession session, String schemaName, String newSchemaName)
+    {
+        delegate().renameSchema(session, schemaName, newSchemaName);
     }
 
     @Override

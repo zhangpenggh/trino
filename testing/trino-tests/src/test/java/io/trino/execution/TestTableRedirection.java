@@ -43,7 +43,6 @@ import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
-import java.util.stream.Stream;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
@@ -52,9 +51,11 @@ import static io.trino.spi.connector.SchemaTableName.schemaTableName;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.sql.planner.optimizations.PlanNodeSearcher.searchFrom;
 import static io.trino.testing.TestingSession.testSessionBuilder;
-import static io.trino.testing.assertions.Assert.assertEquals;
 import static java.lang.String.format;
+import static java.util.Collections.emptyIterator;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.testng.Assert.assertEquals;
 
 public class TestTableRedirection
         extends AbstractTestQueryFramework
@@ -108,7 +109,7 @@ public class TestTableRedirection
                     .collect(toImmutableMap(
                             i -> schemaTableName(SCHEMA_THREE, REDIRECTION_CHAIN.get(i)),
                             i -> schemaTableName(SCHEMA_THREE, REDIRECTION_CHAIN.get(i + 1)))))
-            .build();
+            .buildOrThrow();
 
     private static final Map<String, List<ColumnMetadata>> columnMetadatas = ImmutableMap.of(
             SCHEMA_ONE,
@@ -149,7 +150,6 @@ public class TestTableRedirection
         return MockConnectorFactory.builder()
                 .withListSchemaNames(session -> SCHEMAS)
                 .withListTables((session, schemaName) -> SCHEMA_TABLE_MAPPING.getOrDefault(schemaName, ImmutableSet.of()).stream()
-                        .map(name -> new SchemaTableName(schemaName, name))
                         .collect(toImmutableList()))
                 .withStreamTableColumns((session, prefix) -> {
                     List<TableColumnsMetadata> allColumnsMetadata = SCHEMA_TABLE_MAPPING.entrySet().stream()
@@ -163,7 +163,7 @@ public class TestTableRedirection
                             .collect(toImmutableList());
 
                     if (prefix.isEmpty()) {
-                        return allColumnsMetadata.stream();
+                        return allColumnsMetadata.iterator();
                     }
 
                     String schema = prefix.getSchema().get();
@@ -171,10 +171,11 @@ public class TestTableRedirection
                     if (SCHEMAS.contains(schema)) {
                         return allColumnsMetadata.stream()
                                 .filter(columnsMetadata -> columnsMetadata.getTable().getSchemaName().equals(schema))
-                                .filter(columnsMetadata -> prefix.getTable().map(columnsMetadata.getTable().getTableName()::equals).orElse(true));
+                                .filter(columnsMetadata -> prefix.getTable().map(columnsMetadata.getTable().getTableName()::equals).orElse(true))
+                                .iterator();
                     }
 
-                    return Stream.empty();
+                    return emptyIterator();
                 })
                 .withGetTableHandle((session, tableName) -> {
                     if (SCHEMA_TABLE_MAPPING.getOrDefault(tableName.getSchemaName(), ImmutableSet.of()).contains(tableName.getTableName())
@@ -282,16 +283,14 @@ public class TestTableRedirection
                         VALID_REDIRECTION_SRC),
                 format("VALUES ('%s', '%s')", SCHEMA_ONE, VALID_REDIRECTION_SRC));
 
-        assertQueryFails(
+        assertQuery(
                 format("SELECT table_schema, table_name"
                                 + " FROM information_schema.tables"
                                 + " WHERE table_catalog='%s' AND table_schema = '%s' AND table_name='%s'",
                         CATALOG_NAME,
                         SCHEMA_ONE,
                         BAD_REDIRECTION_SRC),
-                format("Table '%1$s' redirected to '%2$s', but the target table '%2$s' does not exist",
-                        new CatalogSchemaTableName(CATALOG_NAME, SCHEMA_ONE, BAD_REDIRECTION_SRC),
-                        new CatalogSchemaTableName(CATALOG_NAME, SCHEMA_TWO, NON_EXISTENT_TABLE)));
+                format("VALUES ('%s', '%s')", SCHEMA_ONE, BAD_REDIRECTION_SRC));
 
         assertQuery(format(
                 "SELECT table_schema, table_name"
@@ -358,8 +357,8 @@ public class TestTableRedirection
     @Test
     public void testDescribeTable()
     {
-        assertEquals(computeActual(format("DESCRIBE %s.%s", SCHEMA_ONE, VALID_REDIRECTION_SRC)),
-                computeActual(format("DESCRIBE %s.%s", SCHEMA_TWO, VALID_REDIRECTION_TARGET)));
+        assertThat(query(format("DESCRIBE %s.%s", SCHEMA_ONE, VALID_REDIRECTION_SRC)))
+                .matches(format("DESCRIBE %s.%s", SCHEMA_TWO, VALID_REDIRECTION_TARGET));
 
         assertThatThrownBy(() -> query((format("DESCRIBE %s.%s", SCHEMA_ONE, BAD_REDIRECTION_SRC))))
                 .hasMessageContaining(
@@ -424,11 +423,11 @@ public class TestTableRedirection
                     TableFinishNode finishNode = searchFrom(plan.getRoot())
                             .where(TableFinishNode.class::isInstance)
                             .findOnlyElement();
-                    TableWriterNode.DeleteTarget deleteTarget = ((TableWriterNode.DeleteTarget) finishNode.getTarget());
+                    TableWriterNode.MergeTarget mergeTarget = (TableWriterNode.MergeTarget) finishNode.getTarget();
                     assertEquals(
-                            ((MockConnectorTableHandle) deleteTarget.getHandle().get().getConnectorHandle()).getTableName(),
+                            ((MockConnectorTableHandle) mergeTarget.getHandle().getConnectorHandle()).getTableName(),
                             schemaTableName(SCHEMA_TWO, VALID_REDIRECTION_TARGET));
-                    assertEquals(deleteTarget.getSchemaTableName(), schemaTableName(SCHEMA_TWO, VALID_REDIRECTION_TARGET));
+                    assertEquals(mergeTarget.getSchemaTableName(), schemaTableName(SCHEMA_TWO, VALID_REDIRECTION_TARGET));
                 });
     }
 
@@ -444,11 +443,11 @@ public class TestTableRedirection
                     TableFinishNode finishNode = searchFrom(plan.getRoot())
                             .where(TableFinishNode.class::isInstance)
                             .findOnlyElement();
-                    TableWriterNode.UpdateTarget updateTarget = ((TableWriterNode.UpdateTarget) finishNode.getTarget());
+                    TableWriterNode.MergeTarget mergeTarget = (TableWriterNode.MergeTarget) finishNode.getTarget();
                     assertEquals(
-                            ((MockConnectorTableHandle) updateTarget.getHandle().get().getConnectorHandle()).getTableName(),
+                            ((MockConnectorTableHandle) mergeTarget.getHandle().getConnectorHandle()).getTableName(),
                             schemaTableName(SCHEMA_TWO, VALID_REDIRECTION_TARGET));
-                    assertEquals(updateTarget.getSchemaTableName(), schemaTableName(SCHEMA_TWO, VALID_REDIRECTION_TARGET));
+                    assertEquals(mergeTarget.getSchemaTableName(), schemaTableName(SCHEMA_TWO, VALID_REDIRECTION_TARGET));
                 });
     }
 

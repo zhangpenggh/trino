@@ -16,7 +16,7 @@ package io.trino.spiller;
 import com.google.common.collect.ImmutableList;
 import io.trino.FeaturesConfig;
 import io.trino.RowPagesBuilder;
-import io.trino.execution.buffer.PagesSerde;
+import io.trino.execution.buffer.PageSerializer;
 import io.trino.execution.buffer.PagesSerdeFactory;
 import io.trino.memory.context.AggregatedMemoryContext;
 import io.trino.spi.Page;
@@ -34,6 +34,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.ExecutionException;
 
 import static com.google.common.io.MoreFiles.deleteRecursively;
@@ -56,7 +57,7 @@ public class TestBinaryFileSpiller
     private SpillerStats spillerStats;
     private FileSingleStreamSpillerFactory singleStreamSpillerFactory;
     private SpillerFactory factory;
-    private PagesSerde pagesSerde;
+    private PageSerializer serializer;
     private AggregatedMemoryContext memoryContext;
 
     @BeforeClass(alwaysRun = true)
@@ -78,7 +79,7 @@ public class TestBinaryFileSpiller
         singleStreamSpillerFactory = new FileSingleStreamSpillerFactory(blockEncodingSerde, spillerStats, featuresConfig, nodeSpillConfig);
         factory = new GenericSpillerFactory(singleStreamSpillerFactory);
         PagesSerdeFactory pagesSerdeFactory = new PagesSerdeFactory(blockEncodingSerde, nodeSpillConfig.isSpillCompressionEnabled());
-        pagesSerde = pagesSerdeFactory.createPagesSerde();
+        serializer = pagesSerdeFactory.createSerializer(Optional.empty());
         memoryContext = newSimpleAggregatedMemoryContext();
     }
 
@@ -139,20 +140,18 @@ public class TestBinaryFileSpiller
     }
 
     @SafeVarargs
-    private final void testSpiller(List<Type> types, Spiller spiller, List<Page>... spills)
+    private void testSpiller(List<Type> types, Spiller spiller, List<Page>... spills)
             throws ExecutionException, InterruptedException
     {
         long spilledBytesBefore = spillerStats.getTotalSpilledBytes();
         long spilledBytes = 0;
 
         assertEquals(memoryContext.getBytes(), 0);
-        try (PagesSerde.PagesSerdeContext context = pagesSerde.newContext()) {
-            for (List<Page> spill : spills) {
-                spilledBytes += spill.stream()
-                        .mapToLong(page -> pagesSerde.serialize(context, page).getSizeInBytes())
-                        .sum();
-                spiller.spill(spill.iterator()).get();
-            }
+        for (List<Page> spill : spills) {
+            spilledBytes += spill.stream()
+                    .mapToLong(page -> serializer.serialize(page).length())
+                    .sum();
+            spiller.spill(spill.iterator()).get();
         }
         assertEquals(spillerStats.getTotalSpilledBytes() - spilledBytesBefore, spilledBytes);
         // At this point, the buffers should still be accounted for in the memory context, because

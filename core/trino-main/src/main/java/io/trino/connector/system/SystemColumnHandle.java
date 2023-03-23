@@ -22,11 +22,15 @@ import io.trino.spi.connector.ConnectorTableMetadata;
 import java.util.Map;
 
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
+import static io.airlift.slice.SizeOf.estimatedSizeOf;
+import static io.airlift.slice.SizeOf.instanceSize;
 import static java.util.Objects.requireNonNull;
 
 public class SystemColumnHandle
         implements ColumnHandle
 {
+    private static final int INSTANCE_SIZE = instanceSize(SystemColumnHandle.class);
+
     private final String columnName;
 
     @JsonCreator
@@ -65,6 +69,12 @@ public class SystemColumnHandle
     public String toString()
     {
         return columnName;
+    }
+
+    public long getRetainedSizeInBytes()
+    {
+        return INSTANCE_SIZE
+                + estimatedSizeOf(columnName);
     }
 
     public static Map<String, ColumnHandle> toSystemColumnHandles(ConnectorTableMetadata tableMetadata)

@@ -37,13 +37,13 @@ import java.util.concurrent.TimeUnit;
 
 import static io.airlift.testing.Assertions.assertContains;
 import static io.trino.SystemSessionProperties.QUERY_MAX_EXECUTION_TIME;
+import static io.trino.execution.QueryRunnerUtil.cancelQuery;
+import static io.trino.execution.QueryRunnerUtil.createQuery;
+import static io.trino.execution.QueryRunnerUtil.waitForQueryState;
 import static io.trino.execution.QueryState.FAILED;
 import static io.trino.execution.QueryState.FINISHED;
 import static io.trino.execution.QueryState.QUEUED;
 import static io.trino.execution.QueryState.RUNNING;
-import static io.trino.execution.TestQueryRunnerUtil.cancelQuery;
-import static io.trino.execution.TestQueryRunnerUtil.createQuery;
-import static io.trino.execution.TestQueryRunnerUtil.waitForQueryState;
 import static io.trino.execution.TestQueues.createResourceGroupId;
 import static io.trino.execution.resourcegroups.db.H2TestUtil.TEST_ENVIRONMENT;
 import static io.trino.execution.resourcegroups.db.H2TestUtil.adhocSession;
@@ -205,7 +205,7 @@ public class TestQueuesDb
         DispatchManager dispatchManager = queryRunner.getCoordinator().getDispatchManager();
         assertEquals(dispatchManager.getQueryInfo(queryId).getErrorCode(), QUERY_REJECTED.toErrorCode());
         int selectorCount = getSelectors(queryRunner).size();
-        dao.insertSelector(4, 100_000, "user.*", "(?i).*reject.*", null, null, null);
+        dao.insertSelector(4, 100_000, "user.*", null, "(?i).*reject.*", null, null, null);
         dbConfigurationManager.load();
         assertEquals(getSelectors(queryRunner).size(), selectorCount + 1);
         // Verify the query can be submitted
@@ -247,7 +247,7 @@ public class TestQueuesDb
         dao.insertResourceGroup(8, "reject-all-queries", "1MB", 0, 0, 0, null, null, null, null, null, 3L, TEST_ENVIRONMENT);
 
         // add a new selector that has a higher priority than the existing dashboard selector and that routes queries to the "reject-all-queries" resource group
-        dao.insertSelector(8, 200, "user.*", "(?i).*dashboard.*", null, null, null);
+        dao.insertSelector(8, 200, "user.*", null, "(?i).*dashboard.*", null, null, null);
 
         // reload the configuration
         dbConfigurationManager.load();
@@ -342,7 +342,7 @@ public class TestQueuesDb
         DbResourceGroupConfigurationManager dbConfigurationManager = (DbResourceGroupConfigurationManager) manager.getConfigurationManager();
         int originalSize = getSelectors(queryRunner).size();
         // Add a selector for a non leaf group
-        dao.insertSelector(3, 100, "user.*", "(?i).*non-leaf.*", null, null, null);
+        dao.insertSelector(3, 100, "user.*", null, "(?i).*non-leaf.*", null, null, null);
         dbConfigurationManager.load();
         while (getSelectors(queryRunner).size() != originalSize + 1) {
             MILLISECONDS.sleep(500);

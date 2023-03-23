@@ -31,7 +31,6 @@ import io.trino.spi.block.RunLengthEncodedBlock;
 import io.trino.spi.type.TimeZoneKey;
 import io.trino.spi.type.Type;
 import org.joda.time.DateTimeZone;
-import org.openjdk.jol.info.ClassLayout;
 
 import javax.annotation.Nullable;
 
@@ -43,6 +42,7 @@ import java.time.ZonedDateTime;
 import java.util.Optional;
 
 import static com.google.common.base.MoreObjects.toStringHelper;
+import static io.airlift.slice.SizeOf.instanceSize;
 import static io.trino.orc.metadata.Stream.StreamKind.DATA;
 import static io.trino.orc.metadata.Stream.StreamKind.PRESENT;
 import static io.trino.orc.metadata.Stream.StreamKind.SECONDARY;
@@ -60,6 +60,7 @@ import static io.trino.spi.type.Timestamps.MICROSECONDS_PER_SECOND;
 import static io.trino.spi.type.Timestamps.NANOSECONDS_PER_MICROSECOND;
 import static io.trino.spi.type.Timestamps.NANOSECONDS_PER_MILLISECOND;
 import static io.trino.spi.type.Timestamps.PICOSECONDS_PER_MICROSECOND;
+import static io.trino.spi.type.Timestamps.PICOSECONDS_PER_MILLISECOND;
 import static io.trino.spi.type.Timestamps.PICOSECONDS_PER_NANOSECOND;
 import static io.trino.spi.type.Timestamps.roundDiv;
 import static java.lang.Math.floorDiv;
@@ -99,7 +100,7 @@ public class TimestampColumnReader
 
     private static final long BASE_INSTANT_IN_SECONDS = ORC_EPOCH.toEpochSecond(ZoneOffset.UTC);
 
-    private static final int INSTANCE_SIZE = ClassLayout.parseClass(TimestampColumnReader.class).instanceSize();
+    private static final int INSTANCE_SIZE = instanceSize(TimestampColumnReader.class);
 
     private final Type type;
     private final OrcColumn column;
@@ -125,15 +126,15 @@ public class TimestampColumnReader
 
     private boolean rowGroupOpen;
 
-    private final LocalMemoryContext systemMemoryContext;
+    private final LocalMemoryContext memoryContext;
 
-    public TimestampColumnReader(Type type, OrcColumn column, LocalMemoryContext systemMemoryContext)
+    public TimestampColumnReader(Type type, OrcColumn column, LocalMemoryContext memoryContext)
             throws OrcCorruptionException
     {
         this.type = requireNonNull(type, "type is null");
         this.column = requireNonNull(column, "column is null");
         this.timestampKind = getTimestampKind(type, column);
-        this.systemMemoryContext = requireNonNull(systemMemoryContext, "systemMemoryContext is null");
+        this.memoryContext = requireNonNull(memoryContext, "memoryContext is null");
     }
 
     private static TimestampKind getTimestampKind(Type type, OrcColumn column)
@@ -332,7 +333,7 @@ public class TimestampColumnReader
     @Override
     public void close()
     {
-        systemMemoryContext.close();
+        memoryContext.close();
     }
 
     @Override
@@ -616,6 +617,11 @@ public class TimestampColumnReader
 
             // round nanos to micros and convert to picos
             picosFraction = toIntExact(roundDiv(nanos, NANOSECONDS_PER_MICROSECOND)) * PICOSECONDS_PER_MICROSECOND;
+
+            if (picosFraction == PICOSECONDS_PER_MILLISECOND) {
+                picosFraction = 0;
+                millis++;
+            }
         }
 
         millisValues[i] = packDateTimeWithZone(millis, TimeZoneKey.UTC_KEY);

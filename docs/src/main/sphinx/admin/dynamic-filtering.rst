@@ -95,7 +95,6 @@ down to the connector in the query plan.
     Fragment 1 [SOURCE]
         Output layout: [count_3]
         Output partitioning: SINGLE []
-        Stage Execution Strategy: UNGROUPED_EXECUTION
         Aggregate(PARTIAL)
         │   Layout: [count_3:bigint]
         │   count_3 := count(*)
@@ -118,7 +117,6 @@ down to the connector in the query plan.
     Fragment 2 [SOURCE]
         Output layout: [d_date_sk, $hashvalue_6]
         Output partitioning: BROADCAST []
-        Stage Execution Strategy: UNGROUPED_EXECUTION
         ScanFilterProject[table = hive:default:date_dim, grouped = false, filterPredicate = ((""d_following_holiday"" = CAST('Y' AS char(1))) AND (""d_year"" = 2000))]
             Layout: [d_date_sk:bigint, $hashvalue_6:bigint]
             Estimates: {rows: 0 (0B), cpu: 0, memory: 0B, network: 0B}/{rows: 0 (0B), cpu: 0, memory: 0B, network: 0B}/{rows: 0 (0B), cpu: 0, memory: 0B, network: 0B}
@@ -179,7 +177,6 @@ Dynamic filters are reported as a part of the
         │   CPU: 78.00ms (30.00%), Scheduled: 295.00ms (47.05%), Output: 296 rows (0B)
         │   Left (probe) Input avg.: 120527.00 rows, Input std.dev.: 0.00%
         │   Right (build) Input avg.: 0.19 rows, Input std.dev.: 208.17%
-        │   Collisions avg.: 0.00 (0.00% est.), Collisions std.dev.: ?%
         │   Distribution: REPLICATED
         │   dynamicFilterAssignments = {d_date_sk -> #df_370}
         ├─ ScanFilterProject[table = hive:default:store_sales, grouped = false, filterPredicate = true, dynamicFilters = {"ss_sold_date_sk" = #df_370}]

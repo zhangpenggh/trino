@@ -14,11 +14,11 @@
 package io.trino.tests.product.launcher.env;
 
 import com.github.dockerjava.api.command.InspectContainerResponse;
+import dev.failsafe.Failsafe;
+import dev.failsafe.FailsafeExecutor;
+import dev.failsafe.Timeout;
 import io.airlift.log.Logger;
 import io.trino.tests.product.launcher.util.ConsoleTable;
-import net.jodah.failsafe.Failsafe;
-import net.jodah.failsafe.FailsafeExecutor;
-import net.jodah.failsafe.Timeout;
 
 import java.nio.file.Path;
 import java.util.Arrays;
@@ -94,7 +94,7 @@ public interface EnvironmentListener
         return new EnvironmentListener()
         {
             private FailsafeExecutor<?> executor = Failsafe
-                    .with(Timeout.of(ofMinutes(5)).withCancel(true))
+                    .with(Timeout.builder(ofMinutes(5)).withInterrupt().build())
                     .with(newCachedThreadPool(daemonThreadsNamed("environment-listener-%d")));
 
             @Override
@@ -260,7 +260,7 @@ public interface EnvironmentListener
             private void printContainerStats()
             {
                 ConsoleTable statistics = new ConsoleTable();
-                statistics.addHeader(HEADER);
+                statistics.addHeader(HEADER.toArray());
                 fetchers.entrySet().forEach(entry -> statistics.addRow(entry.getValue().get().toRow(entry.getKey())));
                 statistics.addSeparator();
 

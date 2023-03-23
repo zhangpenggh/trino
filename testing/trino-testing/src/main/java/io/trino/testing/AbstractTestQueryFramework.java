@@ -14,23 +14,34 @@
 package io.trino.testing;
 
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.MoreCollectors;
 import com.google.errorprone.annotations.CanIgnoreReturnValue;
 import io.airlift.units.Duration;
-import io.trino.FeaturesConfig;
-import io.trino.FeaturesConfig.JoinDistributionType;
 import io.trino.Session;
+import io.trino.execution.QueryInfo;
+import io.trino.execution.QueryManager;
+import io.trino.execution.QueryState;
 import io.trino.execution.QueryStats;
+import io.trino.execution.SqlTaskManager;
+import io.trino.execution.TaskId;
+import io.trino.execution.TaskInfo;
+import io.trino.execution.TaskState;
 import io.trino.execution.warnings.WarningCollector;
+import io.trino.memory.LocalMemoryManager;
+import io.trino.memory.MemoryPool;
 import io.trino.metadata.QualifiedObjectName;
 import io.trino.metadata.TableHandle;
 import io.trino.metadata.TableMetadata;
 import io.trino.operator.OperatorStats;
+import io.trino.server.BasicQueryInfo;
 import io.trino.server.DynamicFilterService.DynamicFiltersStats;
+import io.trino.server.testing.TestingTrinoServer;
 import io.trino.spi.QueryId;
 import io.trino.spi.type.Type;
 import io.trino.sql.analyzer.QueryExplainer;
 import io.trino.sql.parser.SqlParser;
+import io.trino.sql.planner.OptimizerConfig.JoinDistributionType;
 import io.trino.sql.planner.Plan;
 import io.trino.sql.planner.optimizations.PlanNodeSearcher;
 import io.trino.sql.planner.plan.FilterNode;
@@ -50,39 +61,49 @@ import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
 
 import java.util.List;
+import java.util.Map;
+import java.util.NoSuchElementException;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.function.Consumer;
 import java.util.function.Function;
+import java.util.stream.Collectors;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.trino.SystemSessionProperties.JOIN_DISTRIBUTION_TYPE;
 import static io.trino.SystemSessionProperties.JOIN_REORDERING_STRATEGY;
+import static io.trino.execution.StageInfo.getAllStages;
 import static io.trino.sql.ParsingUtil.createParsingOptions;
 import static io.trino.sql.SqlFormatter.formatSql;
+import static io.trino.sql.planner.OptimizerConfig.JoinReorderingStrategy;
+import static io.trino.testing.assertions.Assert.assertEventually;
 import static io.trino.transaction.TransactionBuilder.transaction;
+import static java.lang.String.format;
 import static java.util.Collections.emptyList;
+import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.testng.Assert.assertEquals;
+import static org.testng.Assert.fail;
 
 public abstract class AbstractTestQueryFramework
 {
+    private static final SqlParser SQL_PARSER = new SqlParser();
+
+    private AutoCloseableCloser afterClassCloser;
     private QueryRunner queryRunner;
     private H2QueryRunner h2QueryRunner;
-    private SqlParser sqlParser;
-    private final AutoCloseableCloser afterClassCloser = AutoCloseableCloser.create();
     private io.trino.sql.query.QueryAssertions queryAssertions;
 
     @BeforeClass
     public void init()
             throws Exception
     {
+        afterClassCloser = AutoCloseableCloser.create();
         queryRunner = afterClassCloser.register(createQueryRunner());
         h2QueryRunner = afterClassCloser.register(new H2QueryRunner());
-        sqlParser = new SqlParser();
         queryAssertions = new io.trino.sql.query.QueryAssertions(queryRunner);
     }
 
@@ -93,11 +114,156 @@ public abstract class AbstractTestQueryFramework
     public final void close()
             throws Exception
     {
-        afterClassCloser.close();
-        queryRunner = null;
-        h2QueryRunner = null;
-        sqlParser = null;
-        queryAssertions = null;
+        try (AutoCloseable ignored = afterClassCloser) {
+            checkQueryMemoryReleased();
+            checkQueryInfosFinal();
+            checkTasksDone();
+        }
+        finally {
+            afterClassCloser = null;
+            queryRunner = null;
+            h2QueryRunner = null;
+            queryAssertions = null;
+        }
+    }
+
+    private void checkQueryMemoryReleased()
+    {
+        tryGetDistributedQueryRunner().ifPresent(runner -> assertEventually(
+                new Duration(30, SECONDS),
+                new Duration(1, SECONDS),
+                () -> {
+                    List<TestingTrinoServer> servers = runner.getServers();
+                    for (int serverId = 0; serverId < servers.size(); ++serverId) {
+                        TestingTrinoServer server = servers.get(serverId);
+                        assertMemoryPoolReleased(runner.getCoordinator(), server, serverId);
+                    }
+
+                    assertThat(runner.getCoordinator().getClusterMemoryManager().getClusterTotalMemoryReservation())
+                            .describedAs("cluster memory reservation")
+                            .isZero();
+                }));
+    }
+
+    private void assertMemoryPoolReleased(TestingTrinoServer coordinator, TestingTrinoServer server, long serverId)
+    {
+        String serverName = format("server_%d(%s)", serverId, server.isCoordinator() ? "coordinator" : "worker");
+        long reservedBytes = server.getLocalMemoryManager().getMemoryPool().getReservedBytes();
+
+        if (reservedBytes != 0) {
+            fail("Expected memory reservation on " + serverName + "to be 0 but was " + reservedBytes + "; detailed memory usage:\n" + describeMemoryPool(coordinator, server));
+        }
+    }
+
+    private String describeMemoryPool(TestingTrinoServer coordinator, TestingTrinoServer server)
+    {
+        LocalMemoryManager memoryManager = server.getLocalMemoryManager();
+        MemoryPool memoryPool = memoryManager.getMemoryPool();
+        Map<QueryId, Long> queryReservations = memoryPool.getQueryMemoryReservations();
+        Map<QueryId, Map<String, Long>> queryTaggedReservations = memoryPool.getTaggedMemoryAllocations();
+
+        List<BasicQueryInfo> queriesWithMemory = coordinator.getQueryManager().getQueries().stream()
+                .filter(query -> queryReservations.containsKey(query.getQueryId()))
+                .collect(toImmutableList());
+
+        StringBuilder result = new StringBuilder();
+        queriesWithMemory.forEach(queryInfo -> {
+            QueryId queryId = queryInfo.getQueryId();
+            String querySql = queryInfo.getQuery();
+            QueryState queryState = queryInfo.getState();
+            Long memoryReservation = queryReservations.getOrDefault(queryId, 0L);
+            Map<String, Long> taggedMemoryReservation = queryTaggedReservations.getOrDefault(queryId, ImmutableMap.of());
+
+            result.append(" " + queryId + ":\n");
+            result.append("   SQL: " + querySql + "\n");
+            result.append("   state: " + queryState + "\n");
+            result.append("   memoryReservation: " + memoryReservation + "\n");
+            result.append("   taggedMemoryReservaton: " + taggedMemoryReservation + "\n");
+        });
+
+        return result.toString();
+    }
+
+    private void checkQueryInfosFinal()
+    {
+        tryGetDistributedQueryRunner().ifPresent(runner -> assertEventually(
+                new Duration(30, SECONDS),
+                new Duration(1, SECONDS),
+                () -> {
+                    TestingTrinoServer coordinator = runner.getCoordinator();
+                    QueryManager queryManager = coordinator.getQueryManager();
+                    for (BasicQueryInfo basicQueryInfo : queryManager.getQueries()) {
+                        QueryId queryId = basicQueryInfo.getQueryId();
+                        if (!basicQueryInfo.getState().isDone()) {
+                            fail("query is expected to be in a done state\n\n" + createQueryDebuggingSummary(basicQueryInfo, queryManager.getFullQueryInfo(queryId)));
+                        }
+                        QueryInfo queryInfo = queryManager.getFullQueryInfo(queryId);
+                        if (!queryInfo.isFinalQueryInfo()) {
+                            fail("QueryInfo for is expected to be final\n\n" + createQueryDebuggingSummary(basicQueryInfo, queryInfo));
+                        }
+                    }
+                }));
+    }
+
+    private void checkTasksDone()
+    {
+        tryGetDistributedQueryRunner().ifPresent(runner -> assertEventually(
+                new Duration(30, SECONDS),
+                new Duration(1, SECONDS),
+                () -> {
+                    QueryManager queryManager = runner.getCoordinator().getQueryManager();
+                    List<TestingTrinoServer> servers = runner.getServers();
+                    for (TestingTrinoServer server : servers) {
+                        SqlTaskManager taskManager = server.getTaskManager();
+                        List<TaskInfo> taskInfos = taskManager.getAllTaskInfo();
+                        for (TaskInfo taskInfo : taskInfos) {
+                            TaskId taskId = taskInfo.getTaskStatus().getTaskId();
+                            QueryId queryId = taskId.getQueryId();
+                            TaskState taskState = taskInfo.getTaskStatus().getState();
+                            if (!taskState.isDone()) {
+                                try {
+                                    BasicQueryInfo basicQueryInfo = queryManager.getQueryInfo(queryId);
+                                    QueryInfo queryInfo = queryManager.getFullQueryInfo(queryId);
+                                    String querySummary = createQueryDebuggingSummary(basicQueryInfo, queryInfo);
+                                    fail("Task is expected to be in done state, found: %s - TaskId: %s, QueryId: %s".formatted(taskState, taskId, queryId) + "\n\n" + querySummary);
+                                }
+                                catch (NoSuchElementException ignored) {
+                                }
+                                fail("Task is expected to be in done state, found: %s - TaskId: %s, QueryId: %s, Query: unknown".formatted(taskState, taskId, queryId));
+                            }
+                        }
+                    }
+                }));
+    }
+
+    private static String createQueryDebuggingSummary(BasicQueryInfo basicQueryInfo, QueryInfo queryInfo)
+    {
+        String queryDetails = format("Query %s [%s]: %s", basicQueryInfo.getQueryId(), basicQueryInfo.getState(), basicQueryInfo.getQuery());
+        if (queryInfo.getOutputStage().isEmpty()) {
+            return queryDetails + " -- <no output stage present>";
+        }
+        else {
+            return queryDetails + getAllStages(queryInfo.getOutputStage()).stream()
+                    .map(stageInfo -> {
+                        String stageDetail = format("Stage %s [%s]", stageInfo.getStageId(), stageInfo.getState());
+                        if (stageInfo.getTasks().isEmpty()) {
+                            return stageDetail;
+                        }
+                        return stageDetail + stageInfo.getTasks().stream()
+                                .map(TaskInfo::getTaskStatus)
+                                .map(task -> {
+                                    String taskDetail = format("Task %s [%s]", task.getTaskId(), task.getState());
+                                    if (task.getFailures().isEmpty()) {
+                                        return taskDetail;
+                                    }
+                                    return " -- Failures: " + task.getFailures().stream()
+                                            .map(failure -> format("%s %s: %s", failure.getErrorCode(), failure.getType(), failure.getMessage()))
+                                            .collect(Collectors.joining(", ", "[", "]"));
+                                })
+                                .collect(Collectors.joining("\n\t\t", ":\n\t\t", ""));
+                    })
+                    .collect(Collectors.joining("\n\n\t", "\nStages:\n\t", ""));
+        }
     }
 
     @Test
@@ -387,7 +553,7 @@ public abstract class AbstractTestQueryFramework
             Consumer<MaterializedResult> resultAssertion)
     {
         DistributedQueryRunner queryRunner = getDistributedQueryRunner();
-        ResultWithQueryId<MaterializedResult> resultWithQueryId = queryRunner.executeWithQueryId(session, query);
+        MaterializedResultWithQueryId resultWithQueryId = queryRunner.executeWithQueryId(session, query);
         QueryStats queryStats = queryRunner.getCoordinator()
                 .getQueryManager()
                 .getFullQueryInfo(resultWithQueryId.getQueryId())
@@ -412,29 +578,33 @@ public abstract class AbstractTestQueryFramework
         }
     }
 
-    protected String formatSqlText(String sql)
+    protected String formatSqlText(@Language("SQL") String sql)
     {
-        return formatSql(sqlParser.createStatement(sql, createParsingOptions(getSession())));
+        return formatSql(SQL_PARSER.createStatement(sql, createParsingOptions(getSession())));
     }
 
-    //TODO: should WarningCollector be added?
-    protected String getExplainPlan(String query, ExplainType.Type planType)
+    protected String getExplainPlan(@Language("SQL") String query, ExplainType.Type planType)
+    {
+        return getExplainPlan(getSession(), query, planType);
+    }
+
+    protected String getExplainPlan(Session session, @Language("SQL") String query, ExplainType.Type planType)
     {
         QueryExplainer explainer = queryRunner.getQueryExplainer();
         return newTransaction()
                 .singleStatement()
-                .execute(getSession(), session -> {
-                    return explainer.getPlan(session, sqlParser.createStatement(query, createParsingOptions(session)), planType, emptyList(), WarningCollector.NOOP);
+                .execute(session, transactionSession -> {
+                    return explainer.getPlan(transactionSession, SQL_PARSER.createStatement(query, createParsingOptions(transactionSession)), planType, emptyList(), WarningCollector.NOOP);
                 });
     }
 
-    protected String getGraphvizExplainPlan(String query, ExplainType.Type planType)
+    protected String getGraphvizExplainPlan(@Language("SQL") String query, ExplainType.Type planType)
     {
         QueryExplainer explainer = queryRunner.getQueryExplainer();
         return newTransaction()
                 .singleStatement()
                 .execute(queryRunner.getDefaultSession(), session -> {
-                    return explainer.getGraphvizPlan(session, sqlParser.createStatement(query, createParsingOptions(session)), planType, emptyList(), WarningCollector.NOOP);
+                    return explainer.getGraphvizPlan(session, SQL_PARSER.createStatement(query, createParsingOptions(session)), planType, emptyList(), WarningCollector.NOOP);
                 });
     }
 
@@ -454,8 +624,16 @@ public abstract class AbstractTestQueryFramework
     protected final DistributedQueryRunner getDistributedQueryRunner()
     {
         checkState(queryRunner != null, "queryRunner not set");
-        checkState(queryRunner instanceof DistributedQueryRunner, "queryRunner is not a DistributedQueryRunner");
+        checkState(queryRunner instanceof DistributedQueryRunner, "queryRunner is not a DistributedQueryRunner: %s [%s]", queryRunner, queryRunner.getClass());
         return (DistributedQueryRunner) queryRunner;
+    }
+
+    private Optional<DistributedQueryRunner> tryGetDistributedQueryRunner()
+    {
+        if (queryRunner != null && queryRunner instanceof DistributedQueryRunner runner) {
+            return Optional.of(runner);
+        }
+        return Optional.empty();
     }
 
     protected Session noJoinReordering()
@@ -466,7 +644,7 @@ public abstract class AbstractTestQueryFramework
     protected Session noJoinReordering(JoinDistributionType distributionType)
     {
         return Session.builder(getSession())
-                .setSystemProperty(JOIN_REORDERING_STRATEGY, FeaturesConfig.JoinReorderingStrategy.NONE.name())
+                .setSystemProperty(JOIN_REORDERING_STRATEGY, JoinReorderingStrategy.NONE.name())
                 .setSystemProperty(JOIN_DISTRIBUTION_TYPE, distributionType.name())
                 .build();
     }
@@ -477,18 +655,15 @@ public abstract class AbstractTestQueryFramework
         Plan plan = runner.getQueryPlan(queryId);
         PlanNodeId nodeId = PlanNodeSearcher.searchFrom(plan.getRoot())
                 .where(node -> {
-                    if (!(node instanceof ProjectNode)) {
+                    if (!(node instanceof ProjectNode projectNode)) {
                         return false;
                     }
-                    ProjectNode projectNode = (ProjectNode) node;
-                    if (!(projectNode.getSource() instanceof FilterNode)) {
+                    if (!(projectNode.getSource() instanceof FilterNode filterNode)) {
                         return false;
                     }
-                    FilterNode filterNode = (FilterNode) projectNode.getSource();
-                    if (!(filterNode.getSource() instanceof TableScanNode)) {
+                    if (!(filterNode.getSource() instanceof TableScanNode tableScanNode)) {
                         return false;
                     }
-                    TableScanNode tableScanNode = (TableScanNode) filterNode.getSource();
                     TableMetadata tableMetadata = getTableMetadata(tableScanNode.getTable());
                     return tableMetadata.getQualifiedName().equals(catalogSchemaTableName);
                 })
@@ -527,7 +702,7 @@ public abstract class AbstractTestQueryFramework
     {
         return inTransaction(getSession(), transactionSession -> {
             // metadata.getCatalogHandle() registers the catalog for the transaction
-            getQueryRunner().getMetadata().getCatalogHandle(transactionSession, tableHandle.getCatalogName().getCatalogName());
+            getQueryRunner().getMetadata().getCatalogHandle(transactionSession, tableHandle.getCatalogHandle().getCatalogName());
             return getQueryRunner().getMetadata().getTableMetadata(transactionSession, tableHandle);
         });
     }
@@ -542,6 +717,11 @@ public abstract class AbstractTestQueryFramework
     @CanIgnoreReturnValue
     protected final <T extends AutoCloseable> T closeAfterClass(T resource)
     {
+        checkState(
+                afterClassCloser != null,
+                "closeAfterClass invoked before test is initialized or after it is torn down. " +
+                        "In particular, make sure you do not allocate any resources in a test class constructor, " +
+                        "as this can easily lead to OutOfMemoryErrors and other types of test flakiness.");
         return afterClassCloser.register(resource);
     }
 }

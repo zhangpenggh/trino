@@ -15,6 +15,7 @@ package io.trino.spi.eventlistener;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import io.trino.spi.Unstable;
 import io.trino.spi.resourcegroups.QueryType;
 import io.trino.spi.resourcegroups.ResourceGroupId;
 import io.trino.spi.session.ResourceEstimates;
@@ -55,7 +56,10 @@ public class QueryContext
 
     private final Optional<QueryType> queryType;
 
+    private final String retryPolicy;
+
     @JsonCreator
+    @Unstable
     public QueryContext(
             String user,
             Optional<String> principal,
@@ -75,7 +79,8 @@ public class QueryContext
             String serverAddress,
             String serverVersion,
             String environment,
-            Optional<QueryType> queryType)
+            Optional<QueryType> queryType,
+            String retryPolicy)
     {
         this.user = requireNonNull(user, "user is null");
         this.principal = requireNonNull(principal, "principal is null");
@@ -96,6 +101,7 @@ public class QueryContext
         this.serverVersion = requireNonNull(serverVersion, "serverVersion is null");
         this.environment = requireNonNull(environment, "environment is null");
         this.queryType = requireNonNull(queryType, "queryType is null");
+        this.retryPolicy = requireNonNull(retryPolicy, "retryPolicy is null");
     }
 
     @JsonProperty
@@ -210,5 +216,11 @@ public class QueryContext
     public Optional<QueryType> getQueryType()
     {
         return queryType;
+    }
+
+    @JsonProperty
+    public String getRetryPolicy()
+    {
+        return retryPolicy;
     }
 }

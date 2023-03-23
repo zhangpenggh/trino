@@ -68,7 +68,7 @@ import static io.airlift.slice.Slices.utf8Slice;
 import static io.trino.SystemSessionProperties.isOmitDateTimeTypePrecision;
 import static io.trino.connector.system.jdbc.FilterUtil.tablePrefix;
 import static io.trino.connector.system.jdbc.FilterUtil.tryGetSingleVarcharValue;
-import static io.trino.metadata.MetadataListing.listCatalogs;
+import static io.trino.metadata.MetadataListing.listCatalogNames;
 import static io.trino.metadata.MetadataListing.listSchemas;
 import static io.trino.metadata.MetadataListing.listTableColumns;
 import static io.trino.metadata.MetadataListing.listTables;
@@ -174,7 +174,7 @@ public class ColumnJdbcTable
             return tupleDomain;
         }
 
-        List<String> catalogs = listCatalogs(session, metadata, accessControl, catalogFilter).keySet().stream()
+        List<String> catalogs = listCatalogNames(session, metadata, accessControl, catalogFilter).stream()
                 .filter(catalogName -> predicate.test(ImmutableMap.of(TABLE_CATALOG_COLUMN, toNullableValue(catalogName))))
                 .collect(toImmutableList());
 
@@ -197,7 +197,7 @@ public class ColumnJdbcTable
                             .map(CatalogSchemaName::getSchemaName)
                             .collect(toVarcharDomain())
                             .simplify(MAX_DOMAIN_SIZE))
-                    .build());
+                    .buildOrThrow());
         }
 
         List<CatalogSchemaTableName> tables = schemas.stream()
@@ -227,7 +227,7 @@ public class ColumnJdbcTable
                         .map(catalogSchemaTableName -> catalogSchemaTableName.getSchemaTableName().getTableName())
                         .collect(toVarcharDomain())
                         .simplify(MAX_DOMAIN_SIZE))
-                .build());
+                .buildOrThrow());
     }
 
     @Override
@@ -253,7 +253,7 @@ public class ColumnJdbcTable
             return table.build().cursor();
         }
 
-        for (String catalog : listCatalogs(session, metadata, accessControl, catalogFilter).keySet()) {
+        for (String catalog : listCatalogNames(session, metadata, accessControl, catalogFilter)) {
             if (!catalogDomain.includesNullableValue(utf8Slice(catalog))) {
                 continue;
             }
@@ -309,29 +309,53 @@ public class ColumnJdbcTable
                 continue;
             }
             builder.addRow(
+                    // table_cat
                     catalog,
+                    // table_schem
                     tableName.getSchemaName(),
+                    // table_name
                     tableName.getTableName(),
+                    // column_name
                     column.getName(),
+                    // data_type
                     jdbcDataType(column.getType()),
+                    // type_name
                     getDisplayLabel(column.getType(), isOmitTimestampPrecision),
+                    // column_size
                     columnSize(column.getType()),
+                    // buffer_length
                     0,
+                    // decimal_digits
                     decimalDigits(column.getType()),
+                    // num_prec_radix
                     numPrecRadix(column.getType()),
-                    DatabaseMetaData.columnNullableUnknown,
+                    // nullable
+                    column.isNullable() ? DatabaseMetaData.columnNullable : DatabaseMetaData.columnNoNulls,
+                    // remarks
                     column.getComment(),
+                    // column_def
                     null,
+                    // sql_data_type
                     null,
+                    // sql_datetime_sub
                     null,
+                    // char_octet_length
                     charOctetLength(column.getType()),
+                    // ordinal_position
                     ordinalPosition,
-                    "",
+                    // is_nullable
+                    column.isNullable() ? "YES" : "NO",
+                    // scope_catalog
                     null,
+                    // scope_schema
                     null,
+                    // scope_table
                     null,
+                    // source_data_type
                     null,
+                    // is_autoincrement
                     null,
+                    // is_generatedcolumn
                     null);
             ordinalPosition++;
         }
