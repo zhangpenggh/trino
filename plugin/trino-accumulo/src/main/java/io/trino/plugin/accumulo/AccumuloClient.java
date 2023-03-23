@@ -36,6 +36,7 @@ import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ColumnMetadata;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorTableMetadata;
+import io.trino.spi.connector.SchemaNotFoundException;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.connector.TableNotFoundException;
 import io.trino.spi.predicate.Domain;
@@ -50,7 +51,6 @@ import org.apache.accumulo.core.data.PartialKey;
 import org.apache.accumulo.core.data.Range;
 import org.apache.accumulo.core.data.Value;
 import org.apache.accumulo.core.security.Authorizations;
-import org.apache.commons.lang3.tuple.Pair;
 import org.apache.hadoop.io.Text;
 
 import javax.inject.Inject;
@@ -71,6 +71,7 @@ import java.util.stream.Collectors;
 import static io.trino.plugin.accumulo.AccumuloErrorCode.ACCUMULO_TABLE_DNE;
 import static io.trino.plugin.accumulo.AccumuloErrorCode.ACCUMULO_TABLE_EXISTS;
 import static io.trino.plugin.accumulo.AccumuloErrorCode.UNEXPECTED_ACCUMULO_ERROR;
+import static io.trino.plugin.accumulo.metadata.ZooKeeperMetadataManager.DEFAULT_SCHEMA;
 import static io.trino.spi.StandardErrorCode.ALREADY_EXISTS;
 import static io.trino.spi.StandardErrorCode.FUNCTION_IMPLEMENTATION_ERROR;
 import static io.trino.spi.StandardErrorCode.INVALID_TABLE_PROPERTY;
@@ -105,12 +106,29 @@ public class AccumuloClient
             throws AccumuloException, AccumuloSecurityException
     {
         this.connector = requireNonNull(connector, "connector is null");
-        this.username = requireNonNull(config, "config is null").getUsername();
+        this.username = config.getUsername();
         this.metaManager = requireNonNull(metaManager, "metaManager is null");
         this.tableManager = requireNonNull(tableManager, "tableManager is null");
         this.indexLookup = requireNonNull(indexLookup, "indexLookup is null");
 
         this.auths = connector.securityOperations().getUserAuthorizations(username);
+
+        // The default namespace is created in ZooKeeperMetadataManager's constructor
+        if (!tableManager.namespaceExists(DEFAULT_SCHEMA)) {
+            tableManager.createNamespace(DEFAULT_SCHEMA);
+        }
+    }
+
+    public void createSchema(String schemaName)
+    {
+        metaManager.createSchema(schemaName);
+        tableManager.createNamespace(schemaName);
+    }
+
+    public void dropSchema(String schemaName)
+    {
+        metaManager.dropSchema(schemaName);
+        tableManager.dropNamespace(schemaName);
     }
 
     public AccumuloTable createTable(ConnectorTableMetadata meta)
@@ -134,11 +152,13 @@ public class AccumuloClient
                 AccumuloTableProperties.getSerializerClass(tableProperties),
                 AccumuloTableProperties.getScanAuthorizations(tableProperties));
 
+        // Make sure the namespace exists
+        if (!tableManager.namespaceExists(table.getSchema())) {
+            throw new SchemaNotFoundException(table.getSchema());
+        }
+
         // First, create the metadata
         metaManager.createTableMetadata(table);
-
-        // Make sure the namespace exists
-        tableManager.ensureNamespace(table.getSchema());
 
         // Create the Accumulo table if it does not exist (for 'external' table)
         if (!tableManager.exists(table.getFullTableName())) {
@@ -195,7 +215,7 @@ public class AccumuloClient
             throw new TrinoException(INVALID_TABLE_PROPERTY, "Duplicate column names are not supported");
         }
 
-        Optional<Map<String, Pair<String, String>>> columnMapping = AccumuloTableProperties.getColumnMapping(meta.getProperties());
+        Optional<Map<String, Entry<String, String>>> columnMapping = AccumuloTableProperties.getColumnMapping(meta.getProperties());
         if (columnMapping.isPresent()) {
             // Validate there are no duplicates in the column mapping
             long distinctMappings = columnMapping.get().values().stream().distinct().count();
@@ -283,13 +303,14 @@ public class AccumuloClient
     private static String getRowIdColumn(ConnectorTableMetadata meta)
     {
         Optional<String> rowIdColumn = AccumuloTableProperties.getRowId(meta.getProperties());
-        return rowIdColumn.orElse(meta.getColumns().get(0).getName()).toLowerCase(Locale.ENGLISH);
+        return rowIdColumn.orElseGet(() -> meta.getColumns().get(0).getName()).toLowerCase(Locale.ENGLISH);
     }
 
     private static List<AccumuloColumnHandle> getColumnHandles(ConnectorTableMetadata meta, String rowIdColumn)
     {
         // Get the column mappings from the table property or auto-generate columns if not defined
-        Map<String, Pair<String, String>> mapping = AccumuloTableProperties.getColumnMapping(meta.getProperties()).orElse(autoGenerateMapping(meta.getColumns(), AccumuloTableProperties.getLocalityGroups(meta.getProperties())));
+        Map<String, Entry<String, String>> mapping = AccumuloTableProperties.getColumnMapping(meta.getProperties())
+                .orElseGet(() -> autoGenerateMapping(meta.getColumns(), AccumuloTableProperties.getLocalityGroups(meta.getProperties())));
 
         // The list of indexed columns
         Optional<List<String>> indexedColumns = AccumuloTableProperties.getIndexColumns(meta.getProperties());
@@ -309,6 +330,7 @@ public class AccumuloClient
                                 cm.getType(),
                                 ordinal,
                                 "Accumulo row ID",
+                                Optional.ofNullable(cm.getComment()),
                                 false));
             }
             else {
@@ -317,19 +339,20 @@ public class AccumuloClient
                 }
 
                 // Get the mapping for this column
-                Pair<String, String> famqual = mapping.get(cm.getName());
+                Entry<String, String> famqual = mapping.get(cm.getName());
                 boolean indexed = indexedColumns.isPresent() && indexedColumns.get().contains(cm.getName().toLowerCase(Locale.ENGLISH));
-                String comment = format("Accumulo column %s:%s. Indexed: %b", famqual.getLeft(), famqual.getRight(), indexed);
+                String extraInfo = format("Accumulo column %s:%s. Indexed: %b", famqual.getKey(), famqual.getValue(), indexed);
 
                 // Create a new AccumuloColumnHandle object
                 cBuilder.add(
                         new AccumuloColumnHandle(
                                 cm.getName(),
-                                Optional.of(famqual.getLeft()),
-                                Optional.of(famqual.getRight()),
+                                Optional.of(famqual.getKey()),
+                                Optional.of(famqual.getValue()),
                                 cm.getType(),
                                 ordinal,
-                                comment,
+                                extraInfo,
+                                Optional.ofNullable(cm.getComment()),
                                 indexed));
             }
         }
@@ -363,7 +386,7 @@ public class AccumuloClient
             localityGroupsBuilder.put(g.getKey(), familyBuilder.build());
         }
 
-        Map<String, Set<Text>> localityGroups = localityGroupsBuilder.build();
+        Map<String, Set<Text>> localityGroups = localityGroupsBuilder.buildOrThrow();
         LOG.debug("Setting locality groups: %s", localityGroups);
         tableManager.setLocalityGroups(table.getFullTableName(), localityGroups);
     }
@@ -409,12 +432,12 @@ public class AccumuloClient
      * @param groups Mapping of locality groups to a set of Trino columns, or null if none
      * @return Column mappings
      */
-    private static Map<String, Pair<String, String>> autoGenerateMapping(List<ColumnMetadata> columns, Optional<Map<String, Set<String>>> groups)
+    private static Map<String, Entry<String, String>> autoGenerateMapping(List<ColumnMetadata> columns, Optional<Map<String, Set<String>>> groups)
     {
-        Map<String, Pair<String, String>> mapping = new HashMap<>();
+        Map<String, Entry<String, String>> mapping = new HashMap<>();
         for (ColumnMetadata column : columns) {
             Optional<String> family = getColumnLocalityGroup(column.getName(), groups);
-            mapping.put(column.getName(), Pair.of(family.orElse(column.getName()), column.getName()));
+            mapping.put(column.getName(), Map.entry(family.orElse(column.getName()), column.getName()));
         }
         return mapping;
     }
@@ -543,6 +566,10 @@ public class AccumuloClient
 
     public void createView(SchemaTableName viewName, String viewData)
     {
+        if (!tableManager.namespaceExists(viewName.getSchemaName())) {
+            throw new SchemaNotFoundException(viewName.getSchemaName());
+        }
+
         if (getSchemaNames().contains(viewName.getSchemaName())) {
             if (getViewNames(viewName.getSchemaName()).contains(viewName.getTableName())) {
                 throw new TrinoException(ALREADY_EXISTS, "View already exists");
@@ -558,6 +585,10 @@ public class AccumuloClient
 
     public void createOrReplaceView(SchemaTableName viewName, String viewData)
     {
+        if (!tableManager.namespaceExists(viewName.getSchemaName())) {
+            throw new SchemaNotFoundException(viewName.getSchemaName());
+        }
+
         if (getView(viewName) != null) {
             metaManager.deleteViewMetadata(viewName);
         }
@@ -586,6 +617,7 @@ public class AccumuloClient
                         columnHandle.getQualifier(),
                         columnHandle.getType(),
                         columnHandle.getOrdinal(),
+                        columnHandle.getExtraInfo(),
                         columnHandle.getComment(),
                         columnHandle.isIndexed()));
             }
@@ -823,20 +855,18 @@ public class AccumuloClient
                         location = Optional.of(entry.getValue().toString());
                         break;
                     }
-                    else {
-                        // Chop off some magic nonsense
-                        scannedCompareKey.set(keyBytes, 3, keyBytes.length - 3);
+                    // Chop off some magic nonsense
+                    scannedCompareKey.set(keyBytes, 3, keyBytes.length - 3);
 
-                        // Compare the keys, moving along the tablets until the location is found
-                        if (scannedCompareKey.getLength() > 0) {
-                            int compareTo = splitCompareKey.compareTo(scannedCompareKey);
-                            if (compareTo <= 0) {
-                                location = Optional.of(entry.getValue().toString());
-                            }
-                            else {
-                                // all future tablets will be greater than this key
-                                break;
-                            }
+                    // Compare the keys, moving along the tablets until the location is found
+                    if (scannedCompareKey.getLength() > 0) {
+                        int compareTo = splitCompareKey.compareTo(scannedCompareKey);
+                        if (compareTo <= 0) {
+                            location = Optional.of(entry.getValue().toString());
+                        }
+                        else {
+                            // all future tablets will be greater than this key
+                            break;
                         }
                     }
                 }

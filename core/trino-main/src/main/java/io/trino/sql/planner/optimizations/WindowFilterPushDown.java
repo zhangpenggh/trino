@@ -15,15 +15,15 @@ package io.trino.sql.planner.optimizations;
 
 import com.google.common.collect.ImmutableList;
 import io.trino.Session;
+import io.trino.cost.TableStatsProvider;
 import io.trino.execution.warnings.WarningCollector;
-import io.trino.metadata.FunctionId;
-import io.trino.metadata.Metadata;
+import io.trino.spi.function.FunctionId;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.Range;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.predicate.ValueSet;
-import io.trino.spi.type.TypeOperators;
 import io.trino.sql.ExpressionUtils;
+import io.trino.sql.PlannerContext;
 import io.trino.sql.planner.DomainTranslator;
 import io.trino.sql.planner.PlanNodeIdAllocator;
 import io.trino.sql.planner.Symbol;
@@ -51,7 +51,6 @@ import static io.trino.SystemSessionProperties.isOptimizeTopNRanking;
 import static io.trino.spi.predicate.Range.range;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.sql.planner.DomainTranslator.ExtractionResult;
-import static io.trino.sql.planner.DomainTranslator.fromPredicate;
 import static io.trino.sql.planner.plan.ChildReplacer.replaceChildren;
 import static io.trino.sql.planner.plan.TopNRankingNode.RankingType.RANK;
 import static io.trino.sql.planner.plan.TopNRankingNode.RankingType.ROW_NUMBER;
@@ -61,17 +60,15 @@ import static java.util.Objects.requireNonNull;
 public class WindowFilterPushDown
         implements PlanOptimizer
 {
-    private final Metadata metadata;
-    private final TypeOperators typeOperators;
+    private final PlannerContext plannerContext;
 
-    public WindowFilterPushDown(Metadata metadata, TypeOperators typeOperators)
+    public WindowFilterPushDown(PlannerContext plannerContext)
     {
-        this.metadata = requireNonNull(metadata, "metadata is null");
-        this.typeOperators = requireNonNull(typeOperators, "typeOperators is null");
+        this.plannerContext = requireNonNull(plannerContext, "plannerContext is null");
     }
 
     @Override
-    public PlanNode optimize(PlanNode plan, Session session, TypeProvider types, SymbolAllocator symbolAllocator, PlanNodeIdAllocator idAllocator, WarningCollector warningCollector)
+    public PlanNode optimize(PlanNode plan, Session session, TypeProvider types, SymbolAllocator symbolAllocator, PlanNodeIdAllocator idAllocator, WarningCollector warningCollector, TableStatsProvider tableStatsProvider)
     {
         requireNonNull(plan, "plan is null");
         requireNonNull(session, "session is null");
@@ -79,15 +76,14 @@ public class WindowFilterPushDown
         requireNonNull(symbolAllocator, "symbolAllocator is null");
         requireNonNull(idAllocator, "idAllocator is null");
 
-        return SimplePlanRewriter.rewriteWith(new Rewriter(idAllocator, metadata, typeOperators, session, types), plan, null);
+        return SimplePlanRewriter.rewriteWith(new Rewriter(idAllocator, plannerContext, session, types), plan, null);
     }
 
     private static class Rewriter
             extends SimplePlanRewriter<Void>
     {
         private final PlanNodeIdAllocator idAllocator;
-        private final Metadata metadata;
-        private final TypeOperators typeOperators;
+        private final PlannerContext plannerContext;
         private final Session session;
         private final TypeProvider types;
         private final FunctionId rowNumberFunctionId;
@@ -96,19 +92,17 @@ public class WindowFilterPushDown
 
         private Rewriter(
                 PlanNodeIdAllocator idAllocator,
-                Metadata metadata,
-                TypeOperators typeOperators,
+                PlannerContext plannerContext,
                 Session session,
                 TypeProvider types)
         {
             this.idAllocator = requireNonNull(idAllocator, "idAllocator is null");
-            this.metadata = requireNonNull(metadata, "metadata is null");
-            this.typeOperators = requireNonNull(typeOperators, "typeOperators is null");
+            this.plannerContext = requireNonNull(plannerContext, "plannerContext is null");
             this.session = requireNonNull(session, "session is null");
             this.types = requireNonNull(types, "types is null");
-            rowNumberFunctionId = metadata.resolveFunction(session, QualifiedName.of("row_number"), ImmutableList.of()).getFunctionId();
-            rankFunctionId = metadata.resolveFunction(session, QualifiedName.of("rank"), ImmutableList.of()).getFunctionId();
-            domainTranslator = new DomainTranslator(session, metadata);
+            rowNumberFunctionId = plannerContext.getMetadata().resolveFunction(session, QualifiedName.of("row_number"), ImmutableList.of()).getFunctionId();
+            rankFunctionId = plannerContext.getMetadata().resolveFunction(session, QualifiedName.of("rank"), ImmutableList.of()).getFunctionId();
+            domainTranslator = new DomainTranslator(plannerContext);
         }
 
         @Override
@@ -154,8 +148,7 @@ public class WindowFilterPushDown
                 }
                 source = rowNumberNode;
             }
-            else if (source instanceof WindowNode && isOptimizeTopNRanking(session)) {
-                WindowNode windowNode = (WindowNode) source;
+            else if (source instanceof WindowNode windowNode && isOptimizeTopNRanking(session)) {
                 Optional<RankingType> rankingType = toTopNRankingType(windowNode);
                 if (rankingType.isPresent()) {
                     TopNRankingNode topNRankingNode = convertToTopNRanking(windowNode, rankingType.get(), limit);
@@ -173,7 +166,7 @@ public class WindowFilterPushDown
         {
             PlanNode source = context.rewrite(node.getSource());
 
-            TupleDomain<Symbol> tupleDomain = fromPredicate(metadata, typeOperators, session, node.getPredicate(), types).getTupleDomain();
+            TupleDomain<Symbol> tupleDomain = DomainTranslator.getExtractionResult(plannerContext, session, node.getPredicate(), types).getTupleDomain();
 
             if (source instanceof RowNumberNode) {
                 Symbol rowNumberSymbol = ((RowNumberNode) source).getRowNumberSymbol();
@@ -187,8 +180,7 @@ public class WindowFilterPushDown
                     return rewriteFilterSource(node, source, rowNumberSymbol, ((RowNumberNode) source).getMaxRowCountPerPartition().get());
                 }
             }
-            else if (source instanceof WindowNode && isOptimizeTopNRanking(session)) {
-                WindowNode windowNode = (WindowNode) source;
+            else if (source instanceof WindowNode windowNode && isOptimizeTopNRanking(session)) {
                 Optional<RankingType> rankingType = toTopNRankingType(windowNode);
                 if (rankingType.isPresent()) {
                     Symbol rankingSymbol = getOnlyElement(windowNode.getWindowFunctions().entrySet()).getKey();
@@ -208,7 +200,7 @@ public class WindowFilterPushDown
 
         private PlanNode rewriteFilterSource(FilterNode filterNode, PlanNode source, Symbol rankingSymbol, int upperBound)
         {
-            ExtractionResult extractionResult = fromPredicate(metadata, typeOperators, session, filterNode.getPredicate(), types);
+            ExtractionResult extractionResult = DomainTranslator.getExtractionResult(plannerContext, session, filterNode.getPredicate(), types);
             TupleDomain<Symbol> tupleDomain = extractionResult.getTupleDomain();
 
             if (!allRankingValuesInDomain(tupleDomain, rankingSymbol, upperBound)) {
@@ -218,9 +210,9 @@ public class WindowFilterPushDown
             // Remove the ranking domain because it is absorbed into the node
             TupleDomain<Symbol> newTupleDomain = tupleDomain.filter((symbol, domain) -> !symbol.equals(rankingSymbol));
             Expression newPredicate = ExpressionUtils.combineConjuncts(
-                    metadata,
+                    plannerContext.getMetadata(),
                     extractionResult.getRemainingExpression(),
-                    domainTranslator.toPredicate(newTupleDomain));
+                    domainTranslator.toPredicate(session, newTupleDomain));
 
             if (newPredicate.equals(BooleanLiteral.TRUE_LITERAL)) {
                 return source;

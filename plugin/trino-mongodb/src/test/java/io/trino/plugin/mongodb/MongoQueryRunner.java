@@ -18,13 +18,15 @@ import com.google.common.collect.ImmutableMap;
 import com.mongodb.client.MongoClient;
 import com.mongodb.client.MongoClients;
 import io.airlift.log.Logger;
-import io.airlift.log.Logging;
 import io.trino.Session;
 import io.trino.plugin.tpch.TpchPlugin;
 import io.trino.testing.DistributedQueryRunner;
+import io.trino.testing.QueryRunner;
 import io.trino.tpch.TpchTable;
 
+import java.util.HashMap;
 import java.util.Map;
+import java.util.function.Consumer;
 
 import static io.airlift.testing.Closeables.closeAllSuppress;
 import static io.trino.plugin.tpch.TpchMetadata.TINY_SCHEMA_NAME;
@@ -46,21 +48,35 @@ public final class MongoQueryRunner
     public static DistributedQueryRunner createMongoQueryRunner(MongoServer server, Map<String, String> extraProperties, Iterable<TpchTable<?>> tables)
             throws Exception
     {
+        return createMongoQueryRunner(server, extraProperties, ImmutableMap.of(), ImmutableMap.of(), tables, runner -> {});
+    }
+
+    public static DistributedQueryRunner createMongoQueryRunner(
+            MongoServer server,
+            Map<String, String> extraProperties,
+            Map<String, String> coordinatorProperties,
+            Map<String, String> connectorProperties,
+            Iterable<TpchTable<?>> tables,
+            Consumer<QueryRunner> moreSetup)
+            throws Exception
+    {
         DistributedQueryRunner queryRunner = null;
         try {
             queryRunner = DistributedQueryRunner.builder(createSession())
                     .setExtraProperties(extraProperties)
+                    .setCoordinatorProperties(coordinatorProperties)
+                    .setAdditionalSetup(moreSetup)
                     .build();
 
             queryRunner.installPlugin(new TpchPlugin());
             queryRunner.createCatalog("tpch", "tpch");
 
-            Map<String, String> properties = ImmutableMap.of(
-                    "mongodb.case-insensitive-name-matching", "true",
-                    "mongodb.connection-url", server.getConnectionString().toString());
+            connectorProperties = new HashMap(ImmutableMap.copyOf(connectorProperties));
+            connectorProperties.putIfAbsent("mongodb.connection-url", server.getConnectionString().toString());
 
             queryRunner.installPlugin(new MongoPlugin());
-            queryRunner.createCatalog("mongodb", "mongodb", properties);
+            queryRunner.createCatalog("mongodb", "mongodb", connectorProperties);
+            queryRunner.execute("CREATE SCHEMA mongodb." + TPCH_SCHEMA);
 
             copyTpchTables(queryRunner, "tpch", TINY_SCHEMA_NAME, createSession(), tables);
             return queryRunner;
@@ -87,7 +103,6 @@ public final class MongoQueryRunner
     public static void main(String[] args)
             throws Exception
     {
-        Logging.initialize();
         DistributedQueryRunner queryRunner = createMongoQueryRunner(
                 new MongoServer(),
                 ImmutableMap.of("http-server.http.port", "8080"),

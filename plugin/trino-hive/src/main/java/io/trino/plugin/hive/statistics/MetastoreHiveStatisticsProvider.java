@@ -27,7 +27,6 @@ import io.trino.plugin.hive.HiveBasicStatistics;
 import io.trino.plugin.hive.HiveColumnHandle;
 import io.trino.plugin.hive.HivePartition;
 import io.trino.plugin.hive.PartitionStatistics;
-import io.trino.plugin.hive.authentication.HiveIdentity;
 import io.trino.plugin.hive.metastore.DateStatistics;
 import io.trino.plugin.hive.metastore.DecimalStatistics;
 import io.trino.plugin.hive.metastore.DoubleStatistics;
@@ -51,6 +50,7 @@ import io.trino.spi.type.VarcharType;
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.List;
@@ -62,6 +62,7 @@ import java.util.OptionalLong;
 import java.util.Set;
 import java.util.stream.DoubleStream;
 
+import static com.google.common.base.MoreObjects.toStringHelper;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.base.Verify.verify;
@@ -99,7 +100,7 @@ public class MetastoreHiveStatisticsProvider
     public MetastoreHiveStatisticsProvider(SemiTransactionalHiveMetastore metastore)
     {
         requireNonNull(metastore, "metastore is null");
-        this.statisticsProvider = (session, table, hivePartitions) -> getPartitionsStatistics(session, metastore, table, hivePartitions);
+        this.statisticsProvider = (session, table, hivePartitions, columns) -> getPartitionsStatistics(metastore, table, columns, hivePartitions);
     }
 
     @VisibleForTesting
@@ -108,7 +109,7 @@ public class MetastoreHiveStatisticsProvider
         this.statisticsProvider = requireNonNull(statisticsProvider, "statisticsProvider is null");
     }
 
-    private static Map<String, PartitionStatistics> getPartitionsStatistics(ConnectorSession session, SemiTransactionalHiveMetastore metastore, SchemaTableName table, List<HivePartition> hivePartitions)
+    private static Map<String, PartitionStatistics> getPartitionsStatistics(SemiTransactionalHiveMetastore metastore, SchemaTableName table, Set<String> columns, List<HivePartition> hivePartitions)
     {
         if (hivePartitions.isEmpty()) {
             return ImmutableMap.of();
@@ -116,12 +117,12 @@ public class MetastoreHiveStatisticsProvider
         boolean unpartitioned = hivePartitions.stream().anyMatch(partition -> partition.getPartitionId().equals(UNPARTITIONED_ID));
         if (unpartitioned) {
             checkArgument(hivePartitions.size() == 1, "expected only one hive partition");
-            return ImmutableMap.of(UNPARTITIONED_ID, metastore.getTableStatistics(new HiveIdentity(session), table.getSchemaName(), table.getTableName()));
+            return ImmutableMap.of(UNPARTITIONED_ID, metastore.getTableStatistics(table.getSchemaName(), table.getTableName(), Optional.of(columns)));
         }
         Set<String> partitionNames = hivePartitions.stream()
                 .map(HivePartition::getPartitionId)
                 .collect(toImmutableSet());
-        return metastore.getPartitionStatistics(new HiveIdentity(session), table.getSchemaName(), table.getTableName(), partitionNames);
+        return metastore.getPartitionStatistics(table.getSchemaName(), table.getTableName(), columns, partitionNames);
     }
 
     @Override
@@ -141,7 +142,7 @@ public class MetastoreHiveStatisticsProvider
         int sampleSize = getPartitionStatisticsSampleSize(session);
         List<HivePartition> partitionsSample = getPartitionsSample(partitions, sampleSize);
         try {
-            Map<String, PartitionStatistics> statisticsSample = statisticsProvider.getPartitionsStatistics(session, table, partitionsSample);
+            Map<String, PartitionStatistics> statisticsSample = statisticsProvider.getPartitionsStatistics(session, table, partitionsSample, columns.keySet());
             validatePartitionStatistics(table, statisticsSample);
             return getTableStatistics(columns, columnTypes, partitions, statisticsSample);
         }
@@ -388,19 +389,16 @@ public class MetastoreHiveStatisticsProvider
             Map<String, PartitionStatistics> statistics)
     {
         if (statistics.isEmpty()) {
-            return TableStatistics.empty();
+            return createEmptyTableStatisticsWithPartitionColumnStatistics(columns, columnTypes, partitions);
         }
 
         checkArgument(!partitions.isEmpty(), "partitions is empty");
 
-        OptionalDouble optionalAverageRowsPerPartition = calculateAverageRowsPerPartition(statistics.values());
-        if (optionalAverageRowsPerPartition.isEmpty()) {
-            return TableStatistics.empty();
+        Optional<PartitionsRowCount> optionalRowCount = calculatePartitionsRowCount(statistics.values(), partitions.size());
+        if (optionalRowCount.isEmpty()) {
+            return createEmptyTableStatisticsWithPartitionColumnStatistics(columns, columnTypes, partitions);
         }
-        double averageRowsPerPartition = optionalAverageRowsPerPartition.getAsDouble();
-        verify(averageRowsPerPartition >= 0, "averageRowsPerPartition must be greater than or equal to zero");
-        int queriedPartitionsCount = partitions.size();
-        double rowCount = averageRowsPerPartition * queriedPartitionsCount;
+        double rowCount = optionalRowCount.get().getRowCount();
 
         TableStatistics.Builder result = TableStatistics.builder();
         result.setRowCount(Estimate.of(rowCount));
@@ -410,6 +408,7 @@ public class MetastoreHiveStatisticsProvider
             Type columnType = columnTypes.get(columnName);
             ColumnStatistics columnStatistics;
             if (columnHandle.isPartitionKey()) {
+                double averageRowsPerPartition = optionalRowCount.get().getAverageRowsPerPartition();
                 columnStatistics = createPartitionColumnStatistics(columnHandle, columnType, partitions, statistics, averageRowsPerPartition, rowCount);
             }
             else {
@@ -420,16 +419,118 @@ public class MetastoreHiveStatisticsProvider
         return result.build();
     }
 
-    @VisibleForTesting
-    static OptionalDouble calculateAverageRowsPerPartition(Collection<PartitionStatistics> statistics)
+    private static TableStatistics createEmptyTableStatisticsWithPartitionColumnStatistics(
+            Map<String, ColumnHandle> columns,
+            Map<String, Type> columnTypes,
+            List<HivePartition> partitions)
     {
-        return statistics.stream()
+        TableStatistics.Builder result = TableStatistics.builder();
+        // Estimate stats for partitioned columns even when row count is unavailable. This will help us use
+        // ndv stats in rules like "ApplyPreferredTableWriterPartitioning".
+        for (Map.Entry<String, ColumnHandle> column : columns.entrySet()) {
+            HiveColumnHandle columnHandle = (HiveColumnHandle) column.getValue();
+            if (columnHandle.isPartitionKey()) {
+                result.setColumnStatistics(
+                        columnHandle,
+                        createPartitionColumnStatisticsWithoutRowCount(columnHandle, columnTypes.get(column.getKey()), partitions));
+            }
+        }
+        return result.build();
+    }
+
+    @VisibleForTesting
+    static Optional<PartitionsRowCount> calculatePartitionsRowCount(Collection<PartitionStatistics> statistics, int queriedPartitionsCount)
+    {
+        long[] rowCounts = statistics.stream()
                 .map(PartitionStatistics::getBasicStatistics)
                 .map(HiveBasicStatistics::getRowCount)
                 .filter(OptionalLong::isPresent)
                 .mapToLong(OptionalLong::getAsLong)
                 .peek(count -> verify(count >= 0, "count must be greater than or equal to zero"))
-                .average();
+                .toArray();
+        int sampleSize = statistics.size();
+        // Sample contains all the queried partitions, estimate avg normally
+        if (rowCounts.length <= 2 || queriedPartitionsCount == sampleSize) {
+            OptionalDouble averageRowsPerPartitionOptional = Arrays.stream(rowCounts).average();
+            if (averageRowsPerPartitionOptional.isEmpty()) {
+                return Optional.empty();
+            }
+            double averageRowsPerPartition = averageRowsPerPartitionOptional.getAsDouble();
+            return Optional.of(new PartitionsRowCount(averageRowsPerPartition, averageRowsPerPartition * queriedPartitionsCount));
+        }
+
+        // Some partitions (e.g. __HIVE_DEFAULT_PARTITION__) may be outliers in terms of row count.
+        // Excluding the min and max rowCount values from averageRowsPerPartition calculation helps to reduce the
+        // possibility of errors in the extrapolated rowCount due to a couple of outliers.
+        int minIndex = 0;
+        int maxIndex = 0;
+        long rowCountSum = rowCounts[0];
+        for (int index = 1; index < rowCounts.length; index++) {
+            if (rowCounts[index] < rowCounts[minIndex]) {
+                minIndex = index;
+            }
+            else if (rowCounts[index] > rowCounts[maxIndex]) {
+                maxIndex = index;
+            }
+            rowCountSum += rowCounts[index];
+        }
+        double averageWithoutOutliers = ((double) (rowCountSum - rowCounts[minIndex] - rowCounts[maxIndex])) / (rowCounts.length - 2);
+        double rowCount = (averageWithoutOutliers * (queriedPartitionsCount - 2)) + rowCounts[minIndex] + rowCounts[maxIndex];
+        return Optional.of(new PartitionsRowCount(averageWithoutOutliers, rowCount));
+    }
+
+    @VisibleForTesting
+    static class PartitionsRowCount
+    {
+        private final double averageRowsPerPartition;
+        private final double rowCount;
+
+        PartitionsRowCount(double averageRowsPerPartition, double rowCount)
+        {
+            verify(averageRowsPerPartition >= 0, "averageRowsPerPartition must be greater than or equal to zero");
+            verify(rowCount >= 0, "rowCount must be greater than or equal to zero");
+            this.averageRowsPerPartition = averageRowsPerPartition;
+            this.rowCount = rowCount;
+        }
+
+        private double getAverageRowsPerPartition()
+        {
+            return averageRowsPerPartition;
+        }
+
+        private double getRowCount()
+        {
+            return rowCount;
+        }
+
+        @Override
+        public boolean equals(Object o)
+        {
+            if (this == o) {
+                return true;
+            }
+            if (o == null || getClass() != o.getClass()) {
+                return false;
+            }
+            PartitionsRowCount that = (PartitionsRowCount) o;
+            return Double.compare(that.averageRowsPerPartition, averageRowsPerPartition) == 0
+                    && Double.compare(that.rowCount, rowCount) == 0;
+        }
+
+        @Override
+        public int hashCode()
+        {
+            return Objects.hash(averageRowsPerPartition, rowCount);
+        }
+
+        @Override
+        public String toString()
+        {
+            return toStringHelper(this)
+                    .add("averageRowsPerPartition", averageRowsPerPartition)
+                    .add("rowCount", rowCount)
+                    .toString();
+        }
     }
 
     private static ColumnStatistics createPartitionColumnStatistics(
@@ -449,6 +550,26 @@ public class MetastoreHiveStatisticsProvider
                 .setNullsFraction(Estimate.of(calculateNullsFractionForPartitioningKey(column, partitions, statistics, averageRowsPerPartition, rowCount)))
                 .setRange(calculateRangeForPartitioningKey(column, type, nonEmptyPartitions))
                 .setDataSize(calculateDataSizeForPartitioningKey(column, type, partitions, statistics, averageRowsPerPartition))
+                .build();
+    }
+
+    private static ColumnStatistics createPartitionColumnStatisticsWithoutRowCount(HiveColumnHandle column, Type type, List<HivePartition> partitions)
+    {
+        if (partitions.isEmpty()) {
+            return ColumnStatistics.empty();
+        }
+
+        // Since we don't know the row count for each partition, we are taking an assumption here that all partitions
+        // are non-empty and contains exactly same amount of data. This will help us estimate ndv stats for partitioned
+        // columns which can be useful for certain optimizer rules.
+        double estimatedNullsCount = partitions.stream()
+                .filter(partition -> partition.getKeys().get(column).isNull())
+                .count();
+
+        return ColumnStatistics.builder()
+                .setDistinctValuesCount(Estimate.of(calculateDistinctPartitionKeys(column, partitions)))
+                .setNullsFraction(Estimate.of(normalizeFraction(estimatedNullsCount / partitions.size())))
+                .setRange(calculateRangeForPartitioningKey(column, type, partitions))
                 .build();
     }
 
@@ -804,6 +925,6 @@ public class MetastoreHiveStatisticsProvider
     @VisibleForTesting
     interface PartitionsStatisticsProvider
     {
-        Map<String, PartitionStatistics> getPartitionsStatistics(ConnectorSession session, SchemaTableName table, List<HivePartition> hivePartitions);
+        Map<String, PartitionStatistics> getPartitionsStatistics(ConnectorSession session, SchemaTableName table, List<HivePartition> hivePartitions, Set<String> columns);
     }
 }

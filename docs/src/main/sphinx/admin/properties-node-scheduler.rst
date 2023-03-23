@@ -12,33 +12,65 @@ Splits
 * **Default value:** ``100``
 
 The target value for the total number of splits that can be running for
-each worker node.
+each worker node, assuming all splits have the standard split weight.
 
 Using a higher value is recommended, if queries are submitted in large batches
 (e.g., running a large group of reports periodically), or for connectors that
-produce many splits that complete quickly. Increasing this value may improve
-query latency, by ensuring that the workers have enough splits to keep them
-fully utilized.
+produce many splits that complete quickly but do not support assigning split
+weight values to express that to the split scheduler. Increasing this value may
+improve query latency, by ensuring that the workers have enough splits to keep
+them fully utilized.
+
+When connectors do support weight based split scheduling, the number of splits
+assigned will depend on the weight of the individual splits. If splits are
+small, more of them are allowed to be assigned to each worker to compensate.
 
 Setting this too high wastes memory and may result in lower performance
 due to splits not being balanced across workers. Ideally, it should be set
 such that there is always at least one split waiting to be processed, but
 not higher.
 
-``node-scheduler.max-pending-splits-per-task``
+``node-scheduler.min-pending-splits-per-task``
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
 * **Type:** :ref:`prop-type-integer`
 * **Default value:** ``10``
 
-The number of outstanding splits that can be queued for each worker node
-for a single stage of a query, even when the node is already at the limit for
-total number of splits. Allowing a minimum number of splits per stage is
-required to prevent starvation and deadlocks.
+The minimum number of outstanding splits with the standard split weight guaranteed to be scheduled on a node (even when the node
+is already at the limit for total number of splits) for a single task given the task has remaining splits to process.
+Allowing a minimum number of splits per stage is required to prevent starvation and deadlocks.
 
-This value must be smaller than ``node-scheduler.max-splits-per-node``,
-is usually increased for the same reasons, and has similar drawbacks
+This value must be smaller or equal than ``max-adjusted-pending-splits-per-task`` and
+``node-scheduler.max-splits-per-node``, is usually increased for the same reasons,
+and has similar drawbacks if set too high.
+
+``node-scheduler.max-adjusted-pending-splits-per-task``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+* **Type:** :ref:`prop-type-integer`
+* **Default value:** ``2000``
+
+The maximum number of outstanding splits with the standard split weight guaranteed to be scheduled on a node (even when the node
+is already at the limit for total number of splits) for a single task given the task has remaining splits to process.
+Split queue size is adjusted dynamically during split scheduling and cannot exceed ``node-scheduler.max-adjusted-pending-splits-per-task``.
+Split queue size per task will be adjusted upward if node processes splits faster than it receives them.
+
+Usually increased for the same reasons as ``node-scheduler.max-splits-per-node``, with smaller drawbacks
 if set too high.
+
+.. note::
+
+    Only applies for ``uniform`` :ref:`scheduler policy <node-scheduler-policy>`.
+
+``node-scheduler.max-unacknowledged-splits-per-task``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+* **Type:** :ref:`prop-type-integer`
+* **Default value:** ``2000``
+
+Maximum number of splits that are either queued on the coordinator, but not yet sent or confirmed to have been received by
+the worker. This limit enforcement takes precedence over other existing split limit configurations
+like ``node-scheduler.max-splits-per-node`` or ``node-scheduler.max-adjusted-pending-splits-per-task``
+and is designed to prevent large task update requests that might cause a query to fail.
 
 ``node-scheduler.min-candidates``
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -52,6 +84,8 @@ node scheduler when choosing the target node for a split. Setting
 this value too low may prevent splits from being properly balanced
 across all worker nodes. Setting it too high may increase query
 latency and increase CPU usage on the coordinator.
+
+.. _node-scheduler-policy:
 
 ``node-scheduler.policy``
 ^^^^^^^^^^^^^^^^^^^^^^^^^

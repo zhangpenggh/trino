@@ -98,7 +98,7 @@ String functions
 .. function:: luhn_check(string) -> boolean
 
     Tests whether a ``string`` of digits is valid according to the
-    `Luhn algorithm <https://en.wikipedia.org/wiki/Luhn_algorithm>`_.
+    `Luhn algorithm <https://wikipedia.org/wiki/Luhn_algorithm>`_.
 
     This checksum function, also known as ``modulo 10`` or ``mod 10``, is
     widely applied on credit card numbers and government identification numbers
@@ -255,8 +255,19 @@ String functions
        SELECT translate('abcd', 'aac', 'zq'); -- 'zbd'
 
 .. function:: trim(string) -> varchar
+    :noindex:
 
     Removes leading and trailing whitespace from ``string``.
+
+.. function:: trim( [ [ specification ] [ string ] FROM ] source ) -> varchar
+
+    Removes any leading and/or trailing characters as specified up to and
+    including ``string`` from ``source``::
+
+      SELECT trim('!' FROM '!foo!'); -- 'foo'
+      SELECT trim(LEADING FROM '  abcd');  -- 'abcd'
+      SELECT trim(BOTH '$' FROM '$var$'); -- 'var'
+      SELECT trim(TRAILING 'ER' FROM upper('worker')); -- 'WORK'
 
 .. function:: upper(string) -> varchar
 

@@ -29,10 +29,10 @@ import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
 import io.trino.spi.connector.ConnectorInsertTableHandle;
-import io.trino.spi.connector.ConnectorNewTableLayout;
 import io.trino.spi.connector.ConnectorOutputTableHandle;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorTableHandle;
+import io.trino.spi.connector.ConnectorTableLayout;
 import io.trino.spi.connector.ConnectorTableMetadata;
 import io.trino.spi.connector.ConnectorViewDefinition;
 import io.trino.spi.connector.ConnectorViewDefinition.ViewColumn;
@@ -50,7 +50,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
-import java.util.OptionalLong;
 import java.util.stream.Collectors;
 
 import static com.google.common.base.Ticker.systemTicker;
@@ -66,6 +65,7 @@ import static io.trino.plugin.raptor.legacy.RaptorTableProperties.TEMPORAL_COLUM
 import static io.trino.plugin.raptor.legacy.metadata.SchemaDaoUtil.createTablesWithRetry;
 import static io.trino.plugin.raptor.legacy.metadata.TestDatabaseShardManager.createShardManager;
 import static io.trino.spi.StandardErrorCode.TRANSACTION_CONFLICT;
+import static io.trino.spi.connector.RetryMode.NO_RETRIES;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.DateType.DATE;
 import static io.trino.spi.type.DoubleType.DOUBLE;
@@ -111,6 +111,7 @@ public class TestRaptorMetadata
     public void cleanupDatabase()
     {
         dummyHandle.close();
+        dummyHandle = null;
     }
 
     @Test
@@ -379,14 +380,14 @@ public class TestRaptorMetadata
                 BUCKET_COUNT_PROPERTY, 32,
                 BUCKETED_ON_PROPERTY, ImmutableList.of("orderkey", "custkey")));
 
-        ConnectorNewTableLayout layout = metadata.getNewTableLayout(SESSION, ordersTable).get();
+        ConnectorTableLayout layout = metadata.getNewTableLayout(SESSION, ordersTable).get();
         assertEquals(layout.getPartitionColumns(), ImmutableList.of("orderkey", "custkey"));
         assertTrue(layout.getPartitioning().isPresent());
         assertInstanceOf(layout.getPartitioning().get(), RaptorPartitioningHandle.class);
         RaptorPartitioningHandle partitioning = (RaptorPartitioningHandle) layout.getPartitioning().get();
         assertEquals(partitioning.getDistributionId(), 1);
 
-        ConnectorOutputTableHandle outputHandle = metadata.beginCreateTable(SESSION, ordersTable, Optional.of(layout));
+        ConnectorOutputTableHandle outputHandle = metadata.beginCreateTable(SESSION, ordersTable, Optional.of(layout), NO_RETRIES);
         metadata.finishCreateTable(SESSION, outputHandle, ImmutableList.of(), ImmutableList.of());
 
         ConnectorTableHandle tableHandle = metadata.getTableHandle(SESSION, DEFAULT_TEST_ORDERS);
@@ -649,22 +650,11 @@ public class TestRaptorMetadata
     }
 
     @Test
-    public void testTransactionSelect()
-    {
-        metadata.createTable(SESSION, getOrdersTable(), false);
-
-        // reads do not create a transaction
-        ConnectorTableHandle tableHandle = metadata.getTableHandle(SESSION, DEFAULT_TEST_ORDERS);
-        assertInstanceOf(tableHandle, RaptorTableHandle.class);
-        assertFalse(((RaptorTableHandle) tableHandle).getTransactionId().isPresent());
-    }
-
-    @Test
     public void testTransactionTableWrite()
     {
         // start table creation
         long transactionId = 1;
-        ConnectorOutputTableHandle outputHandle = metadata.beginCreateTable(SESSION, getOrdersTable(), Optional.empty());
+        ConnectorOutputTableHandle outputHandle = metadata.beginCreateTable(SESSION, getOrdersTable(), Optional.empty(), NO_RETRIES);
 
         // transaction is in progress
         assertTrue(transactionExists(transactionId));
@@ -687,7 +677,7 @@ public class TestRaptorMetadata
         // start insert
         transactionId++;
         ConnectorTableHandle tableHandle = metadata.getTableHandle(SESSION, DEFAULT_TEST_ORDERS);
-        ConnectorInsertTableHandle insertHandle = metadata.beginInsert(SESSION, tableHandle);
+        ConnectorInsertTableHandle insertHandle = metadata.beginInsert(SESSION, tableHandle, ImmutableList.of(), NO_RETRIES);
 
         // transaction is in progress
         assertTrue(transactionExists(transactionId));
@@ -700,53 +690,11 @@ public class TestRaptorMetadata
     }
 
     @Test
-    public void testTransactionDelete()
-    {
-        // creating a table allocates a transaction
-        long transactionId = 1;
-        metadata.createTable(SESSION, getOrdersTable(), false);
-        assertTrue(transactionSuccessful(transactionId));
-
-        // start delete
-        transactionId++;
-        ConnectorTableHandle tableHandle = metadata.getTableHandle(SESSION, DEFAULT_TEST_ORDERS);
-        tableHandle = metadata.beginDelete(SESSION, tableHandle);
-
-        // verify transaction is assigned for deletion handle
-        assertInstanceOf(tableHandle, RaptorTableHandle.class);
-        RaptorTableHandle raptorTableHandle = (RaptorTableHandle) tableHandle;
-        assertEquals(raptorTableHandle.getTableId(), 1);
-        assertEquals(raptorTableHandle.getTransactionId(), OptionalLong.of(transactionId));
-
-        // transaction is in progress
-        assertTrue(transactionExists(transactionId));
-        assertNull(transactionSuccessful(transactionId));
-
-        // rollback delete
-        metadata.rollback();
-        assertTrue(transactionExists(transactionId));
-        assertFalse(transactionSuccessful(transactionId));
-
-        // start another delete
-        transactionId++;
-        tableHandle = metadata.beginDelete(SESSION, tableHandle);
-
-        // transaction is in progress
-        assertTrue(transactionExists(transactionId));
-        assertNull(transactionSuccessful(transactionId));
-
-        // commit delete
-        metadata.finishDelete(SESSION, tableHandle, ImmutableList.of());
-        assertTrue(transactionExists(transactionId));
-        assertTrue(transactionSuccessful(transactionId));
-    }
-
-    @Test
     public void testTransactionAbort()
     {
         // start table creation
         long transactionId = 1;
-        ConnectorOutputTableHandle outputHandle = metadata.beginCreateTable(SESSION, getOrdersTable(), Optional.empty());
+        ConnectorOutputTableHandle outputHandle = metadata.beginCreateTable(SESSION, getOrdersTable(), Optional.empty(), NO_RETRIES);
 
         // transaction is in progress
         assertTrue(transactionExists(transactionId));
@@ -828,7 +776,7 @@ public class TestRaptorMetadata
                 sql,
                 Optional.empty(),
                 Optional.empty(),
-                ImmutableList.of(new ViewColumn("test", BIGINT.getTypeId())),
+                ImmutableList.of(new ViewColumn("test", BIGINT.getTypeId(), Optional.empty())),
                 Optional.empty(),
                 Optional.empty(),
                 true);

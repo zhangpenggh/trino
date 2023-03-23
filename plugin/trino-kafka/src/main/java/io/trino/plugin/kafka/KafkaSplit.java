@@ -16,6 +16,7 @@ package io.trino.plugin.kafka;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.collect.ImmutableList;
+import io.airlift.slice.SizeOf;
 import io.trino.spi.HostAddress;
 import io.trino.spi.connector.ConnectorSplit;
 
@@ -23,11 +24,16 @@ import java.util.List;
 import java.util.Optional;
 
 import static com.google.common.base.MoreObjects.toStringHelper;
+import static io.airlift.slice.SizeOf.estimatedSizeOf;
+import static io.airlift.slice.SizeOf.instanceSize;
+import static io.airlift.slice.SizeOf.sizeOf;
 import static java.util.Objects.requireNonNull;
 
 public class KafkaSplit
         implements ConnectorSplit
 {
+    private static final int INSTANCE_SIZE = instanceSize(KafkaSplit.class);
+
     private final String topicName;
     private final String keyDataFormat;
     private final String messageDataFormat;
@@ -122,6 +128,19 @@ public class KafkaSplit
     public Object getInfo()
     {
         return this;
+    }
+
+    @Override
+    public long getRetainedSizeInBytes()
+    {
+        return INSTANCE_SIZE
+                + estimatedSizeOf(topicName)
+                + estimatedSizeOf(keyDataFormat)
+                + estimatedSizeOf(messageDataFormat)
+                + sizeOf(keyDataSchemaContents, SizeOf::estimatedSizeOf)
+                + sizeOf(messageDataSchemaContents, SizeOf::estimatedSizeOf)
+                + messagesRange.getRetainedSizeInBytes()
+                + leader.getRetainedSizeInBytes();
     }
 
     @Override

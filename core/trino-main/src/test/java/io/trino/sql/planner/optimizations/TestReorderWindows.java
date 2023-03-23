@@ -18,7 +18,6 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import io.trino.spi.connector.SortOrder;
 import io.trino.sql.planner.RuleStatsRecorder;
-import io.trino.sql.planner.TypeAnalyzer;
 import io.trino.sql.planner.assertions.BasePlanTest;
 import io.trino.sql.planner.assertions.ExpectedValueProvider;
 import io.trino.sql.planner.assertions.PlanMatchPattern;
@@ -26,7 +25,7 @@ import io.trino.sql.planner.iterative.IterativeOptimizer;
 import io.trino.sql.planner.iterative.Rule;
 import io.trino.sql.planner.iterative.rule.GatherAndMergeWindows;
 import io.trino.sql.planner.iterative.rule.RemoveRedundantIdentityProjections;
-import io.trino.sql.planner.plan.WindowNode;
+import io.trino.sql.planner.plan.DataOrganizationSpecification;
 import io.trino.sql.tree.WindowFrame;
 import org.intellij.lang.annotations.Language;
 import org.testng.annotations.Test;
@@ -35,6 +34,7 @@ import java.util.List;
 import java.util.Optional;
 
 import static io.trino.sql.planner.PlanOptimizers.columnPruningRules;
+import static io.trino.sql.planner.TypeAnalyzer.createTestingTypeAnalyzer;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.anyTree;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.expression;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.filter;
@@ -61,13 +61,13 @@ public class TestReorderWindows
 
     private static final Optional<WindowFrame> commonFrame;
 
-    private static final ExpectedValueProvider<WindowNode.Specification> windowA;
-    private static final ExpectedValueProvider<WindowNode.Specification> windowAp;
-    private static final ExpectedValueProvider<WindowNode.Specification> windowApp;
-    private static final ExpectedValueProvider<WindowNode.Specification> windowB;
-    private static final ExpectedValueProvider<WindowNode.Specification> windowC;
-    private static final ExpectedValueProvider<WindowNode.Specification> windowD;
-    private static final ExpectedValueProvider<WindowNode.Specification> windowE;
+    private static final ExpectedValueProvider<DataOrganizationSpecification> windowA;
+    private static final ExpectedValueProvider<DataOrganizationSpecification> windowAp;
+    private static final ExpectedValueProvider<DataOrganizationSpecification> windowApp;
+    private static final ExpectedValueProvider<DataOrganizationSpecification> windowB;
+    private static final ExpectedValueProvider<DataOrganizationSpecification> windowC;
+    private static final ExpectedValueProvider<DataOrganizationSpecification> windowD;
+    private static final ExpectedValueProvider<DataOrganizationSpecification> windowE;
 
     static {
         ImmutableMap.Builder<String, String> columns = ImmutableMap.builder();
@@ -79,7 +79,7 @@ public class TestReorderWindows
         columns.put(SHIPDATE_ALIAS, "shipdate");
         columns.put(SUPPKEY_ALIAS, "suppkey");
         columns.put(TAX_ALIAS, "tax");
-        LINEITEM_TABLESCAN_DOQPRSST = tableScan("lineitem", columns.build());
+        LINEITEM_TABLESCAN_DOQPRSST = tableScan("lineitem", columns.buildOrThrow());
 
         columns = ImmutableMap.builder();
         columns.put(DISCOUNT_ALIAS, "discount");
@@ -88,7 +88,7 @@ public class TestReorderWindows
         columns.put(RECEIPTDATE_ALIAS, "receiptdate");
         columns.put(SUPPKEY_ALIAS, "suppkey");
         columns.put(TAX_ALIAS, "tax");
-        LINEITEM_TABLESCAN_DOQRST = tableScan("lineitem", columns.build());
+        LINEITEM_TABLESCAN_DOQRST = tableScan("lineitem", columns.buildOrThrow());
 
         commonFrame = Optional.empty();
 
@@ -335,13 +335,12 @@ public class TestReorderWindows
         List<PlanOptimizer> optimizers = ImmutableList.of(
                 new UnaliasSymbolReferences(getQueryRunner().getMetadata()),
                 new PredicatePushDown(
-                        getQueryRunner().getMetadata(),
-                        getQueryRunner().getTypeOperators(),
-                        new TypeAnalyzer(getQueryRunner().getSqlParser(), getQueryRunner().getMetadata()),
+                        getQueryRunner().getPlannerContext(),
+                        createTestingTypeAnalyzer(getQueryRunner().getPlannerContext()),
                         false,
                         false),
                 new IterativeOptimizer(
-                        getQueryRunner().getMetadata(),
+                        getQueryRunner().getPlannerContext(),
                         new RuleStatsRecorder(),
                         getQueryRunner().getStatsCalculator(),
                         getQueryRunner().getEstimatedExchangesCostCalculator(),

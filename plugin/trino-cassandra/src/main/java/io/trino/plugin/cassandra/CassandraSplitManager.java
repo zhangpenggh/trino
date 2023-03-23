@@ -13,7 +13,12 @@
  */
 package io.trino.plugin.cassandra;
 
-import com.datastax.driver.core.Host;
+import com.datastax.oss.driver.api.core.metadata.Node;
+import com.datastax.oss.driver.api.core.metadata.token.TokenRange;
+import com.datastax.oss.driver.internal.core.metadata.token.Murmur3Token;
+import com.datastax.oss.driver.internal.core.metadata.token.Murmur3TokenRange;
+import com.datastax.oss.driver.internal.core.metadata.token.RandomToken;
+import com.datastax.oss.driver.internal.core.metadata.token.RandomTokenRange;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import io.airlift.log.Logger;
@@ -25,6 +30,7 @@ import io.trino.spi.connector.ConnectorSplitManager;
 import io.trino.spi.connector.ConnectorSplitSource;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.ConnectorTransactionHandle;
+import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.connector.FixedSplitSource;
 import io.trino.spi.predicate.TupleDomain;
@@ -39,6 +45,7 @@ import java.util.Optional;
 import java.util.Set;
 
 import static io.trino.plugin.cassandra.CassandraSessionProperties.getSplitsPerNode;
+import static io.trino.spi.connector.FixedSplitSource.emptySplitSource;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 
@@ -51,30 +58,38 @@ public class CassandraSplitManager
     private final int partitionSizeForBatchSelect;
     private final CassandraTokenSplitManager tokenSplitMgr;
     private final CassandraPartitionManager partitionManager;
+    private final CassandraTypeManager cassandraTypeManager;
 
     @Inject
     public CassandraSplitManager(
             CassandraClientConfig cassandraClientConfig,
             CassandraSession cassandraSession,
             CassandraTokenSplitManager tokenSplitMgr,
-            CassandraPartitionManager partitionManager)
+            CassandraPartitionManager partitionManager,
+            CassandraTypeManager cassandraTypeManager)
     {
         this.cassandraSession = requireNonNull(cassandraSession, "cassandraSession is null");
         this.partitionSizeForBatchSelect = cassandraClientConfig.getPartitionSizeForBatchSelect();
         this.tokenSplitMgr = tokenSplitMgr;
         this.partitionManager = requireNonNull(partitionManager, "partitionManager is null");
+        this.cassandraTypeManager = requireNonNull(cassandraTypeManager, "cassandraTypeManager is null");
     }
 
     @Override
     public ConnectorSplitSource getSplits(
             ConnectorTransactionHandle transaction,
             ConnectorSession session,
-            ConnectorTableHandle tableHandle,
-            SplitSchedulingStrategy splitSchedulingStrategy,
-            DynamicFilter dynamicFilter)
+            ConnectorTableHandle connectorTableHandle,
+            DynamicFilter dynamicFilter,
+            Constraint constraint)
     {
-        CassandraTableHandle cassandraTableHandle = (CassandraTableHandle) tableHandle;
+        CassandraTableHandle tableHandle = (CassandraTableHandle) connectorTableHandle;
 
+        if (tableHandle.isSynthetic()) {
+            return new FixedSplitSource(ImmutableList.of(new CassandraSplit("", "", ImmutableList.of())));
+        }
+
+        CassandraNamedRelationHandle cassandraTableHandle = tableHandle.getRequiredNamedRelation();
         List<CassandraPartition> partitions;
         String clusteringKeyPredicates;
         if (cassandraTableHandle.getPartitions().isPresent()) {
@@ -88,8 +103,8 @@ public class CassandraSplitManager
         }
 
         if (partitions.isEmpty()) {
-            log.debug("No partitions matched predicates for table %s", tableHandle);
-            return new FixedSplitSource(ImmutableList.of());
+            log.debug("No partitions matched predicates for table %s", connectorTableHandle);
+            return emptySplitSource();
         }
 
         // if this is an unpartitioned table, split into equal ranges
@@ -98,23 +113,24 @@ public class CassandraSplitManager
             if (cassandraPartition.isUnpartitioned() || cassandraPartition.isIndexedColumnPredicatePushdown()) {
                 CassandraTable table = cassandraSession.getTable(cassandraTableHandle.getSchemaTableName());
                 List<ConnectorSplit> splits = getSplitsByTokenRange(table, cassandraPartition.getPartitionId(), getSplitsPerNode(session));
-                log.debug("One partition matched predicates for table %s, creating %s splits by token ranges", tableHandle, splits.size());
+                log.debug("One partition matched predicates for table %s, creating %s splits by token ranges", connectorTableHandle, splits.size());
                 return new FixedSplitSource(splits);
             }
         }
 
         List<ConnectorSplit> splits = getSplitsForPartitions(cassandraTableHandle, partitions, clusteringKeyPredicates);
-        log.debug("%s partitions matched predicates for table %s, creating %s splits", partitions.size(), tableHandle, splits.size());
+        log.debug("%s partitions matched predicates for table %s, creating %s splits", partitions.size(), connectorTableHandle, splits.size());
         return new FixedSplitSource(splits);
     }
 
-    private static String extractClusteringKeyPredicates(CassandraPartitionResult partitionResult, CassandraTableHandle tableHandle, CassandraSession session)
+    private String extractClusteringKeyPredicates(CassandraPartitionResult partitionResult, CassandraNamedRelationHandle tableHandle, CassandraSession session)
     {
         if (partitionResult.isUnpartitioned()) {
             return "";
         }
 
         CassandraClusteringPredicatesExtractor clusteringPredicatesExtractor = new CassandraClusteringPredicatesExtractor(
+                cassandraTypeManager,
                 session.getTable(tableHandle.getSchemaTableName()).getClusteringKeyColumns(),
                 partitionResult.getUnenforcedConstraint(),
                 session.getCassandraVersion());
@@ -130,7 +146,7 @@ public class CassandraSplitManager
         ImmutableList.Builder<ConnectorSplit> builder = ImmutableList.builder();
         List<CassandraTokenSplitManager.TokenSplit> tokenSplits = tokenSplitMgr.getSplits(schema, tableName, sessionSplitsPerNode);
         for (CassandraTokenSplitManager.TokenSplit tokenSplit : tokenSplits) {
-            String condition = buildTokenCondition(tokenExpression, tokenSplit.getStartToken(), tokenSplit.getEndToken());
+            String condition = buildTokenCondition(tokenExpression, tokenSplit.getTokenRange());
             List<HostAddress> addresses = new HostAddressFactory().hostAddressNamesToHostAddressList(tokenSplit.getHosts());
             CassandraSplit split = new CassandraSplit(partitionId, condition, addresses);
             builder.add(split);
@@ -139,12 +155,25 @@ public class CassandraSplitManager
         return builder.build();
     }
 
-    private static String buildTokenCondition(String tokenExpression, String startToken, String endToken)
+    private static String buildTokenCondition(String tokenExpression, TokenRange tokenRange)
     {
-        return tokenExpression + " > " + startToken + " AND " + tokenExpression + " <= " + endToken;
+        Number startTokenValue;
+        Number endTokenValue;
+        if (tokenRange instanceof Murmur3TokenRange murmur3TokenRange) {
+            startTokenValue = ((Murmur3Token) murmur3TokenRange.getStart()).getValue();
+            endTokenValue = ((Murmur3Token) murmur3TokenRange.getEnd()).getValue();
+        }
+        else if (tokenRange instanceof RandomTokenRange randomTokenRange) {
+            startTokenValue = ((RandomToken) randomTokenRange.getStart()).getValue();
+            endTokenValue = ((RandomToken) randomTokenRange.getEnd()).getValue();
+        }
+        else {
+            throw new IllegalStateException(format("Unsupported token range class %s", tokenRange.getClass().getName()));
+        }
+        return tokenExpression + " > " + startTokenValue + " AND " + tokenExpression + " <= " + endTokenValue;
     }
 
-    private List<ConnectorSplit> getSplitsForPartitions(CassandraTableHandle cassTableHandle, List<CassandraPartition> partitions, String clusteringPredicates)
+    private List<ConnectorSplit> getSplitsForPartitions(CassandraNamedRelationHandle cassTableHandle, List<CassandraPartition> partitions, String clusteringPredicates)
     {
         String schema = cassTableHandle.getSchemaName();
         HostAddressFactory hostAddressFactory = new HostAddressFactory();
@@ -167,8 +196,8 @@ public class CassandraSplitManager
         Map<Set<String>, List<HostAddress>> hostMap = new HashMap<>();
 
         for (CassandraPartition cassandraPartition : partitions) {
-            Set<Host> hosts = cassandraSession.getReplicas(schema, cassandraPartition.getKeyAsByteBuffer());
-            List<HostAddress> addresses = hostAddressFactory.toHostAddressList(hosts);
+            Set<Node> nodes = cassandraSession.getReplicas(schema, cassandraPartition.getKeyAsByteBuffer());
+            List<HostAddress> addresses = hostAddressFactory.toHostAddressList(nodes);
             if (singlePartitionKeyColumn) {
                 // host ip addresses
                 ImmutableSet.Builder<String> sb = ImmutableSet.builder();

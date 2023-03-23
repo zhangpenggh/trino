@@ -20,17 +20,22 @@ import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.ListMultimap;
 import com.google.common.collect.Maps;
 import io.trino.Session;
-import io.trino.connector.CatalogName;
 import io.trino.cost.PlanNodeStatsEstimate;
 import io.trino.metadata.IndexHandle;
 import io.trino.metadata.Metadata;
+import io.trino.metadata.OutputTableHandle;
 import io.trino.metadata.ResolvedFunction;
 import io.trino.metadata.TableExecuteHandle;
+import io.trino.metadata.TableFunctionHandle;
 import io.trino.metadata.TableHandle;
+import io.trino.operator.RetryPolicy;
+import io.trino.spi.connector.CatalogHandle;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.connector.SortOrder;
+import io.trino.spi.function.SchemaFunctionName;
 import io.trino.spi.predicate.TupleDomain;
+import io.trino.spi.ptf.ConnectorTableFunctionHandle;
 import io.trino.spi.type.Type;
 import io.trino.sql.ExpressionUtils;
 import io.trino.sql.analyzer.TypeSignatureProvider;
@@ -52,7 +57,7 @@ import io.trino.sql.planner.plan.ApplyNode;
 import io.trino.sql.planner.plan.AssignUniqueId;
 import io.trino.sql.planner.plan.Assignments;
 import io.trino.sql.planner.plan.CorrelatedJoinNode;
-import io.trino.sql.planner.plan.DeleteNode;
+import io.trino.sql.planner.plan.DataOrganizationSpecification;
 import io.trino.sql.planner.plan.DistinctLimitNode;
 import io.trino.sql.planner.plan.DynamicFilterId;
 import io.trino.sql.planner.plan.EnforceSingleRowNode;
@@ -67,12 +72,15 @@ import io.trino.sql.planner.plan.IntersectNode;
 import io.trino.sql.planner.plan.JoinNode;
 import io.trino.sql.planner.plan.LimitNode;
 import io.trino.sql.planner.plan.MarkDistinctNode;
+import io.trino.sql.planner.plan.MergeWriterNode;
 import io.trino.sql.planner.plan.OffsetNode;
 import io.trino.sql.planner.plan.OutputNode;
 import io.trino.sql.planner.plan.PatternRecognitionNode;
+import io.trino.sql.planner.plan.PlanFragmentId;
 import io.trino.sql.planner.plan.PlanNode;
 import io.trino.sql.planner.plan.PlanNodeId;
 import io.trino.sql.planner.plan.ProjectNode;
+import io.trino.sql.planner.plan.RemoteSourceNode;
 import io.trino.sql.planner.plan.RowNumberNode;
 import io.trino.sql.planner.plan.SampleNode;
 import io.trino.sql.planner.plan.SemiJoinNode;
@@ -82,19 +90,21 @@ import io.trino.sql.planner.plan.StatisticAggregations;
 import io.trino.sql.planner.plan.StatisticAggregationsDescriptor;
 import io.trino.sql.planner.plan.TableExecuteNode;
 import io.trino.sql.planner.plan.TableFinishNode;
+import io.trino.sql.planner.plan.TableFunctionNode;
+import io.trino.sql.planner.plan.TableFunctionNode.TableArgumentProperties;
 import io.trino.sql.planner.plan.TableScanNode;
 import io.trino.sql.planner.plan.TableWriterNode;
-import io.trino.sql.planner.plan.TableWriterNode.DeleteTarget;
-import io.trino.sql.planner.plan.TableWriterNode.UpdateTarget;
+import io.trino.sql.planner.plan.TableWriterNode.CreateTarget;
+import io.trino.sql.planner.plan.TableWriterNode.MergeParadigmAndTypes;
+import io.trino.sql.planner.plan.TableWriterNode.MergeTarget;
+import io.trino.sql.planner.plan.TableWriterNode.WriterTarget;
 import io.trino.sql.planner.plan.TopNNode;
 import io.trino.sql.planner.plan.TopNRankingNode;
 import io.trino.sql.planner.plan.TopNRankingNode.RankingType;
 import io.trino.sql.planner.plan.UnionNode;
 import io.trino.sql.planner.plan.UnnestNode;
-import io.trino.sql.planner.plan.UpdateNode;
 import io.trino.sql.planner.plan.ValuesNode;
 import io.trino.sql.planner.plan.WindowNode;
-import io.trino.sql.planner.plan.WindowNode.Specification;
 import io.trino.sql.tree.Expression;
 import io.trino.sql.tree.FunctionCall;
 import io.trino.sql.tree.NullLiteral;
@@ -104,6 +114,7 @@ import io.trino.testing.TestingMetadata.TestingColumnHandle;
 import io.trino.testing.TestingMetadata.TestingTableHandle;
 import io.trino.testing.TestingTableExecuteHandle;
 import io.trino.testing.TestingTransactionHandle;
+import org.intellij.lang.annotations.Language;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -112,6 +123,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.Set;
 import java.util.function.Consumer;
 import java.util.stream.Stream;
@@ -120,12 +132,16 @@ import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
+import static io.trino.spi.connector.RowChangeParadigm.DELETE_ROW_AND_INSERT_ROW;
 import static io.trino.spi.type.BigintType.BIGINT;
+import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.VarbinaryType.VARBINARY;
+import static io.trino.sql.planner.SystemPartitioningHandle.FIXED_ARBITRARY_DISTRIBUTION;
 import static io.trino.sql.planner.SystemPartitioningHandle.FIXED_HASH_DISTRIBUTION;
 import static io.trino.sql.planner.SystemPartitioningHandle.SINGLE_DISTRIBUTION;
 import static io.trino.sql.planner.plan.JoinNode.Type.INNER;
 import static io.trino.sql.tree.BooleanLiteral.TRUE_LITERAL;
+import static io.trino.testing.TestingHandles.TEST_CATALOG_HANDLE;
 import static io.trino.util.MoreLists.nElements;
 import static java.lang.String.format;
 import static java.util.Collections.emptyList;
@@ -394,6 +410,7 @@ public class PlanBuilder
         private Step step = Step.SINGLE;
         private Optional<Symbol> hashSymbol = Optional.empty();
         private Optional<Symbol> groupIdSymbol = Optional.empty();
+        private Optional<PlanNodeId> nodeId = Optional.empty();
 
         public AggregationBuilder source(PlanNode source)
         {
@@ -475,11 +492,17 @@ public class PlanBuilder
             return this;
         }
 
+        public AggregationBuilder nodeId(PlanNodeId nodeId)
+        {
+            this.nodeId = Optional.of(nodeId);
+            return this;
+        }
+
         protected AggregationNode build()
         {
             checkState(groupingSets != null, "No grouping sets defined; use globalGrouping/groupingKeys method");
             return new AggregationNode(
-                    idAllocator.getNextId(),
+                    nodeId.orElseGet(idAllocator::getNextId),
                     source,
                     assignments,
                     groupingSets,
@@ -587,7 +610,7 @@ public class PlanBuilder
     public static class TableScanBuilder
     {
         private final PlanNodeIdAllocator idAllocator;
-        private TableHandle tableHandle = new TableHandle(new CatalogName("testConnector"), new TestingTableHandle(), TestingTransactionHandle.create(), Optional.of(TestingHandle.INSTANCE));
+        private TableHandle tableHandle = new TableHandle(TEST_CATALOG_HANDLE, new TestingTableHandle(), TestingTransactionHandle.create());
         private List<Symbol> symbols;
         private Map<Symbol, ColumnHandle> assignments;
         private TupleDomain<ColumnHandle> enforcedConstraint = TupleDomain.all();
@@ -661,105 +684,68 @@ public class PlanBuilder
         }
     }
 
-    public TableFinishNode tableWithExchangeDelete(SchemaTableName schemaTableName, PlanNode deleteSource, Symbol deleteRowId)
+    public TableFinishNode tableWithExchangeCreate(WriterTarget target, PlanNode source, Symbol rowCountSymbol, PartitioningScheme partitioningScheme)
     {
-        DeleteTarget deleteTarget = deleteTarget(schemaTableName);
         return new TableFinishNode(
                 idAllocator.getNextId(),
                 exchange(e -> e
-                        .addSource(new DeleteNode(
-                                idAllocator.getNextId(),
-                                deleteSource,
-                                deleteTarget,
-                                deleteRowId,
-                                ImmutableList.of(deleteRowId)))
-                        .addInputsSet(deleteRowId)
-                        .singleDistributionPartitioningScheme(deleteRowId)),
-                deleteTarget,
-                deleteRowId,
+                        .addSource(tableWriter(
+                                ImmutableList.of(rowCountSymbol),
+                                ImmutableList.of("column_a"),
+                                Optional.empty(),
+                                Optional.empty(),
+                                target,
+                                source,
+                                rowCountSymbol))
+                        .addInputsSet(rowCountSymbol)
+                        .partitioningScheme(partitioningScheme)),
+                target,
+                rowCountSymbol,
                 Optional.empty(),
                 Optional.empty());
     }
 
-    public TableFinishNode tableDelete(SchemaTableName schemaTableName, PlanNode deleteSource, Symbol deleteRowId)
+    public CreateTarget createTarget(CatalogHandle catalogHandle, SchemaTableName schemaTableName, boolean reportingWrittenBytesSupported, boolean multipleWritersPerPartitionSupported, OptionalInt maxWriterTasks)
     {
-        DeleteTarget deleteTarget = deleteTarget(schemaTableName);
-        return new TableFinishNode(
-                idAllocator.getNextId(),
-                new DeleteNode(
-                        idAllocator.getNextId(),
-                        deleteSource,
-                        deleteTarget,
-                        deleteRowId,
-                        ImmutableList.of(deleteRowId)),
-                deleteTarget,
-                deleteRowId,
-                Optional.empty(),
-                Optional.empty());
-    }
-
-    public DeleteNode delete(SchemaTableName schemaTableName, PlanNode deleteSource, Symbol deleteRowId, List<Symbol> outputs)
-    {
-        return new DeleteNode(
-                idAllocator.getNextId(),
-                deleteSource,
-                deleteTarget(schemaTableName),
-                deleteRowId,
-                ImmutableList.copyOf(outputs));
-    }
-
-    private DeleteTarget deleteTarget(SchemaTableName schemaTableName)
-    {
-        return new DeleteTarget(
-                Optional.of(new TableHandle(
-                        new CatalogName("testConnector"),
-                        new TestingTableHandle(),
-                        TestingTransactionHandle.create(),
-                        Optional.of(TestingHandle.INSTANCE))),
-                schemaTableName);
-    }
-
-    public TableFinishNode tableUpdate(SchemaTableName schemaTableName, PlanNode updateSource, Symbol updateRowId, List<Symbol> columnsToBeUpdated)
-    {
-        UpdateTarget updateTarget = updateTarget(
+        OutputTableHandle tableHandle = new OutputTableHandle(
+                catalogHandle,
                 schemaTableName,
-                columnsToBeUpdated.stream()
-                        .map(Symbol::getName)
-                        .collect(toImmutableList()));
-        return new TableFinishNode(
-                idAllocator.getNextId(),
-                exchange(e -> e
-                        .addSource(new UpdateNode(
-                                idAllocator.getNextId(),
-                                updateSource,
-                                updateTarget,
-                                updateRowId,
-                                ImmutableList.<Symbol>builder()
-                                        .addAll(columnsToBeUpdated)
-                                        .add(updateRowId)
-                                        .build(),
-                                ImmutableList.of(updateRowId)))
-                        .addInputsSet(updateRowId)
-                        .singleDistributionPartitioningScheme(updateRowId)),
-                updateTarget,
-                updateRowId,
-                Optional.empty(),
-                Optional.empty());
+                TestingConnectorTransactionHandle.INSTANCE,
+                TestingHandle.INSTANCE);
+        return new CreateTarget(
+                tableHandle,
+                schemaTableName,
+                reportingWrittenBytesSupported,
+                multipleWritersPerPartitionSupported,
+                maxWriterTasks);
     }
 
-    private UpdateTarget updateTarget(SchemaTableName schemaTableName, List<String> columnsToBeUpdated)
+    public CreateTarget createTarget(CatalogHandle catalogHandle, SchemaTableName schemaTableName, boolean reportingWrittenBytesSupported, boolean multipleWritersPerPartitionSupported)
     {
-        return new UpdateTarget(
-                Optional.of(new TableHandle(
-                        new CatalogName("testConnector"),
+        return createTarget(catalogHandle, schemaTableName, reportingWrittenBytesSupported, multipleWritersPerPartitionSupported, OptionalInt.empty());
+    }
+
+    public MergeWriterNode merge(SchemaTableName schemaTableName, PlanNode mergeSource, Symbol mergeRow, Symbol rowId, List<Symbol> outputs)
+    {
+        return new MergeWriterNode(
+                idAllocator.getNextId(),
+                mergeSource,
+                mergeTarget(schemaTableName),
+                ImmutableList.of(mergeRow, rowId),
+                Optional.empty(),
+                outputs);
+    }
+
+    private MergeTarget mergeTarget(SchemaTableName schemaTableName)
+    {
+        return new MergeTarget(
+                new TableHandle(
+                        TEST_CATALOG_HANDLE,
                         new TestingTableHandle(),
-                        TestingTransactionHandle.create(),
-                        Optional.of(TestingHandle.INSTANCE))),
+                        TestingTransactionHandle.create()),
+                Optional.empty(),
                 schemaTableName,
-                columnsToBeUpdated,
-                columnsToBeUpdated.stream()
-                        .map(TestingColumnHandle::new)
-                        .collect(toImmutableList()));
+                new MergeParadigmAndTypes(Optional.of(DELETE_ROW_AND_INSERT_ROW), ImmutableList.of(), ImmutableList.of(), INTEGER));
     }
 
     public ExchangeNode gatheringExchange(ExchangeNode.Scope scope, PlanNode child)
@@ -847,7 +833,7 @@ public class PlanBuilder
         return new IndexSourceNode(
                 idAllocator.getNextId(),
                 new IndexHandle(
-                        tableHandle.getCatalogName(),
+                        tableHandle.getCatalogHandle(),
                         TestingConnectorTransactionHandle.INSTANCE,
                         TestingConnectorIndexHandle.INSTANCE),
                 tableHandle,
@@ -894,7 +880,7 @@ public class PlanBuilder
             return partitioningScheme(new PartitioningScheme(Partitioning.create(SINGLE_DISTRIBUTION, ImmutableList.of()), outputSymbols));
         }
 
-        public ExchangeBuilder fixedHashDistributionParitioningScheme(List<Symbol> outputSymbols, List<Symbol> partitioningSymbols)
+        public ExchangeBuilder fixedHashDistributionPartitioningScheme(List<Symbol> outputSymbols, List<Symbol> partitioningSymbols)
         {
             return partitioningScheme(new PartitioningScheme(Partitioning.create(
                     FIXED_HASH_DISTRIBUTION,
@@ -902,13 +888,37 @@ public class PlanBuilder
                     ImmutableList.copyOf(outputSymbols)));
         }
 
-        public ExchangeBuilder fixedHashDistributionParitioningScheme(List<Symbol> outputSymbols, List<Symbol> partitioningSymbols, Symbol hashSymbol)
+        public ExchangeBuilder fixedHashDistributionPartitioningScheme(List<Symbol> outputSymbols, List<Symbol> partitioningSymbols, Symbol hashSymbol)
         {
             return partitioningScheme(new PartitioningScheme(Partitioning.create(
                     FIXED_HASH_DISTRIBUTION,
                     ImmutableList.copyOf(partitioningSymbols)),
                     ImmutableList.copyOf(outputSymbols),
                     Optional.of(hashSymbol)));
+        }
+
+        public ExchangeBuilder fixedHashDistributionPartitioningScheme(List<Symbol> outputSymbols, List<Symbol> partitioningSymbols, int partitionCount)
+        {
+            return partitioningScheme(new PartitioningScheme(Partitioning.create(
+                    FIXED_HASH_DISTRIBUTION,
+                    ImmutableList.copyOf(partitioningSymbols)),
+                    ImmutableList.copyOf(outputSymbols),
+                    Optional.empty(),
+                    false,
+                    Optional.empty(),
+                    Optional.of(partitionCount)));
+        }
+
+        public ExchangeBuilder fixedArbitraryDistributionPartitioningScheme(List<Symbol> outputSymbols, int partitionCount)
+        {
+            return partitioningScheme(new PartitioningScheme(Partitioning.create(
+                    FIXED_ARBITRARY_DISTRIBUTION,
+                    ImmutableList.of()),
+                    ImmutableList.copyOf(outputSymbols),
+                    Optional.empty(),
+                    false,
+                    Optional.empty(),
+                    Optional.of(partitionCount)));
         }
 
         public ExchangeBuilder partitioningScheme(PartitioningScheme partitioningScheme)
@@ -1129,6 +1139,29 @@ public class PlanBuilder
             List<String> columnNames,
             Optional<PartitioningScheme> partitioningScheme,
             Optional<PartitioningScheme> preferredPartitioningScheme,
+            TableWriterNode.WriterTarget target,
+            PlanNode source,
+            Symbol rowCountSymbol)
+    {
+        return new TableWriterNode(
+                idAllocator.getNextId(),
+                source,
+                target,
+                rowCountSymbol,
+                rowCountSymbol,
+                columns,
+                columnNames,
+                partitioningScheme,
+                preferredPartitioningScheme,
+                Optional.empty(),
+                Optional.empty());
+    }
+
+    public TableWriterNode tableWriter(
+            List<Symbol> columns,
+            List<String> columnNames,
+            Optional<PartitioningScheme> partitioningScheme,
+            Optional<PartitioningScheme> preferredPartitioningScheme,
             Optional<StatisticAggregations> statisticAggregations,
             Optional<StatisticAggregationsDescriptor<Symbol>> statisticAggregationsDescriptor,
             PlanNode source)
@@ -1141,7 +1174,6 @@ public class PlanBuilder
                 symbol("fragment", VARBINARY),
                 columns,
                 columnNames,
-                ImmutableSet.of(),
                 partitioningScheme,
                 preferredPartitioningScheme,
                 statisticAggregations,
@@ -1165,17 +1197,38 @@ public class PlanBuilder
                 source,
                 new TableWriterNode.TableExecuteTarget(
                         new TableExecuteHandle(
-                                new CatalogName("testConnector"),
+                                TEST_CATALOG_HANDLE,
                                 TestingTransactionHandle.create(),
                                 new TestingTableExecuteHandle()),
                         Optional.empty(),
-                        SchemaTableName.schemaTableName("testschema", "testtable")),
+                        new SchemaTableName("schemaName", "tableName"),
+                        false),
                 symbol("partialrows", BIGINT),
                 symbol("fragment", VARBINARY),
                 columns,
                 columnNames,
                 partitioningScheme,
                 preferredPartitioningScheme);
+    }
+
+    public TableFunctionNode tableFunction(
+            String name,
+            List<Symbol> properOutputs,
+            List<PlanNode> sources,
+            List<TableArgumentProperties> tableArgumentProperties,
+            List<List<String>> copartitioningLists)
+
+    {
+        return new TableFunctionNode(
+                idAllocator.getNextId(),
+                name,
+                TEST_CATALOG_HANDLE,
+                ImmutableMap.of(),
+                properOutputs,
+                sources,
+                tableArgumentProperties,
+                copartitioningLists,
+                new TableFunctionHandle(TEST_CATALOG_HANDLE, new SchemaFunctionName("system", name), new ConnectorTableFunctionHandle() {}, TestingTransactionHandle.create()));
     }
 
     public PartitioningScheme partitioningScheme(List<Symbol> outputSymbols, List<Symbol> partitioningSymbols, Symbol hashSymbol)
@@ -1244,7 +1297,7 @@ public class PlanBuilder
                 filter);
     }
 
-    public WindowNode window(Specification specification, Map<Symbol, WindowNode.Function> functions, PlanNode source)
+    public WindowNode window(DataOrganizationSpecification specification, Map<Symbol, WindowNode.Function> functions, PlanNode source)
     {
         return new WindowNode(
                 idAllocator.getNextId(),
@@ -1256,7 +1309,7 @@ public class PlanBuilder
                 0);
     }
 
-    public WindowNode window(Specification specification, Map<Symbol, WindowNode.Function> functions, Symbol hashSymbol, PlanNode source)
+    public WindowNode window(DataOrganizationSpecification specification, Map<Symbol, WindowNode.Function> functions, Symbol hashSymbol, PlanNode source)
     {
         return new WindowNode(
                 idAllocator.getNextId(),
@@ -1285,7 +1338,7 @@ public class PlanBuilder
                 hashSymbol);
     }
 
-    public TopNRankingNode topNRanking(Specification specification, RankingType rankingType, int maxRankingPerPartition, Symbol rankingSymbol, Optional<Symbol> hashSymbol, PlanNode source)
+    public TopNRankingNode topNRanking(DataOrganizationSpecification specification, RankingType rankingType, int maxRankingPerPartition, Symbol rankingSymbol, Optional<Symbol> hashSymbol, PlanNode source)
     {
         return new TopNRankingNode(
                 idAllocator.getNextId(),
@@ -1305,12 +1358,22 @@ public class PlanBuilder
         return patternRecognitionBuilder.build(idAllocator);
     }
 
-    public static Expression expression(String sql)
+    public RemoteSourceNode remoteSource(
+            List<PlanFragmentId> sourceFragmentIds,
+            List<Symbol> outputs,
+            Optional<OrderingScheme> orderingScheme,
+            ExchangeNode.Type exchangeType,
+            RetryPolicy retryPolicy)
+    {
+        return new RemoteSourceNode(idAllocator.getNextId(), sourceFragmentIds, outputs, orderingScheme, exchangeType, retryPolicy);
+    }
+
+    public static Expression expression(@Language("SQL") String sql)
     {
         return ExpressionUtils.rewriteIdentifiersToSymbolReferences(new SqlParser().createExpression(sql, new ParsingOptions()));
     }
 
-    public static List<Expression> expressions(String... expressions)
+    public static List<Expression> expressions(@Language("SQL") String... expressions)
     {
         return Stream.of(expressions)
                 .map(PlanBuilder::expression)

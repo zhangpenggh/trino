@@ -34,7 +34,6 @@ import io.trino.spi.block.RunLengthEncodedBlock;
 import io.trino.spi.type.RowType;
 import io.trino.spi.type.RowType.Field;
 import io.trino.spi.type.Type;
-import org.openjdk.jol.info.ClassLayout;
 
 import javax.annotation.Nullable;
 
@@ -48,6 +47,7 @@ import java.util.Optional;
 
 import static com.google.common.base.MoreObjects.toStringHelper;
 import static com.google.common.base.Verify.verify;
+import static io.airlift.slice.SizeOf.instanceSize;
 import static io.trino.orc.metadata.Stream.StreamKind.PRESENT;
 import static io.trino.orc.reader.ColumnReaders.createColumnReader;
 import static io.trino.orc.reader.ReaderUtils.verifyStreamType;
@@ -58,7 +58,7 @@ import static java.util.Objects.requireNonNull;
 public class StructColumnReader
         implements ColumnReader
 {
-    private static final int INSTANCE_SIZE = ClassLayout.parseClass(StructColumnReader.class).instanceSize();
+    private static final int INSTANCE_SIZE = instanceSize(StructColumnReader.class);
 
     private final OrcColumn column;
     private final OrcBlockFactory blockFactory;
@@ -80,7 +80,7 @@ public class StructColumnReader
             Type type,
             OrcColumn column,
             OrcReader.ProjectedLayout readLayout,
-            AggregatedMemoryContext systemMemoryContext,
+            AggregatedMemoryContext memoryContext,
             OrcBlockFactory blockFactory,
             FieldMapperFactory fieldMapperFactory)
             throws OrcCorruptionException
@@ -112,14 +112,14 @@ public class StructColumnReader
                                     field.getType(),
                                     fieldStream,
                                     fieldLayout,
-                                    systemMemoryContext,
+                                    memoryContext,
                                     blockFactory,
                                     fieldMapperFactory));
                 }
             }
         }
         this.fieldNames = fieldNames.build();
-        this.structFields = structFields.build();
+        this.structFields = structFields.buildOrThrow();
     }
 
     @Override

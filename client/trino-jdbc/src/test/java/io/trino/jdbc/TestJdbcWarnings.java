@@ -75,7 +75,7 @@ public class TestJdbcWarnings
                 .setProperties(ImmutableMap.<String, String>builder()
                         .put("testing-warning-collector.add-warnings", "true")
                         .put("testing-warning-collector.preloaded-warnings", String.valueOf(PRELOADED_WARNINGS))
-                        .build())
+                        .buildOrThrow())
                 .build();
         server.installPlugin(new BlackHolePlugin());
         server.createCatalog("blackhole", "blackhole");
@@ -100,6 +100,7 @@ public class TestJdbcWarnings
             throws Exception
     {
         server.close();
+        server = null;
     }
 
     @SuppressWarnings("JDBCResourceOpenedButNotSafelyClosed")
@@ -117,8 +118,11 @@ public class TestJdbcWarnings
             throws Exception
     {
         executor.shutdownNow();
+        executor = null;
         statement.close();
+        statement = null;
         connection.close();
+        connection = null;
     }
 
     @Test

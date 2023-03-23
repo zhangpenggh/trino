@@ -18,10 +18,10 @@ import io.trino.spi.Page;
 import io.trino.spi.PageBuilder;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.type.Type;
-import org.openjdk.jol.info.ClassLayout;
 
 import java.util.List;
 
+import static io.airlift.slice.SizeOf.instanceSize;
 import static io.trino.spi.type.BigintType.BIGINT;
 
 /**
@@ -30,7 +30,7 @@ import static io.trino.spi.type.BigintType.BIGINT;
 public class CyclingGroupByHash
         implements GroupByHash
 {
-    private static final int INSTANCE_SIZE = ClassLayout.parseClass(CyclingGroupByHash.class).instanceSize();
+    private static final int INSTANCE_SIZE = instanceSize(CyclingGroupByHash.class);
 
     private final int totalGroupCount;
     private int maxGroupId;
@@ -48,18 +48,6 @@ public class CyclingGroupByHash
     }
 
     @Override
-    public long getHashCollisions()
-    {
-        return 0;
-    }
-
-    @Override
-    public double getExpectedHashCollisions()
-    {
-        return 0;
-    }
-
-    @Override
     public List<Type> getTypes()
     {
         return ImmutableList.of();
@@ -72,7 +60,7 @@ public class CyclingGroupByHash
     }
 
     @Override
-    public void appendValuesTo(int groupId, PageBuilder pageBuilder, int outputChannelOffset)
+    public void appendValuesTo(int groupId, PageBuilder pageBuilder)
     {
         throw new UnsupportedOperationException("Not yet supported");
     }

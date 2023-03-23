@@ -23,6 +23,7 @@ import io.trino.spi.type.DateType;
 import io.trino.spi.type.DecimalType;
 import io.trino.spi.type.Decimals;
 import io.trino.spi.type.DoubleType;
+import io.trino.spi.type.Int128;
 import io.trino.spi.type.IntegerType;
 import io.trino.spi.type.RealType;
 import io.trino.spi.type.SmallintType;
@@ -38,7 +39,6 @@ import java.math.BigDecimal;
 import java.math.BigInteger;
 
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
-import static io.trino.spi.type.Decimals.decodeUnscaledValue;
 import static io.trino.spi.type.TimestampType.TIMESTAMP_MILLIS;
 import static io.trino.spi.type.Timestamps.truncateEpochMicrosToMillis;
 import static java.lang.Float.floatToRawIntBits;
@@ -122,6 +122,10 @@ public final class TypeHelper
                 return VarbinaryType.VARBINARY;
             case DECIMAL:
                 return DecimalType.createDecimalType(attributes.getPrecision(), attributes.getScale());
+            // TODO: add support for varchar and date types: https://github.com/trinodb/trino/issues/11009
+            case VARCHAR:
+            case DATE:
+                break;
         }
         throw new IllegalStateException("Kudu type not implemented for " + ktype);
     }
@@ -160,12 +164,11 @@ public final class TypeHelper
         if (type instanceof VarbinaryType) {
             return ((Slice) nativeValue).toByteBuffer();
         }
-        if (type instanceof DecimalType) {
-            DecimalType decimalType = (DecimalType) type;
+        if (type instanceof DecimalType decimalType) {
             if (decimalType.isShort()) {
                 return new BigDecimal(BigInteger.valueOf((long) nativeValue), decimalType.getScale());
             }
-            return new BigDecimal(decodeUnscaledValue((Slice) nativeValue), decimalType.getScale());
+            return new BigDecimal(((Int128) nativeValue).toBigInteger(), decimalType.getScale());
         }
         throw new IllegalStateException("Back conversion not implemented for " + type);
     }
@@ -206,7 +209,7 @@ public final class TypeHelper
             return Slices.wrappedBuffer(row.getBinary(field));
         }
         if (type instanceof DecimalType) {
-            return row.getDecimal(field);
+            return Decimals.encodeScaledValue(row.getDecimal(field), ((DecimalType) type).getScale());
         }
         throw new IllegalStateException("getObject not implemented for " + type);
     }
@@ -231,9 +234,8 @@ public final class TypeHelper
         if (type == RealType.REAL) {
             return floatToRawIntBits(row.getFloat(field));
         }
-        if (type instanceof DecimalType) {
-            DecimalType dtype = (DecimalType) type;
-            if (dtype.isShort()) {
+        if (type instanceof DecimalType decimalType) {
+            if (decimalType.isShort()) {
                 return row.getDecimal(field).unscaledValue().longValue();
             }
             throw new IllegalStateException("getLong not supported for long decimal: " + type);
@@ -264,10 +266,6 @@ public final class TypeHelper
         }
         if (type instanceof VarbinaryType) {
             return Slices.wrappedBuffer(row.getBinary(field));
-        }
-        if (type instanceof DecimalType) {
-            BigDecimal dec = row.getDecimal(field);
-            return Decimals.encodeScaledValue(dec);
         }
         throw new IllegalStateException("getSlice not implemented for " + type);
     }

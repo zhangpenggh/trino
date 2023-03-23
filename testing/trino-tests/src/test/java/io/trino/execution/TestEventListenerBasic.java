@@ -16,11 +16,14 @@ package io.trino.execution;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
+import io.airlift.json.JsonCodec;
 import io.trino.Session;
 import io.trino.connector.MockConnectorFactory;
 import io.trino.connector.MockConnectorTableHandle;
-import io.trino.execution.EventsCollector.EventFilters;
+import io.trino.execution.EventsAwaitingQueries.MaterializedResultWithEvents;
+import io.trino.execution.EventsCollector.QueryEvents;
 import io.trino.execution.TestEventListenerPlugin.TestingEventListenerPlugin;
+import io.trino.plugin.base.metrics.LongCount;
 import io.trino.plugin.resourcegroups.ResourceGroupManagerPlugin;
 import io.trino.plugin.tpch.TpchPlugin;
 import io.trino.spi.Plugin;
@@ -37,13 +40,14 @@ import io.trino.spi.eventlistener.OutputColumnMetadata;
 import io.trino.spi.eventlistener.QueryCompletedEvent;
 import io.trino.spi.eventlistener.QueryCreatedEvent;
 import io.trino.spi.eventlistener.QueryFailureInfo;
+import io.trino.spi.eventlistener.QueryInputMetadata;
 import io.trino.spi.eventlistener.QueryStatistics;
 import io.trino.spi.eventlistener.RoutineInfo;
 import io.trino.spi.eventlistener.TableInfo;
+import io.trino.spi.metrics.Metrics;
 import io.trino.spi.security.ViewExpression;
 import io.trino.testing.AbstractTestQueryFramework;
 import io.trino.testing.DistributedQueryRunner;
-import io.trino.testing.MaterializedResult;
 import io.trino.testing.QueryRunner;
 import org.intellij.lang.annotations.Language;
 import org.testng.annotations.DataProvider;
@@ -53,19 +57,27 @@ import java.io.File;
 import java.net.URISyntaxException;
 import java.time.Duration;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
+import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static com.google.common.collect.Iterables.getOnlyElement;
 import static com.google.common.collect.MoreCollectors.toOptional;
 import static com.google.common.io.Resources.getResource;
 import static com.google.common.util.concurrent.MoreExecutors.shutdownAndAwaitTermination;
+import static io.airlift.json.JsonCodec.mapJsonCodec;
+import static io.trino.connector.MockConnectorEntities.TPCH_NATION_DATA;
+import static io.trino.connector.MockConnectorEntities.TPCH_NATION_SCHEMA;
 import static io.trino.execution.TestQueues.createResourceGroupId;
+import static io.trino.spi.metrics.Metrics.EMPTY;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.VarcharType.createVarcharType;
+import static io.trino.sql.planner.planprinter.JsonRenderer.JsonRenderedNode;
+import static io.trino.sql.planner.planprinter.NodeRepresentation.TypedSymbol.typedSymbol;
 import static io.trino.testing.TestingSession.testSessionBuilder;
 import static java.lang.String.format;
 import static java.util.UUID.randomUUID;
@@ -78,11 +90,12 @@ import static org.testng.Assert.assertTrue;
 public class TestEventListenerBasic
         extends AbstractTestQueryFramework
 {
+    private static final JsonCodec<Map<String, JsonRenderedNode>> ANONYMIZED_PLAN_JSON_CODEC = mapJsonCodec(String.class, JsonRenderedNode.class);
     private static final String IGNORE_EVENT_MARKER = " -- ignore_generated_event";
     private static final String VARCHAR_TYPE = "varchar(15)";
     private static final String BIGINT_TYPE = BIGINT.getDisplayName();
+    private static final Metrics TEST_METRICS = new Metrics(ImmutableMap.of("test_metrics", new LongCount(1)));
 
-    private final EventsCollector generatedEvents = new EventsCollector(buildEventFilters());
     private EventsAwaitingQueries queries;
 
     @Override
@@ -96,6 +109,8 @@ public class TestEventListenerBasic
                 .setClientInfo("{\"clientVersion\":\"testVersion\"}")
                 .build();
 
+        EventsCollector generatedEvents = new EventsCollector();
+
         DistributedQueryRunner queryRunner = DistributedQueryRunner.builder(session).setNodeCount(1).build();
         queryRunner.installPlugin(new TpchPlugin());
         queryRunner.installPlugin(new TestingEventListenerPlugin(generatedEvents));
@@ -107,10 +122,21 @@ public class TestEventListenerBasic
             public Iterable<ConnectorFactory> getConnectorFactories()
             {
                 MockConnectorFactory connectorFactory = MockConnectorFactory.builder()
-                        .withListTables((session, s) -> ImmutableList.of(new SchemaTableName("default", "tests_table")))
-                        .withGetColumns(schemaTableName -> ImmutableList.of(
-                                new ColumnMetadata("test_varchar", createVarcharType(15)),
-                                new ColumnMetadata("test_bigint", BIGINT)))
+                        .withListTables((session, schemaName) -> {
+                            return switch (schemaName) {
+                                case "default" -> List.of("tests_table");
+                                case "tiny" -> List.of("nation");
+                                default -> List.of();
+                            };
+                        })
+                        .withGetColumns(schemaTableName -> {
+                            if (schemaTableName.equals(new SchemaTableName("tiny", "nation"))) {
+                                return TPCH_NATION_SCHEMA;
+                            }
+                            return ImmutableList.of(
+                                    new ColumnMetadata("test_varchar", createVarcharType(15)),
+                                    new ColumnMetadata("test_bigint", BIGINT));
+                        })
                         .withGetTableHandle((session, schemaTableName) -> {
                             if (!schemaTableName.getTableName().startsWith("create")) {
                                 return new MockConnectorTableHandle(schemaTableName);
@@ -128,7 +154,7 @@ public class TestEventListenerBasic
                                     "SELECT nationkey AS test_column FROM tpch.tiny.nation",
                                     Optional.empty(),
                                     Optional.empty(),
-                                    ImmutableList.of(new ConnectorViewDefinition.ViewColumn("test_column", BIGINT.getTypeId())),
+                                    ImmutableList.of(new ConnectorViewDefinition.ViewColumn("test_column", BIGINT.getTypeId(), Optional.empty())),
                                     Optional.empty(),
                                     Optional.empty(),
                                     true);
@@ -147,6 +173,18 @@ public class TestEventListenerBasic
                                     ImmutableMap.of());
                             SchemaTableName materializedViewName = new SchemaTableName("default", "test_materialized_view");
                             return ImmutableMap.of(materializedViewName, definition);
+                        })
+                        .withData(schemaTableName -> {
+                            if (schemaTableName.equals(new SchemaTableName("tiny", "nation"))) {
+                                return TPCH_NATION_DATA;
+                            }
+                            return ImmutableList.of();
+                        })
+                        .withMetrics(schemaTableName -> {
+                            if (schemaTableName.equals(new SchemaTableName("tiny", "nation"))) {
+                                return TEST_METRICS;
+                            }
+                            return EMPTY;
                         })
                         .withRowFilter(schemaTableName -> {
                             if (schemaTableName.getTableName().equals("test_table_with_row_filter")) {
@@ -168,18 +206,9 @@ public class TestEventListenerBasic
         queryRunner.getCoordinator().getResourceGroupManager().get()
                 .setConfigurationManager("file", ImmutableMap.of("resource-groups.config-file", getResourceFilePath("resource_groups_config_simple.json")));
 
-        queries = new EventsAwaitingQueries(generatedEvents, queryRunner, Duration.ofSeconds(1));
+        queries = new EventsAwaitingQueries(generatedEvents, queryRunner);
 
         return queryRunner;
-    }
-
-    private static EventFilters buildEventFilters()
-    {
-        return EventFilters.builder()
-                .setQueryCreatedFilter(event -> !event.getMetadata().getQuery().contains(IGNORE_EVENT_MARKER))
-                .setQueryCompletedFilter(event -> !event.getMetadata().getQuery().contains(IGNORE_EVENT_MARKER))
-                .setSplitCompletedFilter(event -> false)
-                .build();
     }
 
     private String getResourceFilePath(String fileName)
@@ -192,10 +221,10 @@ public class TestEventListenerBasic
         }
     }
 
-    private MaterializedResult runQueryAndWaitForEvents(@Language("SQL") String sql, int numEventsExpected)
+    private MaterializedResultWithEvents runQueryAndWaitForEvents(@Language("SQL") String sql)
             throws Exception
     {
-        return queries.runQueryAndWaitForEvents(sql, numEventsExpected, getSession());
+        return queries.runQueryAndWaitForEvents(sql, getSession());
     }
 
     @Test
@@ -293,9 +322,9 @@ public class TestEventListenerBasic
     private void assertFailedQuery(Session session, @Language("SQL") String sql, String expectedFailure)
             throws Exception
     {
-        queries.runQueryAndWaitForEvents(sql, 2, session, Optional.of(expectedFailure));
+        QueryEvents queryEvents = queries.runQueryAndWaitForEvents(sql, session, Optional.of(expectedFailure)).getQueryEvents();
 
-        QueryCompletedEvent queryCompletedEvent = getOnlyElement(generatedEvents.getQueryCompletedEvents());
+        QueryCompletedEvent queryCompletedEvent = queryEvents.getQueryCompletedEvent();
         assertEquals(queryCompletedEvent.getMetadata().getQuery(), sql);
 
         QueryFailureInfo failureInfo = queryCompletedEvent.getFailureInfo()
@@ -307,9 +336,9 @@ public class TestEventListenerBasic
     public void testReferencedTablesAndRoutines()
             throws Exception
     {
-        runQueryAndWaitForEvents("SELECT sum(linenumber) FROM lineitem", 2);
+        QueryEvents queryEvents = runQueryAndWaitForEvents("SELECT sum(linenumber) FROM lineitem").getQueryEvents();
 
-        QueryCompletedEvent event = getOnlyElement(generatedEvents.getQueryCompletedEvents());
+        QueryCompletedEvent event = queryEvents.getQueryCompletedEvent();
 
         List<TableInfo> tables = event.getMetadata().getTables();
         assertEquals(tables.size(), 1);
@@ -324,7 +353,7 @@ public class TestEventListenerBasic
 
         ColumnInfo column = table.getColumns().get(0);
         assertEquals(column.getColumn(), "linenumber");
-        assertTrue(column.getMasks().isEmpty());
+        assertTrue(column.getMask().isEmpty());
 
         List<RoutineInfo> routines = event.getMetadata().getRoutines();
         assertEquals(tables.size(), 1);
@@ -338,9 +367,9 @@ public class TestEventListenerBasic
     public void testReferencedTablesWithViews()
             throws Exception
     {
-        runQueryAndWaitForEvents("SELECT test_column FROM mock.default.test_view", 2);
+        QueryEvents queryEvents = runQueryAndWaitForEvents("SELECT test_column FROM mock.default.test_view").getQueryEvents();
 
-        QueryCompletedEvent event = getOnlyElement(generatedEvents.getQueryCompletedEvents());
+        QueryCompletedEvent event = queryEvents.getQueryCompletedEvent();
 
         List<TableInfo> tables = event.getMetadata().getTables();
         assertThat(tables).hasSize(2);
@@ -356,7 +385,7 @@ public class TestEventListenerBasic
 
         ColumnInfo column = table.getColumns().get(0);
         assertThat(column.getColumn()).isEqualTo("nationkey");
-        assertThat(column.getMasks()).isEmpty();
+        assertThat(column.getMask()).isEmpty();
 
         table = tables.get(1);
         assertThat(table.getCatalog()).isEqualTo("mock");
@@ -369,16 +398,16 @@ public class TestEventListenerBasic
 
         column = table.getColumns().get(0);
         assertThat(column.getColumn()).isEqualTo("test_column");
-        assertThat(column.getMasks()).isEmpty();
+        assertThat(column.getMask()).isEmpty();
     }
 
     @Test
     public void testReferencedTablesWithMaterializedViews()
             throws Exception
     {
-        runQueryAndWaitForEvents("SELECT test_column FROM mock.default.test_materialized_view", 2);
+        QueryEvents queryEvents = runQueryAndWaitForEvents("SELECT test_column FROM mock.default.test_materialized_view").getQueryEvents();
 
-        QueryCompletedEvent event = getOnlyElement(generatedEvents.getQueryCompletedEvents());
+        QueryCompletedEvent event = queryEvents.getQueryCompletedEvent();
 
         List<TableInfo> tables = event.getMetadata().getTables();
         assertThat(tables).hasSize(2);
@@ -393,7 +422,7 @@ public class TestEventListenerBasic
 
         ColumnInfo column = table.getColumns().get(0);
         assertThat(column.getColumn()).isEqualTo("nationkey");
-        assertThat(column.getMasks()).isEmpty();
+        assertThat(column.getMask()).isEmpty();
 
         table = tables.get(1);
         assertThat(table.getCatalog()).isEqualTo("mock");
@@ -406,20 +435,20 @@ public class TestEventListenerBasic
 
         column = table.getColumns().get(0);
         assertThat(column.getColumn()).isEqualTo("test_column");
-        assertThat(column.getMasks()).isEmpty();
+        assertThat(column.getMask()).isEmpty();
     }
 
     @Test
     public void testReferencedTablesInCreateView()
             throws Exception
     {
-        runQueryAndWaitForEvents("CREATE VIEW mock.default.test_view AS SELECT * FROM nation", 2);
+        QueryEvents queryEvents = runQueryAndWaitForEvents("CREATE VIEW mock.default.create_another_test_view AS SELECT * FROM nation").getQueryEvents();
 
-        QueryCompletedEvent event = getOnlyElement(generatedEvents.getQueryCompletedEvents());
+        QueryCompletedEvent event = queryEvents.getQueryCompletedEvent();
 
         assertThat(event.getIoMetadata().getOutput().get().getCatalogName()).isEqualTo("mock");
         assertThat(event.getIoMetadata().getOutput().get().getSchema()).isEqualTo("default");
-        assertThat(event.getIoMetadata().getOutput().get().getTable()).isEqualTo("test_view");
+        assertThat(event.getIoMetadata().getOutput().get().getTable()).isEqualTo("create_another_test_view");
         assertThat(event.getIoMetadata().getOutput().get().getColumns().get())
                 .containsExactly(
                         new OutputColumnMetadata("nationkey", BIGINT_TYPE, ImmutableSet.of(new ColumnDetail("tpch", "tiny", "nation", "nationkey"))),
@@ -444,9 +473,9 @@ public class TestEventListenerBasic
     public void testReferencedTablesInCreateMaterializedView()
             throws Exception
     {
-        runQueryAndWaitForEvents("CREATE MATERIALIZED VIEW mock.default.test_view AS SELECT * FROM nation", 2);
+        QueryEvents queryEvents = runQueryAndWaitForEvents("CREATE MATERIALIZED VIEW mock.default.test_view AS SELECT * FROM nation").getQueryEvents();
 
-        QueryCompletedEvent event = getOnlyElement(generatedEvents.getQueryCompletedEvents());
+        QueryCompletedEvent event = queryEvents.getQueryCompletedEvent();
 
         assertThat(event.getIoMetadata().getOutput().get().getCatalogName()).isEqualTo("mock");
         assertThat(event.getIoMetadata().getOutput().get().getSchema()).isEqualTo("default");
@@ -475,9 +504,9 @@ public class TestEventListenerBasic
     public void testReferencedTablesWithRowFilter()
             throws Exception
     {
-        runQueryAndWaitForEvents("SELECT 1 FROM mock.default.test_table_with_row_filter", 2);
+        QueryEvents queryEvents = runQueryAndWaitForEvents("SELECT 1 FROM mock.default.test_table_with_row_filter").getQueryEvents();
 
-        QueryCompletedEvent event = getOnlyElement(generatedEvents.getQueryCompletedEvents());
+        QueryCompletedEvent event = queryEvents.getQueryCompletedEvent();
 
         List<TableInfo> tables = event.getMetadata().getTables();
         assertThat(tables).hasSize(2);
@@ -493,7 +522,7 @@ public class TestEventListenerBasic
 
         ColumnInfo column = table.getColumns().get(0);
         assertThat(column.getColumn()).isEqualTo("name");
-        assertThat(column.getMasks()).isEmpty();
+        assertThat(column.getMask()).isEmpty();
 
         table = tables.get(1);
         assertThat(table.getCatalog()).isEqualTo("mock");
@@ -506,16 +535,18 @@ public class TestEventListenerBasic
 
         column = table.getColumns().get(0);
         assertThat(column.getColumn()).isEqualTo("test_varchar");
-        assertThat(column.getMasks()).isEmpty();
+        assertThat(column.getMask()).isEmpty();
     }
 
     @Test
     public void testReferencedTablesWithColumnMask()
             throws Exception
     {
-        runQueryAndWaitForEvents("CREATE TABLE mock.default.create_table_with_referring_mask AS SELECT * FROM mock.default.test_table_with_column_mask", 2);
+        QueryEvents queryEvents = runQueryAndWaitForEvents(
+                "CREATE TABLE mock.default.create_table_with_referring_mask AS SELECT * FROM mock.default.test_table_with_column_mask"
+        ).getQueryEvents();
 
-        QueryCompletedEvent event = getOnlyElement(generatedEvents.getQueryCompletedEvents());
+        QueryCompletedEvent event = queryEvents.getQueryCompletedEvent();
 
         assertThat(event.getIoMetadata().getOutput().get().getCatalogName()).isEqualTo("mock");
         assertThat(event.getIoMetadata().getOutput().get().getSchema()).isEqualTo("default");
@@ -539,7 +570,7 @@ public class TestEventListenerBasic
 
         ColumnInfo column = table.getColumns().get(0);
         assertThat(column.getColumn()).isEqualTo("orderkey");
-        assertThat(column.getMasks()).isEmpty();
+        assertThat(column.getMask()).isEmpty();
 
         table = tables.get(1);
         assertThat(table.getCatalog()).isEqualTo("mock");
@@ -552,11 +583,11 @@ public class TestEventListenerBasic
 
         column = table.getColumns().get(0);
         assertThat(column.getColumn()).isEqualTo("test_varchar");
-        assertThat(column.getMasks()).hasSize(1);
+        assertThat(column.getMask()).isPresent();
 
         column = table.getColumns().get(1);
         assertThat(column.getColumn()).isEqualTo("test_bigint");
-        assertThat(column.getMasks()).isEmpty();
+        assertThat(column.getMask()).isEmpty();
     }
 
     @Test
@@ -564,8 +595,8 @@ public class TestEventListenerBasic
             throws Exception
     {
         // assert that ColumnInfos for referenced columns are present when the table was not aliased
-        runQueryAndWaitForEvents("SELECT name, nationkey FROM nation", 2);
-        QueryCompletedEvent event = getOnlyElement(generatedEvents.getQueryCompletedEvents());
+        QueryEvents queryEvents = runQueryAndWaitForEvents("SELECT name, nationkey FROM nation").getQueryEvents();
+        QueryCompletedEvent event = queryEvents.getQueryCompletedEvent();
         TableInfo table = getOnlyElement(event.getMetadata().getTables());
 
         assertEquals(
@@ -575,8 +606,8 @@ public class TestEventListenerBasic
                 ImmutableSet.of("name", "nationkey"));
 
         // assert that ColumnInfos for referenced columns are present when the table was aliased
-        runQueryAndWaitForEvents("SELECT name, nationkey FROM nation n", 2);
-        event = getOnlyElement(generatedEvents.getQueryCompletedEvents());
+        queryEvents = runQueryAndWaitForEvents("SELECT name, nationkey FROM nation n").getQueryEvents();
+        event = queryEvents.getQueryCompletedEvent();
         table = getOnlyElement(event.getMetadata().getTables());
 
         assertEquals(
@@ -586,8 +617,8 @@ public class TestEventListenerBasic
                 ImmutableSet.of("name", "nationkey"));
 
         // assert that ColumnInfos for referenced columns are present when the table was aliased and its columns were aliased
-        runQueryAndWaitForEvents("SELECT a, b FROM nation n(a, b, c, d)", 2);
-        event = getOnlyElement(generatedEvents.getQueryCompletedEvents());
+        queryEvents = runQueryAndWaitForEvents("SELECT a, b FROM nation n(a, b, c, d)").getQueryEvents();
+        event = queryEvents.getQueryCompletedEvent();
         table = getOnlyElement(event.getMetadata().getTables());
 
         assertEquals(
@@ -605,9 +636,9 @@ public class TestEventListenerBasic
         String prepareQuery = "PREPARE stmt FROM " + selectQuery;
 
         // QueryCreated: 1, QueryCompleted: 1, Splits: 0
-        runQueryAndWaitForEvents(prepareQuery, 2);
+        QueryEvents queryEvents = runQueryAndWaitForEvents(prepareQuery).getQueryEvents();
 
-        QueryCreatedEvent queryCreatedEvent = getOnlyElement(generatedEvents.getQueryCreatedEvents());
+        QueryCreatedEvent queryCreatedEvent = queryEvents.getQueryCreatedEvent();
         assertEquals(queryCreatedEvent.getContext().getServerVersion(), "testversion");
         assertEquals(queryCreatedEvent.getContext().getServerAddress(), "127.0.0.1");
         assertEquals(queryCreatedEvent.getContext().getEnvironment(), "testing");
@@ -615,7 +646,7 @@ public class TestEventListenerBasic
         assertEquals(queryCreatedEvent.getMetadata().getQuery(), prepareQuery);
         assertFalse(queryCreatedEvent.getMetadata().getPreparedQuery().isPresent());
 
-        QueryCompletedEvent queryCompletedEvent = getOnlyElement(generatedEvents.getQueryCompletedEvents());
+        QueryCompletedEvent queryCompletedEvent = queryEvents.getQueryCompletedEvent();
         assertTrue(queryCompletedEvent.getContext().getResourceGroupId().isPresent());
         assertEquals(queryCompletedEvent.getContext().getResourceGroupId().get(), createResourceGroupId("global", "user-user"));
         assertEquals(queryCompletedEvent.getIoMetadata().getOutput(), Optional.empty());
@@ -628,9 +659,9 @@ public class TestEventListenerBasic
         // Add prepared statement to a new session to eliminate any impact on other tests in this suite.
         Session sessionWithPrepare = Session.builder(getSession()).addPreparedStatement("stmt", selectQuery).build();
 
-        queries.runQueryAndWaitForEvents("EXECUTE stmt USING 'SHIP'", 2, sessionWithPrepare);
+        queryEvents = queries.runQueryAndWaitForEvents("EXECUTE stmt USING 'SHIP'", sessionWithPrepare).getQueryEvents();
 
-        queryCreatedEvent = getOnlyElement(generatedEvents.getQueryCreatedEvents());
+        queryCreatedEvent = queryEvents.getQueryCreatedEvent();
         assertEquals(queryCreatedEvent.getContext().getServerVersion(), "testversion");
         assertEquals(queryCreatedEvent.getContext().getServerAddress(), "127.0.0.1");
         assertEquals(queryCreatedEvent.getContext().getEnvironment(), "testing");
@@ -639,7 +670,7 @@ public class TestEventListenerBasic
         assertTrue(queryCreatedEvent.getMetadata().getPreparedQuery().isPresent());
         assertEquals(queryCreatedEvent.getMetadata().getPreparedQuery().get(), selectQuery);
 
-        queryCompletedEvent = getOnlyElement(generatedEvents.getQueryCompletedEvents());
+        queryCompletedEvent = queryEvents.getQueryCompletedEvent();
         assertTrue(queryCompletedEvent.getContext().getResourceGroupId().isPresent());
         assertEquals(queryCompletedEvent.getContext().getResourceGroupId().get(), createResourceGroupId("global", "user-user"));
         assertEquals(queryCompletedEvent.getIoMetadata().getOutput(), Optional.empty());
@@ -655,19 +686,19 @@ public class TestEventListenerBasic
     public void testOutputStats()
             throws Exception
     {
-        MaterializedResult result = runQueryAndWaitForEvents("SELECT 1 FROM lineitem", 2);
-        QueryCreatedEvent queryCreatedEvent = getOnlyElement(generatedEvents.getQueryCreatedEvents());
-        QueryCompletedEvent queryCompletedEvent = getOnlyElement(generatedEvents.getQueryCompletedEvents());
+        MaterializedResultWithEvents result = runQueryAndWaitForEvents("SELECT 1 FROM lineitem");
+        QueryCreatedEvent queryCreatedEvent = result.getQueryEvents().getQueryCreatedEvent();
+        QueryCompletedEvent queryCompletedEvent = result.getQueryEvents().getQueryCompletedEvent();
         QueryStats queryStats = getDistributedQueryRunner().getCoordinator().getQueryManager().getFullQueryInfo(new QueryId(queryCreatedEvent.getMetadata().getQueryId())).getQueryStats();
 
         assertTrue(queryStats.getOutputDataSize().toBytes() > 0L);
         assertTrue(queryCompletedEvent.getStatistics().getOutputBytes() > 0L);
-        assertEquals(result.getRowCount(), queryStats.getOutputPositions());
-        assertEquals(result.getRowCount(), queryCompletedEvent.getStatistics().getOutputRows());
+        assertEquals(result.getMaterializedResult().getRowCount(), queryStats.getOutputPositions());
+        assertEquals(result.getMaterializedResult().getRowCount(), queryCompletedEvent.getStatistics().getOutputRows());
 
-        runQueryAndWaitForEvents("SELECT COUNT(1) FROM lineitem", 2);
-        queryCreatedEvent = getOnlyElement(generatedEvents.getQueryCreatedEvents());
-        queryCompletedEvent = getOnlyElement(generatedEvents.getQueryCompletedEvents());
+        result = runQueryAndWaitForEvents("SELECT COUNT(1) FROM lineitem");
+        queryCreatedEvent = result.getQueryEvents().getQueryCreatedEvent();
+        queryCompletedEvent = result.getQueryEvents().getQueryCompletedEvent();
         queryStats = getDistributedQueryRunner().getCoordinator().getQueryManager().getFullQueryInfo(new QueryId(queryCreatedEvent.getMetadata().getQueryId())).getQueryStats();
 
         assertTrue(queryStats.getOutputDataSize().toBytes() > 0L);
@@ -686,7 +717,6 @@ public class TestEventListenerBasic
         assertEquals(statistics.getPlanningTime().get().toMillis(), queryStats.getPlanningTime().toMillis());
         assertEquals(statistics.getExecutionTime().get().toMillis(), queryStats.getExecutionTime().toMillis());
         assertEquals(statistics.getPeakUserMemoryBytes(), queryStats.getPeakUserMemoryReservation().toBytes());
-        assertEquals(statistics.getPeakTotalNonRevocableMemoryBytes(), queryStats.getPeakNonRevocableMemoryReservation().toBytes());
         assertEquals(statistics.getPeakTaskUserMemory(), queryStats.getPeakTaskUserMemory().toBytes());
         assertEquals(statistics.getPeakTaskTotalMemory(), queryStats.getPeakTaskTotalMemory().toBytes());
         assertEquals(statistics.getPhysicalInputBytes(), queryStats.getPhysicalInputDataSize().toBytes());
@@ -699,6 +729,7 @@ public class TestEventListenerBasic
         assertEquals(statistics.getOutputRows(), queryStats.getOutputPositions());
         assertEquals(statistics.getWrittenBytes(), queryStats.getLogicalWrittenDataSize().toBytes());
         assertEquals(statistics.getWrittenRows(), queryStats.getWrittenPositions());
+        assertEquals(statistics.getSpilledBytes(), queryStats.getSpilledDataSize().toBytes());
         assertEquals(statistics.getCumulativeMemory(), queryStats.getCumulativeUserMemory());
         assertEquals(statistics.getStageGcStatistics(), queryStats.getStageGcStatistics());
         assertEquals(statistics.getCompletedSplits(), queryStats.getCompletedDrivers());
@@ -730,8 +761,8 @@ public class TestEventListenerBasic
     public void testOutputColumnsForCreateTableAsSelectAll()
             throws Exception
     {
-        runQueryAndWaitForEvents("CREATE TABLE mock.default.create_new_table AS SELECT * FROM nation", 2);
-        QueryCompletedEvent event = getOnlyElement(generatedEvents.getQueryCompletedEvents());
+        QueryEvents queryEvents = runQueryAndWaitForEvents("CREATE TABLE mock.default.create_new_table AS SELECT * FROM nation").getQueryEvents();
+        QueryCompletedEvent event = queryEvents.getQueryCompletedEvent();
         assertThat(event.getIoMetadata().getOutput().get().getColumns().get())
                 .containsExactly(
                         new OutputColumnMetadata("nationkey", BIGINT_TYPE, ImmutableSet.of(new ColumnDetail("tpch", "tiny", "nation", "nationkey"))),
@@ -744,8 +775,8 @@ public class TestEventListenerBasic
     public void testOutputColumnsForCreateTableAsSelectAllFromView()
             throws Exception
     {
-        runQueryAndWaitForEvents("CREATE TABLE mock.default.create_new_table AS SELECT * FROM mock.default.test_view", 2);
-        QueryCompletedEvent event = getOnlyElement(generatedEvents.getQueryCompletedEvents());
+        QueryEvents queryEvents = runQueryAndWaitForEvents("CREATE TABLE mock.default.create_new_table AS SELECT * FROM mock.default.test_view").getQueryEvents();
+        QueryCompletedEvent event = queryEvents.getQueryCompletedEvent();
         assertThat(event.getIoMetadata().getOutput().get().getColumns().get())
                 .containsExactly(
                         new OutputColumnMetadata("test_column", BIGINT_TYPE, ImmutableSet.of(new ColumnDetail("mock", "default", "test_view", "test_column"))));
@@ -755,8 +786,8 @@ public class TestEventListenerBasic
     public void testOutputColumnsForCreateTableAsSelectAllFromMaterializedView()
             throws Exception
     {
-        runQueryAndWaitForEvents("CREATE TABLE mock.default.create_new_table AS SELECT * FROM mock.default.test_materialized_view", 2);
-        QueryCompletedEvent event = getOnlyElement(generatedEvents.getQueryCompletedEvents());
+        QueryEvents queryEvents = runQueryAndWaitForEvents("CREATE TABLE mock.default.create_new_table AS SELECT * FROM mock.default.test_materialized_view").getQueryEvents();
+        QueryCompletedEvent event = queryEvents.getQueryCompletedEvent();
         assertThat(event.getIoMetadata().getOutput().get().getColumns().get())
                 .containsExactly(
                         new OutputColumnMetadata("test_column", BIGINT_TYPE, ImmutableSet.of(new ColumnDetail("mock", "default", "test_materialized_view", "test_column"))));
@@ -766,8 +797,8 @@ public class TestEventListenerBasic
     public void testOutputColumnsForCreateTableAsSelectWithAliasedColumn()
             throws Exception
     {
-        runQueryAndWaitForEvents("CREATE TABLE mock.default.create_new_table(aliased_bigint, aliased_varchar) AS SELECT nationkey AS keynation, concat(name, comment) FROM nation", 2);
-        QueryCompletedEvent event = getOnlyElement(generatedEvents.getQueryCompletedEvents());
+        QueryEvents queryEvents = runQueryAndWaitForEvents("CREATE TABLE mock.default.create_new_table(aliased_bigint, aliased_varchar) AS SELECT nationkey AS keynation, concat(name, comment) FROM nation").getQueryEvents();
+        QueryCompletedEvent event = queryEvents.getQueryCompletedEvent();
         assertThat(event.getIoMetadata().getOutput().get().getColumns().get())
                 .containsExactly(
                         new OutputColumnMetadata("aliased_bigint", BIGINT_TYPE, ImmutableSet.of(new ColumnDetail("tpch", "tiny", "nation", "nationkey"))),
@@ -779,7 +810,40 @@ public class TestEventListenerBasic
             throws Exception
     {
         assertLineage(
-                "WITH w AS (SELECT * FROM orders) SELECT clerk AS test_varchar, orderkey AS test_bigint FROM w",
+                "WITH w AS (SELECT * FROM orders) SELECT lower(clerk) AS test_varchar, orderkey AS test_bigint FROM w",
+                ImmutableSet.of("tpch.tiny.orders"),
+                new OutputColumnMetadata("test_varchar", VARCHAR_TYPE, ImmutableSet.of(new ColumnDetail("tpch", "tiny", "orders", "clerk"))),
+                new OutputColumnMetadata("test_bigint", BIGINT_TYPE, ImmutableSet.of(new ColumnDetail("tpch", "tiny", "orders", "orderkey"))));
+    }
+
+    @Test
+    public void testOutputColumnsColumnAliasInWithClause()
+            throws Exception
+    {
+        assertLineage(
+                "WITH w(aliased_clerk, aliased_orderkey) AS (SELECT clerk, orderkey FROM orders) SELECT lower(aliased_clerk) AS test_varchar, aliased_orderkey AS test_bigint FROM w",
+                ImmutableSet.of("tpch.tiny.orders"),
+                new OutputColumnMetadata("test_varchar", VARCHAR_TYPE, ImmutableSet.of(new ColumnDetail("tpch", "tiny", "orders", "clerk"))),
+                new OutputColumnMetadata("test_bigint", BIGINT_TYPE, ImmutableSet.of(new ColumnDetail("tpch", "tiny", "orders", "orderkey"))));
+    }
+
+    @Test
+    public void testOutputColumnsWithAliasedRelation()
+            throws Exception
+    {
+        assertLineage(
+                "SELECT lower(clerk) AS test_varchar, orderkey AS test_bigint FROM (SELECT * FROM orders) w",
+                ImmutableSet.of("tpch.tiny.orders"),
+                new OutputColumnMetadata("test_varchar", VARCHAR_TYPE, ImmutableSet.of(new ColumnDetail("tpch", "tiny", "orders", "clerk"))),
+                new OutputColumnMetadata("test_bigint", BIGINT_TYPE, ImmutableSet.of(new ColumnDetail("tpch", "tiny", "orders", "orderkey"))));
+    }
+
+    @Test
+    public void testOutputColumnsWithColumnAliasInAliasedRelation()
+            throws Exception
+    {
+        assertLineage(
+                "SELECT lower(aliased_clerk) AS test_varchar, aliased_orderkey AS test_bigint FROM (SELECT clerk, orderkey FROM orders) w(aliased_clerk, aliased_orderkey)",
                 ImmutableSet.of("tpch.tiny.orders"),
                 new OutputColumnMetadata("test_varchar", VARCHAR_TYPE, ImmutableSet.of(new ColumnDetail("tpch", "tiny", "orders", "clerk"))),
                 new OutputColumnMetadata("test_bigint", BIGINT_TYPE, ImmutableSet.of(new ColumnDetail("tpch", "tiny", "orders", "orderkey"))));
@@ -972,8 +1036,8 @@ public class TestEventListenerBasic
     public void testOutputColumnsForInsertingSingleColumn()
             throws Exception
     {
-        runQueryAndWaitForEvents("INSERT INTO mock.default.table_for_output(test_bigint) SELECT nationkey + 1 AS test_bigint FROM nation", 2);
-        QueryCompletedEvent event = getOnlyElement(generatedEvents.getQueryCompletedEvents());
+        QueryEvents queryEvents = runQueryAndWaitForEvents("INSERT INTO mock.default.table_for_output(test_bigint) SELECT nationkey + 1 AS test_bigint FROM nation").getQueryEvents();
+        QueryCompletedEvent event = queryEvents.getQueryCompletedEvent();
         assertThat(event.getIoMetadata().getOutput().get().getColumns().get())
                 .containsExactly(
                         new OutputColumnMetadata("test_bigint", BIGINT_TYPE, ImmutableSet.of(new ColumnDetail("tpch", "tiny", "nation", "nationkey"))));
@@ -983,8 +1047,8 @@ public class TestEventListenerBasic
     public void testOutputColumnsForInsertingAliasedColumn()
             throws Exception
     {
-        runQueryAndWaitForEvents("INSERT INTO mock.default.table_for_output(test_varchar, test_bigint) SELECT name AS aliased_name, nationkey AS aliased_varchar FROM nation", 2);
-        QueryCompletedEvent event = getOnlyElement(generatedEvents.getQueryCompletedEvents());
+        QueryEvents queryEvents = runQueryAndWaitForEvents("INSERT INTO mock.default.table_for_output(test_varchar, test_bigint) SELECT name AS aliased_name, nationkey AS aliased_varchar FROM nation").getQueryEvents();
+        QueryCompletedEvent event = queryEvents.getQueryCompletedEvent();
         assertThat(event.getIoMetadata().getOutput().get().getColumns().get())
                 .containsExactly(
                         new OutputColumnMetadata("test_varchar", VARCHAR_TYPE, ImmutableSet.of(new ColumnDetail("tpch", "tiny", "nation", "name"))),
@@ -995,8 +1059,8 @@ public class TestEventListenerBasic
     public void testOutputColumnsForUpdatingAllColumns()
             throws Exception
     {
-        runQueryAndWaitForEvents("UPDATE mock.default.table_for_output SET test_varchar = 'reset', test_bigint = 1", 2);
-        QueryCompletedEvent event = getOnlyElement(generatedEvents.getQueryCompletedEvents());
+        QueryEvents queryEvents = runQueryAndWaitForEvents("UPDATE mock.default.table_for_output SET test_varchar = 'reset', test_bigint = 1").getQueryEvents();
+        QueryCompletedEvent event = queryEvents.getQueryCompletedEvent();
         assertThat(event.getIoMetadata().getOutput().get().getColumns().get())
                 .containsExactly(
                         new OutputColumnMetadata("test_varchar", VARCHAR_TYPE, ImmutableSet.of()),
@@ -1007,8 +1071,8 @@ public class TestEventListenerBasic
     public void testOutputColumnsForUpdatingSingleColumn()
             throws Exception
     {
-        runQueryAndWaitForEvents("UPDATE mock.default.table_for_output SET test_varchar = 're-reset' WHERE test_bigint = 1", 2);
-        QueryCompletedEvent event = getOnlyElement(generatedEvents.getQueryCompletedEvents());
+        QueryEvents queryEvents = runQueryAndWaitForEvents("UPDATE mock.default.table_for_output SET test_varchar = 're-reset' WHERE test_bigint = 1").getQueryEvents();
+        QueryCompletedEvent event = queryEvents.getQueryCompletedEvent();
         assertThat(event.getIoMetadata().getOutput().get().getColumns().get())
                 .containsExactly(new OutputColumnMetadata("test_varchar", VARCHAR_TYPE, ImmutableSet.of()));
     }
@@ -1017,8 +1081,8 @@ public class TestEventListenerBasic
     public void testCreateTable()
             throws Exception
     {
-        runQueryAndWaitForEvents("CREATE TABLE mock.default.create_simple_table (test_column BIGINT)", 2);
-        QueryCompletedEvent event = getOnlyElement(generatedEvents.getQueryCompletedEvents());
+        QueryEvents queryEvents = runQueryAndWaitForEvents("CREATE TABLE mock.default.create_simple_table (test_column BIGINT)").getQueryEvents();
+        QueryCompletedEvent event = queryEvents.getQueryCompletedEvent();
         assertThat(event.getIoMetadata().getOutput().get().getCatalogName()).isEqualTo("mock");
         assertThat(event.getIoMetadata().getOutput().get().getSchema()).isEqualTo("default");
         assertThat(event.getIoMetadata().getOutput().get().getTable()).isEqualTo("create_simple_table");
@@ -1030,8 +1094,8 @@ public class TestEventListenerBasic
     public void testCreateTableLike()
             throws Exception
     {
-        runQueryAndWaitForEvents("CREATE TABLE mock.default.create_simple_table (test_column BIGINT, LIKE mock.default.test_table)", 2);
-        QueryCompletedEvent event = getOnlyElement(generatedEvents.getQueryCompletedEvents());
+        QueryEvents queryEvents = runQueryAndWaitForEvents("CREATE TABLE mock.default.create_simple_table (test_column BIGINT, LIKE mock.default.test_table)").getQueryEvents();
+        QueryCompletedEvent event = queryEvents.getQueryCompletedEvent();
         assertThat(event.getIoMetadata().getOutput().get().getCatalogName()).isEqualTo("mock");
         assertThat(event.getIoMetadata().getOutput().get().getSchema()).isEqualTo("default");
         assertThat(event.getIoMetadata().getOutput().get().getTable()).isEqualTo("create_simple_table");
@@ -1040,6 +1104,18 @@ public class TestEventListenerBasic
                         new OutputColumnMetadata("test_column", BIGINT_TYPE, ImmutableSet.of()),
                         new OutputColumnMetadata("test_varchar", VARCHAR_TYPE, ImmutableSet.of()),
                         new OutputColumnMetadata("test_bigint", BIGINT_TYPE, ImmutableSet.of()));
+    }
+
+    @Test
+    public void testConnectorMetrics()
+            throws Exception
+    {
+        QueryEvents queryEvents = runQueryAndWaitForEvents("SELECT * FROM mock.tiny.nation").getQueryEvents();
+        QueryCompletedEvent event = queryEvents.getQueryCompletedEvent();
+        List<Metrics> connectorMetrics = event.getIoMetadata().getInputs().stream()
+                .map(QueryInputMetadata::getConnectorMetrics)
+                .collect(toImmutableList());
+        assertThat(connectorMetrics).containsExactly(TEST_METRICS);
     }
 
     @Test(dataProvider = "setOperator")
@@ -1075,28 +1151,84 @@ public class TestEventListenerBasic
                 {"EXCEPT ALL"}};
     }
 
+    @Test
+    public void testAnonymizedJsonPlan()
+            throws Exception
+    {
+        QueryEvents queryEvents = queries.runQueryAndWaitForEvents("SELECT quantity FROM lineitem LIMIT 10", getSession(), true).getQueryEvents();
+        QueryCompletedEvent event = queryEvents.getQueryCompletedEvent();
+        Map<String, JsonRenderedNode> anonymizedPlan = ImmutableMap.of(
+                "0", new JsonRenderedNode(
+                        "6",
+                        "Output",
+                        ImmutableMap.of("columnNames", "[column_1]"),
+                        ImmutableList.of(typedSymbol("symbol_1", "double")),
+                        ImmutableList.of(),
+                        ImmutableList.of(),
+                        ImmutableList.of(new JsonRenderedNode(
+                                "98",
+                                "Limit",
+                                ImmutableMap.of("count", "10", "withTies", "", "inputPreSortedBy", "[]"),
+                                ImmutableList.of(typedSymbol("symbol_1", "double")),
+                                ImmutableList.of(),
+                                ImmutableList.of(),
+                                ImmutableList.of(new JsonRenderedNode(
+                                        "173",
+                                        "LocalExchange",
+                                        ImmutableMap.of(
+                                                "partitioning", "[connectorHandleType = SystemPartitioningHandle, partitioning = SINGLE, function = SINGLE]",
+                                                "isReplicateNullsAndAny", "",
+                                                "hashColumn", "[]",
+                                                "arguments", "[]"),
+                                        ImmutableList.of(typedSymbol("symbol_1", "double")),
+                                        ImmutableList.of(),
+                                        ImmutableList.of(),
+                                        ImmutableList.of(new JsonRenderedNode(
+                                                "140",
+                                                "RemoteSource",
+                                                ImmutableMap.of("sourceFragmentIds", "[1]"),
+                                                ImmutableList.of(typedSymbol("symbol_1", "double")),
+                                                ImmutableList.of(),
+                                                ImmutableList.of(),
+                                                ImmutableList.of()))))))),
+                "1", new JsonRenderedNode(
+                        "139",
+                        "LimitPartial",
+                        ImmutableMap.of(
+                                "count", "10",
+                                "withTies", "",
+                                "inputPreSortedBy", "[]"),
+                        ImmutableList.of(typedSymbol("symbol_1", "double")),
+                        ImmutableList.of(),
+                        ImmutableList.of(),
+                        ImmutableList.of(new JsonRenderedNode(
+                                "0",
+                                "TableScan",
+                                ImmutableMap.of(
+                                        "table", "[table = catalog_1.schema_1.table_1, connector = tpch]"),
+                                ImmutableList.of(typedSymbol("symbol_1", "double")),
+                                ImmutableList.of("symbol_1 := column_2"),
+                                ImmutableList.of(),
+                                ImmutableList.of()))));
+        assertThat(event.getMetadata().getJsonPlan())
+                .isEqualTo(Optional.of(ANONYMIZED_PLAN_JSON_CODEC.toJson(anonymizedPlan)));
+    }
+
     private void assertLineage(String baseQuery, Set<String> inputTables, OutputColumnMetadata... outputColumnMetadata)
             throws Exception
     {
-        runQueryAndWaitForEvents("CREATE TABLE mock.default.create_new_table AS " + baseQuery, 2);
-        assertLineage(inputTables, outputColumnMetadata);
-
-        runQueryAndWaitForEvents("CREATE VIEW mock.default.create_new_view AS " + baseQuery, 2);
-        assertLineage(inputTables, outputColumnMetadata);
-
-        runQueryAndWaitForEvents("CREATE VIEW mock.default.create_new_materialized_view AS " + baseQuery, 2);
-        assertLineage(inputTables, outputColumnMetadata);
-
-        runQueryAndWaitForEvents("INSERT INTO mock.default.table_for_output(test_varchar, test_bigint) " + baseQuery, 2);
-        assertLineage(inputTables, outputColumnMetadata);
-
-        runQueryAndWaitForEvents(format("DELETE FROM mock.default.table_for_output WHERE EXISTS (%s) ", baseQuery), 2);
-        assertLineage(inputTables);
+        assertLineageInternal("CREATE TABLE mock.default.create_new_table AS " + baseQuery, inputTables, outputColumnMetadata);
+        assertLineageInternal("CREATE VIEW mock.default.create_new_view AS " + baseQuery, inputTables, outputColumnMetadata);
+        assertLineageInternal("CREATE VIEW mock.default.create_new_materialized_view AS " + baseQuery, inputTables, outputColumnMetadata);
+        assertLineageInternal("INSERT INTO mock.default.table_for_output(test_varchar, test_bigint) " + baseQuery, inputTables, outputColumnMetadata);
+        assertLineageInternal(format("DELETE FROM mock.default.table_for_output WHERE EXISTS (%s) ", baseQuery), inputTables);
     }
 
-    private void assertLineage(Set<String> inputTables, OutputColumnMetadata... outputColumnMetadata)
+    private void assertLineageInternal(String sql, Set<String> inputTables, OutputColumnMetadata... outputColumnMetadata)
+            throws Exception
     {
-        QueryCompletedEvent event = getOnlyElement(generatedEvents.getQueryCompletedEvents());
+        QueryEvents queryEvents = runQueryAndWaitForEvents(sql).getQueryEvents();
+        QueryCompletedEvent event = queryEvents.getQueryCompletedEvent();
         assertThat(event.getMetadata().getTables())
                 .map(TestEventListenerBasic::getQualifiedName)
                 .containsExactlyInAnyOrderElementsOf(inputTables);

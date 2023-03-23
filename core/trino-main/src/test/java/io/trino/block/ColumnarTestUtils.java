@@ -15,22 +15,23 @@ package io.trino.block;
 
 import io.airlift.slice.DynamicSliceOutput;
 import io.airlift.slice.Slice;
-import io.trino.metadata.Metadata;
 import io.trino.spi.block.Block;
+import io.trino.spi.block.BlockEncodingSerde;
 import io.trino.spi.block.DictionaryBlock;
 import io.trino.spi.block.RunLengthEncodedBlock;
+import io.trino.spi.block.TestingBlockEncodingSerde;
 
 import java.lang.reflect.Array;
 import java.util.Arrays;
 
-import static io.trino.metadata.MetadataManager.createTestMetadataManager;
+import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertTrue;
 
 public final class ColumnarTestUtils
 {
-    private static final Metadata METADATA = createTestMetadataManager();
+    private static final BlockEncodingSerde BLOCK_ENCODING_SERDE = new TestingBlockEncodingSerde(TESTING_TYPE_MANAGER::getType);
 
     private ColumnarTestUtils() {}
 
@@ -62,24 +63,23 @@ public final class ColumnarTestUtils
         }
         assertFalse(block.isNull(position));
 
-        if (expectedValue instanceof Slice) {
-            Slice expectedSliceValue = (Slice) expectedValue;
+        if (expectedValue instanceof Slice expected) {
             int length = block.getSliceLength(position);
-            assertEquals(length, expectedSliceValue.length());
+            assertEquals(length, expected.length());
 
             Slice actual = block.getSlice(position, 0, length);
-            assertEquals(actual, expectedSliceValue);
+            assertEquals(actual, expected);
         }
-        else if (expectedValue instanceof Slice[]) {
+        else if (expectedValue instanceof Slice[] expected) {
             // array or row
             Block actual = block.getObject(position, Block.class);
-            assertBlock(actual, (Slice[]) expectedValue);
+            assertBlock(actual, expected);
         }
-        else if (expectedValue instanceof Slice[][]) {
+        else if (expectedValue instanceof Slice[][] expected) {
             // map
             Block actual = block.getObject(position, Block.class);
             // a map is exposed as a block alternating key and value entries, so we need to flatten the expected values array
-            assertBlock(actual, flattenMapEntries((Slice[][]) expectedValue));
+            assertBlock(actual, flattenMapEntries(expected));
         }
         else {
             throw new IllegalArgumentException(expectedValue.getClass().getName());
@@ -113,14 +113,14 @@ public final class ColumnarTestUtils
     private static Block copyBlock(Block block)
     {
         DynamicSliceOutput sliceOutput = new DynamicSliceOutput(1024);
-        METADATA.getBlockEncodingSerde().writeBlock(sliceOutput, block);
-        return METADATA.getBlockEncodingSerde().readBlock(sliceOutput.slice().getInput());
+        BLOCK_ENCODING_SERDE.writeBlock(sliceOutput, block);
+        return BLOCK_ENCODING_SERDE.readBlock(sliceOutput.slice().getInput());
     }
 
-    public static DictionaryBlock createTestDictionaryBlock(Block block)
+    public static Block createTestDictionaryBlock(Block block)
     {
         int[] dictionaryIndexes = createTestDictionaryIndexes(block.getPositionCount());
-        return new DictionaryBlock(dictionaryIndexes.length, block, dictionaryIndexes);
+        return DictionaryBlock.create(dictionaryIndexes.length, block, dictionaryIndexes);
     }
 
     public static <T> T[] createTestDictionaryExpectedValues(T[] expectedValues)
@@ -156,6 +156,6 @@ public final class ColumnarTestUtils
 
     public static RunLengthEncodedBlock createTestRleBlock(Block block, int position)
     {
-        return new RunLengthEncodedBlock(block.getRegion(position, 1), 10);
+        return (RunLengthEncodedBlock) RunLengthEncodedBlock.create(block.getRegion(position, 1), 10);
     }
 }

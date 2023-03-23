@@ -21,9 +21,6 @@ import io.airlift.json.ObjectMapperProvider;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.type.Type;
-import io.trino.spi.type.TypeManager;
-import io.trino.spi.type.TypeOperators;
-import io.trino.type.InternalTypeManager;
 import org.testng.annotations.Test;
 
 import java.util.Collections;
@@ -31,8 +28,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
-import static io.trino.metadata.MetadataManager.createTestMetadataManager;
 import static io.trino.testing.QueryAssertions.assertEqualsIgnoreOrder;
+import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertTrue;
@@ -40,20 +37,24 @@ import static org.testng.Assert.assertTrue;
 public class TestJsonCassandraHandles
 {
     private static final Map<String, Object> TABLE_HANDLE_AS_MAP = ImmutableMap.of(
-            "schemaName", "cassandra_schema",
-            "tableName", "cassandra_table",
-            "clusteringKeyPredicates", "");
+            "relationHandle", ImmutableMap.of(
+                    "@type", "named",
+                    "schemaName", "cassandra_schema",
+                    "tableName", "cassandra_table",
+                    "clusteringKeyPredicates", ""));
 
     private static final Map<String, Object> TABLE2_HANDLE_AS_MAP = ImmutableMap.of(
-            "schemaName", "cassandra_schema",
-            "tableName", "cassandra_table",
-            "partitions", List.of(
-                    ImmutableMap.of(
-                            "key", "a2V5",
-                            "partitionId", "partitionKey1 = 11 AND partitionKey2 = 22",
-                            "tupleDomain", ImmutableMap.of("columnDomains", Collections.emptyList()),
-                            "indexedColumnPredicatePushdown", true)),
-            "clusteringKeyPredicates", "clusteringKey1 = 33");
+            "relationHandle", ImmutableMap.of(
+                    "@type", "named",
+                    "schemaName", "cassandra_schema",
+                    "tableName", "cassandra_table",
+                    "partitions", List.of(
+                            ImmutableMap.of(
+                                    "key", "a2V5",
+                                    "partitionId", "partitionKey1 = 11 AND partitionKey2 = 22",
+                                    "tupleDomain", ImmutableMap.of("columnDomains", Collections.emptyList()),
+                                    "indexedColumnPredicatePushdown", true)),
+                    "clusteringKeyPredicates", "clusteringKey1 = 33"));
 
     private static final Map<String, Object> COLUMN_HANDLE_AS_MAP = ImmutableMap.<String, Object>builder()
             .put("name", "column")
@@ -66,7 +67,7 @@ public class TestJsonCassandraHandles
             .put("clusteringKey", true)
             .put("indexed", false)
             .put("hidden", false)
-            .build();
+            .buildOrThrow();
 
     private static final Map<String, Object> COLUMN2_HANDLE_AS_MAP = ImmutableMap.<String, Object>builder()
             .put("name", "column2")
@@ -79,7 +80,7 @@ public class TestJsonCassandraHandles
             .put("clusteringKey", false)
             .put("indexed", false)
             .put("hidden", false)
-            .build();
+            .buildOrThrow();
 
     private static final Optional<List<CassandraPartition>> PARTITIONS = Optional.of(List.of(
             new CassandraPartition(
@@ -92,8 +93,7 @@ public class TestJsonCassandraHandles
 
     static {
         ObjectMapperProvider objectMapperProvider = new ObjectMapperProvider();
-        TypeManager typeManager = new InternalTypeManager(createTestMetadataManager(), new TypeOperators());
-        objectMapperProvider.setJsonDeserializers(ImmutableMap.of(Type.class, new CassandraClientModule.TypeDeserializer(typeManager)));
+        objectMapperProvider.setJsonDeserializers(ImmutableMap.of(Type.class, new CassandraClientModule.TypeDeserializer(TESTING_TYPE_MANAGER)));
         OBJECT_MAPPER = objectMapperProvider.get();
     }
 
@@ -101,7 +101,7 @@ public class TestJsonCassandraHandles
     public void testTableHandleSerialize()
             throws Exception
     {
-        CassandraTableHandle tableHandle = new CassandraTableHandle("cassandra_schema", "cassandra_table");
+        CassandraTableHandle tableHandle = new CassandraTableHandle(new CassandraNamedRelationHandle("cassandra_schema", "cassandra_table"));
 
         assertTrue(OBJECT_MAPPER.canSerialize(CassandraTableHandle.class));
         String json = OBJECT_MAPPER.writeValueAsString(tableHandle);
@@ -112,7 +112,7 @@ public class TestJsonCassandraHandles
     public void testTable2HandleSerialize()
             throws Exception
     {
-        CassandraTableHandle tableHandle = new CassandraTableHandle("cassandra_schema", "cassandra_table", PARTITIONS, "clusteringKey1 = 33");
+        CassandraTableHandle tableHandle = new CassandraTableHandle(new CassandraNamedRelationHandle("cassandra_schema", "cassandra_table", PARTITIONS, "clusteringKey1 = 33"));
         assertTrue(OBJECT_MAPPER.canSerialize(CassandraTableHandle.class));
         String json = OBJECT_MAPPER.writeValueAsString(tableHandle);
         testJsonEquals(json, TABLE2_HANDLE_AS_MAP);
@@ -124,7 +124,7 @@ public class TestJsonCassandraHandles
     {
         String json = OBJECT_MAPPER.writeValueAsString(TABLE_HANDLE_AS_MAP);
 
-        CassandraTableHandle tableHandle = OBJECT_MAPPER.readValue(json, CassandraTableHandle.class);
+        CassandraNamedRelationHandle tableHandle = (OBJECT_MAPPER.readValue(json, CassandraTableHandle.class)).getRequiredNamedRelation();
 
         assertEquals(tableHandle.getSchemaName(), "cassandra_schema");
         assertEquals(tableHandle.getTableName(), "cassandra_table");
@@ -138,7 +138,7 @@ public class TestJsonCassandraHandles
     {
         String json = OBJECT_MAPPER.writeValueAsString(TABLE2_HANDLE_AS_MAP);
 
-        CassandraTableHandle tableHandle = OBJECT_MAPPER.readValue(json, CassandraTableHandle.class);
+        CassandraNamedRelationHandle tableHandle = (OBJECT_MAPPER.readValue(json, CassandraTableHandle.class)).getRequiredNamedRelation();
 
         assertEquals(tableHandle.getSchemaName(), "cassandra_schema");
         assertEquals(tableHandle.getTableName(), "cassandra_table");

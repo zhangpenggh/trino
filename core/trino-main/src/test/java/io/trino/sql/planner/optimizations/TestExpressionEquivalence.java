@@ -16,14 +16,12 @@ package io.trino.sql.planner.optimizations;
 import com.google.common.base.Splitter;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
-import io.trino.metadata.Metadata;
 import io.trino.security.AllowAllAccessControl;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeSignature;
 import io.trino.sql.parser.ParsingOptions;
 import io.trino.sql.parser.SqlParser;
 import io.trino.sql.planner.Symbol;
-import io.trino.sql.planner.TypeAnalyzer;
 import io.trino.sql.planner.TypeProvider;
 import io.trino.sql.tree.Expression;
 import io.trino.transaction.TestingTransactionManager;
@@ -33,13 +31,14 @@ import org.testng.annotations.Test;
 import java.util.Set;
 
 import static io.trino.SessionTestUtils.TEST_SESSION;
-import static io.trino.metadata.MetadataManager.createTestMetadataManager;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.sql.ExpressionTestUtils.planExpression;
 import static io.trino.sql.parser.ParsingOptions.DecimalLiteralTreatment.AS_DOUBLE;
 import static io.trino.sql.planner.SymbolsExtractor.extractUnique;
+import static io.trino.sql.planner.TestingPlannerContext.PLANNER_CONTEXT;
+import static io.trino.sql.planner.TypeAnalyzer.createTestingTypeAnalyzer;
 import static io.trino.transaction.TransactionBuilder.transaction;
 import static java.lang.String.format;
 import static java.util.function.Function.identity;
@@ -50,8 +49,10 @@ import static org.testng.Assert.assertTrue;
 public class TestExpressionEquivalence
 {
     private static final SqlParser SQL_PARSER = new SqlParser();
-    private static final Metadata METADATA = createTestMetadataManager();
-    private static final ExpressionEquivalence EQUIVALENCE = new ExpressionEquivalence(METADATA, new TypeAnalyzer(SQL_PARSER, METADATA));
+    private static final ExpressionEquivalence EQUIVALENCE = new ExpressionEquivalence(
+            PLANNER_CONTEXT.getMetadata(),
+            PLANNER_CONTEXT.getFunctionManager(),
+            createTestingTypeAnalyzer(PLANNER_CONTEXT));
     private static final TypeProvider TYPE_PROVIDER = TypeProvider.copyOf(ImmutableMap.<Symbol, Type>builder()
             .put(new Symbol("a_boolean"), BOOLEAN)
             .put(new Symbol("b_boolean"), BOOLEAN)
@@ -66,7 +67,7 @@ public class TestExpressionEquivalence
             .put(new Symbol("c_bigint"), BIGINT)
             .put(new Symbol("d_bigint"), BIGINT)
             .put(new Symbol("b_double"), DOUBLE)
-            .build());
+            .buildOrThrow());
 
     @Test
     public void testEquivalent()
@@ -125,17 +126,13 @@ public class TestExpressionEquivalence
         assertEquivalent(
                 "(a_boolean and b_boolean and c_boolean) or (d_boolean and e_boolean) or (f_boolean and g_boolean and h_boolean)",
                 "(h_boolean and g_boolean and f_boolean) or (b_boolean and a_boolean and c_boolean) or (e_boolean and d_boolean)");
-
-        assertEquivalent(
-                "reduce(ARRAY [b_boolean], false, (s, x) -> s AND x, s -> s)",
-                "reduce(ARRAY [b_boolean], false, (s, x) -> x AND s, s -> s)");
     }
 
     private static void assertEquivalent(@Language("SQL") String left, @Language("SQL") String right)
     {
         ParsingOptions parsingOptions = new ParsingOptions(AS_DOUBLE /* anything */);
-        Expression leftExpression = planExpression(METADATA, TEST_SESSION, TYPE_PROVIDER, SQL_PARSER.createExpression(left, parsingOptions));
-        Expression rightExpression = planExpression(METADATA, TEST_SESSION, TYPE_PROVIDER, SQL_PARSER.createExpression(right, parsingOptions));
+        Expression leftExpression = planExpression(PLANNER_CONTEXT, TEST_SESSION, TYPE_PROVIDER, SQL_PARSER.createExpression(left, parsingOptions));
+        Expression rightExpression = planExpression(PLANNER_CONTEXT, TEST_SESSION, TYPE_PROVIDER, SQL_PARSER.createExpression(right, parsingOptions));
 
         Set<Symbol> symbols = extractUnique(ImmutableList.of(leftExpression, rightExpression));
         TypeProvider types = TypeProvider.copyOf(symbols.stream()
@@ -203,17 +200,13 @@ public class TestExpressionEquivalence
         assertNotEquivalent(
                 "CAST(TIMESTAMP '2020-05-10 12:34:56.123456789012 Europe/Warsaw' AS varchar)",
                 "CAST(TIMESTAMP '2020-05-10 12:34:56.123456789012 Europe/Paris' AS varchar)");
-
-        assertNotEquivalent(
-                "reduce(ARRAY [b_boolean], false, (s, x) -> s AND x, s -> s)",
-                "reduce(ARRAY [b_boolean], false, (s, x) -> s OR x, s -> s)");
     }
 
     private static void assertNotEquivalent(@Language("SQL") String left, @Language("SQL") String right)
     {
         ParsingOptions parsingOptions = new ParsingOptions(AS_DOUBLE /* anything */);
-        Expression leftExpression = planExpression(METADATA, TEST_SESSION, TYPE_PROVIDER, SQL_PARSER.createExpression(left, parsingOptions));
-        Expression rightExpression = planExpression(METADATA, TEST_SESSION, TYPE_PROVIDER, SQL_PARSER.createExpression(right, parsingOptions));
+        Expression leftExpression = planExpression(PLANNER_CONTEXT, TEST_SESSION, TYPE_PROVIDER, SQL_PARSER.createExpression(left, parsingOptions));
+        Expression rightExpression = planExpression(PLANNER_CONTEXT, TEST_SESSION, TYPE_PROVIDER, SQL_PARSER.createExpression(right, parsingOptions));
 
         Set<Symbol> symbols = extractUnique(ImmutableList.of(leftExpression, rightExpression));
         TypeProvider types = TypeProvider.copyOf(symbols.stream()
@@ -239,6 +232,6 @@ public class TestExpressionEquivalence
     private static Type generateType(Symbol symbol)
     {
         String typeName = Splitter.on('_').limit(2).splitToList(symbol.getName()).get(1);
-        return METADATA.getType(new TypeSignature(typeName, ImmutableList.of()));
+        return PLANNER_CONTEXT.getTypeManager().getType(new TypeSignature(typeName, ImmutableList.of()));
     }
 }

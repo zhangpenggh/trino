@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.clickhouse;
 
+import com.clickhouse.jdbc.ClickHouseDriver;
 import com.google.inject.Binder;
 import com.google.inject.Module;
 import com.google.inject.Provides;
@@ -25,9 +26,15 @@ import io.trino.plugin.jdbc.DecimalModule;
 import io.trino.plugin.jdbc.DriverConnectionFactory;
 import io.trino.plugin.jdbc.ForBaseJdbc;
 import io.trino.plugin.jdbc.JdbcClient;
+import io.trino.plugin.jdbc.JdbcMetadataConfig;
 import io.trino.plugin.jdbc.credential.CredentialProvider;
-import ru.yandex.clickhouse.ClickHouseDriver;
 
+import java.util.Properties;
+
+import static com.clickhouse.client.config.ClickHouseClientOption.USE_BINARY_STRING;
+import static io.airlift.configuration.ConfigBinder.configBinder;
+import static io.trino.plugin.clickhouse.ClickHouseClient.DEFAULT_DOMAIN_COMPACTION_THRESHOLD;
+import static io.trino.plugin.jdbc.JdbcModule.bindSessionPropertiesProvider;
 import static io.trino.plugin.jdbc.JdbcModule.bindTablePropertiesProvider;
 
 public class ClickHouseClientModule
@@ -37,8 +44,10 @@ public class ClickHouseClientModule
     public void configure(Binder binder)
     {
         ConfigBinder.configBinder(binder).bindConfig(ClickHouseConfig.class);
+        bindSessionPropertiesProvider(binder, ClickHouseSessionProperties.class);
         binder.bind(JdbcClient.class).annotatedWith(ForBaseJdbc.class).to(ClickHouseClient.class).in(Scopes.SINGLETON);
         bindTablePropertiesProvider(binder, ClickHouseTableProperties.class);
+        configBinder(binder).bindConfigDefaults(JdbcMetadataConfig.class, config -> config.setDomainCompactionThreshold(DEFAULT_DOMAIN_COMPACTION_THRESHOLD));
         binder.install(new DecimalModule());
     }
 
@@ -47,6 +56,9 @@ public class ClickHouseClientModule
     @ForBaseJdbc
     public static ConnectionFactory createConnectionFactory(BaseJdbcConfig config, CredentialProvider credentialProvider)
     {
-        return new ClickHouseConnectionFactory(new DriverConnectionFactory(new ClickHouseDriver(), config, credentialProvider));
+        Properties properties = new Properties();
+        // The connector expects byte array for FixedString and String types
+        properties.setProperty(USE_BINARY_STRING.getKey(), "true");
+        return new ClickHouseConnectionFactory(new DriverConnectionFactory(new ClickHouseDriver(), config.getConnectionUrl(), properties, credentialProvider));
     }
 }

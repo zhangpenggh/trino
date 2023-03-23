@@ -21,12 +21,16 @@ import java.util.List;
 import java.util.Objects;
 
 import static com.google.common.base.Preconditions.checkArgument;
+import static io.airlift.slice.SizeOf.estimatedSizeOf;
+import static io.airlift.slice.SizeOf.instanceSize;
 import static io.trino.spi.QueryId.parseDottedId;
 import static java.lang.Integer.parseInt;
 import static java.util.Objects.requireNonNull;
 
 public class TaskId
 {
+    private static final int INSTANCE_SIZE = instanceSize(TaskId.class);
+
     @JsonCreator
     public static TaskId valueOf(String taskId)
     {
@@ -93,5 +97,10 @@ public class TaskId
         }
         TaskId other = (TaskId) obj;
         return Objects.equals(this.fullId, other.fullId);
+    }
+
+    public long getRetainedSizeInBytes()
+    {
+        return INSTANCE_SIZE + estimatedSizeOf(fullId);
     }
 }

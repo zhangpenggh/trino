@@ -16,23 +16,24 @@ package io.trino.sql.planner.sanity;
 import com.google.common.collect.ImmutableList.Builder;
 import io.trino.Session;
 import io.trino.execution.warnings.WarningCollector;
-import io.trino.metadata.Metadata;
-import io.trino.spi.type.TypeOperators;
+import io.trino.sql.PlannerContext;
 import io.trino.sql.planner.ExpressionExtractor;
 import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.TypeAnalyzer;
 import io.trino.sql.planner.TypeProvider;
 import io.trino.sql.planner.plan.PlanNode;
-import io.trino.sql.tree.ArrayConstructor;
+import io.trino.sql.tree.Array;
 import io.trino.sql.tree.AtTimeZone;
 import io.trino.sql.tree.CurrentCatalog;
 import io.trino.sql.tree.CurrentPath;
 import io.trino.sql.tree.CurrentSchema;
+import io.trino.sql.tree.CurrentTime;
 import io.trino.sql.tree.CurrentUser;
 import io.trino.sql.tree.DefaultExpressionTraversalVisitor;
 import io.trino.sql.tree.DereferenceExpression;
 import io.trino.sql.tree.Expression;
 import io.trino.sql.tree.Extract;
+import io.trino.sql.tree.Format;
 import io.trino.sql.tree.LikePredicate;
 import io.trino.sql.tree.Node;
 import io.trino.sql.tree.TryExpression;
@@ -48,8 +49,7 @@ public final class SugarFreeChecker
     @Override
     public void validate(PlanNode planNode,
             Session session,
-            Metadata metadata,
-            TypeOperators typeOperators,
+            PlannerContext plannerContext,
             TypeAnalyzer typeAnalyzer,
             TypeProvider types,
             WarningCollector warningCollector)
@@ -114,7 +114,19 @@ public final class SugarFreeChecker
         }
 
         @Override
-        protected Void visitArrayConstructor(ArrayConstructor node, Builder<Symbol> context)
+        protected Void visitFormat(Format node, Builder<Symbol> context)
+        {
+            throw createIllegalNodeException(node);
+        }
+
+        @Override
+        protected Void visitArray(Array node, Builder<Symbol> context)
+        {
+            throw createIllegalNodeException(node);
+        }
+
+        @Override
+        protected Void visitCurrentTime(CurrentTime node, Builder<Symbol> context)
         {
             throw createIllegalNodeException(node);
         }

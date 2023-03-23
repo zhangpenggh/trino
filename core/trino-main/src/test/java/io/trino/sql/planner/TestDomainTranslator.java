@@ -18,7 +18,7 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.io.BaseEncoding;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
-import io.trino.metadata.Metadata;
+import io.trino.likematcher.LikeMatcher;
 import io.trino.metadata.TestingFunctionResolution;
 import io.trino.security.AllowAllAccessControl;
 import io.trino.spi.predicate.Domain;
@@ -28,9 +28,9 @@ import io.trino.spi.predicate.ValueSet;
 import io.trino.spi.type.DecimalType;
 import io.trino.spi.type.Decimals;
 import io.trino.spi.type.DoubleType;
+import io.trino.spi.type.Int128;
 import io.trino.spi.type.RealType;
 import io.trino.spi.type.Type;
-import io.trino.spi.type.TypeOperators;
 import io.trino.sql.planner.DomainTranslator.ExtractionResult;
 import io.trino.sql.tree.BetweenPredicate;
 import io.trino.sql.tree.Cast;
@@ -42,7 +42,6 @@ import io.trino.sql.tree.GenericLiteral;
 import io.trino.sql.tree.InListExpression;
 import io.trino.sql.tree.InPredicate;
 import io.trino.sql.tree.IsNullPredicate;
-import io.trino.sql.tree.LikePredicate;
 import io.trino.sql.tree.Literal;
 import io.trino.sql.tree.LongLiteral;
 import io.trino.sql.tree.NotExpression;
@@ -50,6 +49,7 @@ import io.trino.sql.tree.NullLiteral;
 import io.trino.sql.tree.QualifiedName;
 import io.trino.sql.tree.StringLiteral;
 import io.trino.transaction.TestingTransactionManager;
+import io.trino.type.LikePatternType;
 import io.trino.type.TypeCoercion;
 import org.joda.time.DateTime;
 import org.joda.time.DateTimeZone;
@@ -70,7 +70,6 @@ import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.spi.type.CharType.createCharType;
 import static io.trino.spi.type.DateType.DATE;
 import static io.trino.spi.type.DecimalType.createDecimalType;
-import static io.trino.spi.type.Decimals.encodeScaledValue;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.HyperLogLogType.HYPER_LOG_LOG;
 import static io.trino.spi.type.IntegerType.INTEGER;
@@ -96,6 +95,7 @@ import static io.trino.sql.tree.ComparisonExpression.Operator.NOT_EQUAL;
 import static io.trino.testing.TestingConnectorSession.SESSION;
 import static io.trino.transaction.TransactionBuilder.transaction;
 import static io.trino.type.ColorType.COLOR;
+import static io.trino.type.LikeFunctions.LIKE_FUNCTION_NAME;
 import static java.lang.Float.floatToIntBits;
 import static java.lang.String.format;
 import static java.util.Collections.nCopies;
@@ -167,7 +167,7 @@ public class TestDomainTranslator
             .put(C_TINYINT, TINYINT)
             .put(C_REAL, REAL)
             .put(C_REAL_1, REAL)
-            .build());
+            .buildOrThrow());
 
     private static final long TIMESTAMP_VALUE = new DateTime(2013, 3, 30, 1, 5, 0, 0, DateTimeZone.UTC).getMillis();
     private static final long DATE_VALUE = TimeUnit.MILLISECONDS.toDays(new DateTime(2001, 1, 22, 0, 0, 0, 0, DateTimeZone.UTC).getMillis());
@@ -175,8 +175,6 @@ public class TestDomainTranslator
     private static final long COLOR_VALUE_2 = 2;
 
     private TestingFunctionResolution functionResolution;
-    private Metadata metadata;
-    private TypeOperators typeOperators;
     private LiteralEncoder literalEncoder;
     private DomainTranslator domainTranslator;
 
@@ -184,17 +182,14 @@ public class TestDomainTranslator
     public void setup()
     {
         functionResolution = new TestingFunctionResolution();
-        metadata = functionResolution.getMetadata();
-        typeOperators = new TypeOperators();
-        literalEncoder = new LiteralEncoder(TEST_SESSION, metadata);
-        domainTranslator = new DomainTranslator(TEST_SESSION, metadata);
+        literalEncoder = new LiteralEncoder(functionResolution.getPlannerContext());
+        domainTranslator = new DomainTranslator(functionResolution.getPlannerContext());
     }
 
     @AfterClass(alwaysRun = true)
     public void tearDown()
     {
         functionResolution = null;
-        metadata = null;
         literalEncoder = null;
         domainTranslator = null;
     }
@@ -232,7 +227,7 @@ public class TestDomainTranslator
                 .put(C_DATE, Domain.singleValue(DATE, DATE_VALUE))
                 .put(C_COLOR, Domain.singleValue(COLOR, COLOR_VALUE_1))
                 .put(C_HYPER_LOG_LOG, Domain.notNull(HYPER_LOG_LOG))
-                .build());
+                .buildOrThrow());
 
         assertPredicateTranslates(toPredicate(tupleDomain), tupleDomain);
     }
@@ -298,7 +293,7 @@ public class TestDomainTranslator
                 .put(C_DOUBLE, Domain.onlyNull(DOUBLE))
                 .put(C_VARCHAR, Domain.notNull(VARCHAR))
                 .put(C_BOOLEAN, Domain.none(BOOLEAN))
-                .build());
+                .buildOrThrow());
 
         assertEquals(toPredicate(tupleDomain), FALSE_LITERAL);
     }
@@ -311,7 +306,7 @@ public class TestDomainTranslator
                 .put(C_DOUBLE, Domain.onlyNull(DOUBLE))
                 .put(C_VARCHAR, Domain.notNull(VARCHAR))
                 .put(C_BOOLEAN, Domain.all(BOOLEAN))
-                .build());
+                .buildOrThrow());
 
         ExtractionResult result = fromPredicate(toPredicate(tupleDomain));
         assertEquals(result.getRemainingExpression(), TRUE_LITERAL);
@@ -319,7 +314,7 @@ public class TestDomainTranslator
                 .put(C_BIGINT, Domain.singleValue(BIGINT, 1L))
                 .put(C_DOUBLE, Domain.onlyNull(DOUBLE))
                 .put(C_VARCHAR, Domain.notNull(VARCHAR))
-                .build()));
+                .buildOrThrow()));
     }
 
     @Test
@@ -802,7 +797,7 @@ public class TestDomainTranslator
     @Test
     public void testFromBasicComparisonsWithNaN()
     {
-        Expression nanDouble = literalEncoder.toExpression(Double.NaN, DOUBLE);
+        Expression nanDouble = literalEncoder.toExpression(TEST_SESSION, Double.NaN, DOUBLE);
 
         assertPredicateIsAlwaysFalse(equal(C_DOUBLE, nanDouble));
         assertPredicateIsAlwaysFalse(greaterThan(C_DOUBLE, nanDouble));
@@ -820,7 +815,7 @@ public class TestDomainTranslator
         assertPredicateIsAlwaysFalse(not(notEqual(C_DOUBLE, nanDouble)));
         assertUnsupportedPredicate(not(isDistinctFrom(C_DOUBLE, nanDouble)));
 
-        Expression nanReal = literalEncoder.toExpression((long) Float.floatToIntBits(Float.NaN), REAL);
+        Expression nanReal = literalEncoder.toExpression(TEST_SESSION, (long) Float.floatToIntBits(Float.NaN), REAL);
 
         assertPredicateIsAlwaysFalse(equal(C_REAL, nanReal));
         assertPredicateIsAlwaysFalse(greaterThan(C_REAL, nanReal));
@@ -845,10 +840,10 @@ public class TestDomainTranslator
         // we expect TupleDomain.all here().
         // see comment in DomainTranslator.Visitor.visitComparisonExpression()
         assertUnsupportedPredicate(equal(
-                new Cast(C_TIMESTAMP.toSymbolReference(), toSqlType(DATE)),
+                cast(C_TIMESTAMP, DATE),
                 toExpression(DATE_VALUE, DATE)));
         assertUnsupportedPredicate(equal(
-                new Cast(C_DECIMAL_12_2.toSymbolReference(), toSqlType(BIGINT)),
+                cast(C_DECIMAL_12_2, BIGINT),
                 bigintLiteral(135L)));
     }
 
@@ -856,19 +851,19 @@ public class TestDomainTranslator
     public void testNoSaturatedFloorCastFromUnsupportedApproximateDomain()
     {
         assertUnsupportedPredicate(equal(
-                new Cast(C_DECIMAL_12_2.toSymbolReference(), toSqlType(DOUBLE)),
+                cast(C_DECIMAL_12_2, DOUBLE),
                 toExpression(12345.56, DOUBLE)));
 
         assertUnsupportedPredicate(equal(
-                new Cast(C_BIGINT.toSymbolReference(), toSqlType(DOUBLE)),
+                cast(C_BIGINT, DOUBLE),
                 toExpression(12345.56, DOUBLE)));
 
         assertUnsupportedPredicate(equal(
-                new Cast(C_BIGINT.toSymbolReference(), toSqlType(REAL)),
+                cast(C_BIGINT, REAL),
                 toExpression(realValue(12345.56f), REAL)));
 
         assertUnsupportedPredicate(equal(
-                new Cast(C_INTEGER.toSymbolReference(), toSqlType(REAL)),
+                cast(C_INTEGER, REAL),
                 toExpression(realValue(12345.56f), REAL)));
     }
 
@@ -1009,6 +1004,119 @@ public class TestDomainTranslator
     }
 
     @Test
+    public void testPredicateWithVarcharCastToDate()
+    {
+        // =
+        assertPredicateDerives(
+                equal(cast(C_VARCHAR, DATE), new GenericLiteral("DATE", " +2005-9-10  \t")),
+                tupleDomain(C_VARCHAR, Domain.create(ValueSet.ofRanges(
+                                Range.lessThan(VARCHAR, utf8Slice("1")),
+                                Range.range(VARCHAR, utf8Slice("2005-09-10"), true, utf8Slice("2005-09-11"), false),
+                                Range.range(VARCHAR, utf8Slice("2005-9-10"), true, utf8Slice("2005-9-11"), false),
+                                Range.greaterThan(VARCHAR, utf8Slice("9"))),
+                        false)));
+        // = with day ending with 9
+        assertPredicateDerives(
+                equal(cast(C_VARCHAR, DATE), new GenericLiteral("DATE", "2005-09-09")),
+                tupleDomain(C_VARCHAR, Domain.create(ValueSet.ofRanges(
+                                Range.lessThan(VARCHAR, utf8Slice("1")),
+                                Range.range(VARCHAR, utf8Slice("2005-09-09"), true, utf8Slice("2005-09-0:"), false),
+                                Range.range(VARCHAR, utf8Slice("2005-09-9"), true, utf8Slice("2005-09-:"), false),
+                                Range.range(VARCHAR, utf8Slice("2005-9-09"), true, utf8Slice("2005-9-0:"), false),
+                                Range.range(VARCHAR, utf8Slice("2005-9-9"), true, utf8Slice("2005-9-:"), false),
+                                Range.greaterThan(VARCHAR, utf8Slice("9"))),
+                        false)));
+        assertPredicateDerives(
+                equal(cast(C_VARCHAR, DATE), new GenericLiteral("DATE", "2005-09-19")),
+                tupleDomain(C_VARCHAR, Domain.create(ValueSet.ofRanges(
+                                Range.lessThan(VARCHAR, utf8Slice("1")),
+                                Range.range(VARCHAR, utf8Slice("2005-09-19"), true, utf8Slice("2005-09-1:"), false),
+                                Range.range(VARCHAR, utf8Slice("2005-9-19"), true, utf8Slice("2005-9-1:"), false),
+                                Range.greaterThan(VARCHAR, utf8Slice("9"))),
+                        false)));
+
+        // !=
+        assertPredicateDerives(
+                notEqual(cast(C_VARCHAR, DATE), new GenericLiteral("DATE", " +2005-9-10  \t")),
+                tupleDomain(C_VARCHAR, Domain.create(ValueSet.ofRanges(
+                                Range.lessThan(VARCHAR, utf8Slice("2005-09-10")),
+                                Range.range(VARCHAR, utf8Slice("2005-09-11"), true, utf8Slice("2005-9-10"), false),
+                                Range.greaterThanOrEqual(VARCHAR, utf8Slice("2005-9-11"))),
+                        false)));
+
+        // != with single-digit day
+        assertUnsupportedPredicate(
+                notEqual(cast(C_VARCHAR, DATE), new GenericLiteral("DATE", " +2005-9-2  \t")));
+        // != with day ending with 9
+        assertUnsupportedPredicate(
+                notEqual(cast(C_VARCHAR, DATE), new GenericLiteral("DATE", "2005-09-09")));
+        assertPredicateDerives(
+                notEqual(cast(C_VARCHAR, DATE), new GenericLiteral("DATE", "2005-09-19")),
+                tupleDomain(C_VARCHAR, Domain.create(ValueSet.ofRanges(
+                                Range.lessThan(VARCHAR, utf8Slice("2005-09-19")),
+                                Range.range(VARCHAR, utf8Slice("2005-09-1:"), true, utf8Slice("2005-9-19"), false),
+                                Range.greaterThanOrEqual(VARCHAR, utf8Slice("2005-9-1:"))),
+                        false)));
+
+        // <
+        assertPredicateDerives(
+                lessThan(cast(C_VARCHAR, DATE), new GenericLiteral("DATE", " +2005-9-10  \t")),
+                tupleDomain(C_VARCHAR, Domain.create(ValueSet.ofRanges(
+                                Range.lessThan(VARCHAR, utf8Slice("2006")),
+                                Range.greaterThan(VARCHAR, utf8Slice("9"))),
+                        false)));
+
+        // >
+        assertPredicateDerives(
+                greaterThan(cast(C_VARCHAR, DATE), new GenericLiteral("DATE", " +2005-9-10  \t")),
+                tupleDomain(C_VARCHAR, Domain.create(ValueSet.ofRanges(
+                                Range.lessThan(VARCHAR, utf8Slice("1")),
+                                Range.greaterThan(VARCHAR, utf8Slice("2004"))),
+                        false)));
+
+        // Regression test for https://github.com/trinodb/trino/issues/14954
+        assertPredicateTranslates(
+                greaterThan(new GenericLiteral("DATE", "2001-01-31"), cast(C_VARCHAR, DATE)),
+                tupleDomain(
+                        C_VARCHAR,
+                        Domain.create(ValueSet.ofRanges(
+                                        Range.lessThan(VARCHAR, utf8Slice("2002")),
+                                        Range.greaterThan(VARCHAR, utf8Slice("9"))),
+                                false)),
+                greaterThan(new GenericLiteral("DATE", "2001-01-31"), cast(C_VARCHAR, DATE)));
+
+        // BETWEEN
+        assertPredicateTranslates(
+                between(cast(C_VARCHAR, DATE), new GenericLiteral("DATE", "2001-01-31"), new GenericLiteral("DATE", "2005-09-10")),
+                tupleDomain(C_VARCHAR, Domain.create(ValueSet.ofRanges(
+                                Range.lessThan(VARCHAR, utf8Slice("1")),
+                                Range.range(VARCHAR, utf8Slice("2000"), false, utf8Slice("2006"), false),
+                                Range.greaterThan(VARCHAR, utf8Slice("9"))),
+                        false)),
+                and(
+                        greaterThanOrEqual(cast(C_VARCHAR, DATE), new GenericLiteral("DATE", "2001-01-31")),
+                        lessThanOrEqual(cast(C_VARCHAR, DATE), new GenericLiteral("DATE", "2005-09-10"))));
+
+        // Regression test for https://github.com/trinodb/trino/issues/14954
+        assertPredicateTranslates(
+                between(new GenericLiteral("DATE", "2001-01-31"), cast(C_VARCHAR, DATE), cast(C_VARCHAR_1, DATE)),
+                tupleDomain(
+                        C_VARCHAR,
+                        Domain.create(ValueSet.ofRanges(
+                                        Range.lessThan(VARCHAR, utf8Slice("2002")),
+                                        Range.greaterThan(VARCHAR, utf8Slice("9"))),
+                                false),
+                        C_VARCHAR_1,
+                        Domain.create(ValueSet.ofRanges(
+                                        Range.lessThan(VARCHAR, utf8Slice("1")),
+                                        Range.greaterThan(VARCHAR, utf8Slice("2000"))),
+                                false)),
+                and(
+                        greaterThanOrEqual(new GenericLiteral("DATE", "2001-01-31"), cast(C_VARCHAR, DATE)),
+                        lessThanOrEqual(new GenericLiteral("DATE", "2001-01-31"), cast(C_VARCHAR_1, DATE))));
+    }
+
+    @Test
     public void testFromUnprocessableInPredicate()
     {
         assertUnsupportedPredicate(new InPredicate(unprocessableExpression1(C_BIGINT), new InListExpression(ImmutableList.of(TRUE_LITERAL))));
@@ -1081,9 +1189,9 @@ public class TestDomainTranslator
 
     private void testInPredicate(Symbol symbol, Symbol symbol2, Type type, Object one, Object two)
     {
-        Expression oneExpression = literalEncoder.toExpression(one, type);
-        Expression twoExpression = literalEncoder.toExpression(two, type);
-        Expression nullExpression = literalEncoder.toExpression(null, type);
+        Expression oneExpression = literalEncoder.toExpression(TEST_SESSION, one, type);
+        Expression twoExpression = literalEncoder.toExpression(TEST_SESSION, two, type);
+        Expression nullExpression = literalEncoder.toExpression(TEST_SESSION, null, type);
         Expression otherSymbol = symbol2.toSymbolReference();
 
         // IN, single value
@@ -1154,10 +1262,10 @@ public class TestDomainTranslator
 
     private void testInPredicateWithFloatingPoint(Symbol symbol, Symbol symbol2, Type type, Object one, Object two, Object nan)
     {
-        Expression oneExpression = literalEncoder.toExpression(one, type);
-        Expression twoExpression = literalEncoder.toExpression(two, type);
-        Expression nanExpression = literalEncoder.toExpression(nan, type);
-        Expression nullExpression = literalEncoder.toExpression(null, type);
+        Expression oneExpression = literalEncoder.toExpression(TEST_SESSION, one, type);
+        Expression twoExpression = literalEncoder.toExpression(TEST_SESSION, two, type);
+        Expression nanExpression = literalEncoder.toExpression(TEST_SESSION, nan, type);
+        Expression nullExpression = literalEncoder.toExpression(TEST_SESSION, null, type);
         Expression otherSymbol = symbol2.toSymbolReference();
 
         // IN, single value
@@ -1476,7 +1584,7 @@ public class TestDomainTranslator
     {
         Type columnType = columnValues.getType();
         Type literalType = literalValues.getType();
-        Type superType = new TypeCoercion(metadata::getType).getCommonSuperType(columnType, literalType).orElseThrow(() -> new IllegalArgumentException("incompatible types in test (" + columnType + ", " + literalType + ")"));
+        Type superType = new TypeCoercion(functionResolution.getPlannerContext().getTypeManager()::getType).getCommonSuperType(columnType, literalType).orElseThrow(() -> new IllegalArgumentException("incompatible types in test (" + columnType + ", " + literalType + ")"));
 
         Expression max = toExpression(literalValues.getMax(), literalType);
         Expression min = toExpression(literalValues.getMin(), literalType);
@@ -1729,91 +1837,91 @@ public class TestDomainTranslator
 
         // constant
         testSimpleComparison(
-                like(C_VARCHAR, stringLiteral("abc")),
+                like(C_VARCHAR, "abc"),
                 C_VARCHAR,
                 Domain.multipleValues(varcharType, ImmutableList.of(utf8Slice("abc"))));
 
         // starts with pattern
-        assertUnsupportedPredicate(like(C_VARCHAR, stringLiteral("_def")));
-        assertUnsupportedPredicate(like(C_VARCHAR, stringLiteral("%def")));
+        assertUnsupportedPredicate(like(C_VARCHAR, "_def"));
+        assertUnsupportedPredicate(like(C_VARCHAR, "%def"));
 
         // _ pattern (unless escaped)
         testSimpleComparison(
-                like(C_VARCHAR, stringLiteral("abc_def")),
+                like(C_VARCHAR, "abc_def"),
                 C_VARCHAR,
-                like(C_VARCHAR, stringLiteral("abc_def")),
+                like(C_VARCHAR, "abc_def"),
                 Domain.create(ValueSet.ofRanges(Range.range(varcharType, utf8Slice("abc"), true, utf8Slice("abd"), false)), false));
 
         testSimpleComparison(
-                like(C_VARCHAR, stringLiteral("abc\\_def")),
+                like(C_VARCHAR, "abc\\_def"),
                 C_VARCHAR,
-                like(C_VARCHAR, stringLiteral("abc\\_def")),
+                like(C_VARCHAR, "abc\\_def"),
                 Domain.create(ValueSet.ofRanges(Range.range(varcharType, utf8Slice("abc\\"), true, utf8Slice("abc]"), false)), false));
 
         testSimpleComparison(
-                like(C_VARCHAR, stringLiteral("abc\\_def"), stringLiteral("\\")),
+                like(C_VARCHAR, "abc\\_def", '\\'),
                 C_VARCHAR,
                 Domain.multipleValues(varcharType, ImmutableList.of(utf8Slice("abc_def"))));
 
         testSimpleComparison(
-                like(C_VARCHAR, stringLiteral("abc\\_def_"), stringLiteral("\\")),
+                like(C_VARCHAR, "abc\\_def_", '\\'),
                 C_VARCHAR,
-                like(C_VARCHAR, stringLiteral("abc\\_def_"), stringLiteral("\\")),
+                like(C_VARCHAR, "abc\\_def_", '\\'),
                 Domain.create(ValueSet.ofRanges(Range.range(varcharType, utf8Slice("abc_def"), true, utf8Slice("abc_deg"), false)), false));
 
         testSimpleComparison(
-                like(C_VARCHAR, stringLiteral("abc^_def_"), stringLiteral("^")),
+                like(C_VARCHAR, "abc^_def_", '^'),
                 C_VARCHAR,
-                like(C_VARCHAR, stringLiteral("abc^_def_"), stringLiteral("^")),
+                like(C_VARCHAR, "abc^_def_", '^'),
                 Domain.create(ValueSet.ofRanges(Range.range(varcharType, utf8Slice("abc_def"), true, utf8Slice("abc_deg"), false)), false));
 
         // % pattern (unless escaped)
         testSimpleComparison(
-                like(C_VARCHAR, stringLiteral("abc%")),
+                like(C_VARCHAR, "abc%"),
                 C_VARCHAR,
-                like(C_VARCHAR, stringLiteral("abc%")),
+                like(C_VARCHAR, "abc%"),
                 Domain.create(ValueSet.ofRanges(Range.range(varcharType, utf8Slice("abc"), true, utf8Slice("abd"), false)), false));
 
         testSimpleComparison(
-                like(C_VARCHAR, stringLiteral("abc%def")),
+                like(C_VARCHAR, "abc%def"),
                 C_VARCHAR,
-                like(C_VARCHAR, stringLiteral("abc%def")),
+                like(C_VARCHAR, "abc%def"),
                 Domain.create(ValueSet.ofRanges(Range.range(varcharType, utf8Slice("abc"), true, utf8Slice("abd"), false)), false));
 
         testSimpleComparison(
-                like(C_VARCHAR, stringLiteral("abc\\%def")),
+                like(C_VARCHAR, "abc\\%def"),
                 C_VARCHAR,
-                like(C_VARCHAR, stringLiteral("abc\\%def")),
+                like(C_VARCHAR, "abc\\%def"),
                 Domain.create(ValueSet.ofRanges(Range.range(varcharType, utf8Slice("abc\\"), true, utf8Slice("abc]"), false)), false));
 
         testSimpleComparison(
-                like(C_VARCHAR, stringLiteral("abc\\%def"), stringLiteral("\\")),
+                like(C_VARCHAR, "abc\\%def", '\\'),
                 C_VARCHAR,
                 Domain.multipleValues(varcharType, ImmutableList.of(utf8Slice("abc%def"))));
 
         testSimpleComparison(
-                like(C_VARCHAR, stringLiteral("abc\\%def_"), stringLiteral("\\")),
+                like(C_VARCHAR, "abc\\%def_", '\\'),
                 C_VARCHAR,
-                like(C_VARCHAR, stringLiteral("abc\\%def_"), stringLiteral("\\")),
+                like(C_VARCHAR, "abc\\%def_", '\\'),
                 Domain.create(ValueSet.ofRanges(Range.range(varcharType, utf8Slice("abc%def"), true, utf8Slice("abc%deg"), false)), false));
 
         testSimpleComparison(
-                like(C_VARCHAR, stringLiteral("abc^%def_"), stringLiteral("^")),
+                like(C_VARCHAR, "abc^%def_", '^'),
                 C_VARCHAR,
-                like(C_VARCHAR, stringLiteral("abc^%def_"), stringLiteral("^")),
+                like(C_VARCHAR, "abc^%def_", '^'),
                 Domain.create(ValueSet.ofRanges(Range.range(varcharType, utf8Slice("abc%def"), true, utf8Slice("abc%deg"), false)), false));
 
         // non-ASCII literal
         testSimpleComparison(
-                like(C_VARCHAR, stringLiteral("abc\u007f\u0123\udbfe")),
+                like(C_VARCHAR, "abc\u007f\u0123\udbfe"),
                 C_VARCHAR,
                 Domain.multipleValues(varcharType, ImmutableList.of(utf8Slice("abc\u007f\u0123\udbfe"))));
 
         // non-ASCII prefix
         testSimpleComparison(
-                like(C_VARCHAR, stringLiteral("abc\u0123\ud83d\ude80def\u007e\u007f\u00ff\u0123\uccf0%")),
+                like(C_VARCHAR, "abc\u0123\ud83d\ude80def\u007e\u007f\u00ff\u0123\uccf0%"),
                 C_VARCHAR,
-                like(C_VARCHAR, stringLiteral("abc\u0123\ud83d\ude80def\u007e\u007f\u00ff\u0123\uccf0%")),
+                like(C_VARCHAR, "abc\u0123\ud83d\ude80def\u007e\u007f\u00ff\u0123\uccf0%"),
                 Domain.create(
                         ValueSet.ofRanges(Range.range(varcharType,
                                 utf8Slice("abc\u0123\ud83d\ude80def\u007e\u007f\u00ff\u0123\uccf0"), true,
@@ -1825,7 +1933,7 @@ public class TestDomainTranslator
 
         // negation with literal
         testSimpleComparison(
-                not(like(C_VARCHAR, stringLiteral("abcdef"))),
+                not(like(C_VARCHAR, "abcdef")),
                 C_VARCHAR,
                 Domain.create(ValueSet.ofRanges(
                                 Range.lessThan(varcharType, utf8Slice("abcdef")),
@@ -1833,7 +1941,7 @@ public class TestDomainTranslator
                         false));
 
         testSimpleComparison(
-                not(like(C_VARCHAR, stringLiteral("abc\\_def"), stringLiteral("\\"))),
+                not(like(C_VARCHAR, "abc\\_def", '\\')),
                 C_VARCHAR,
                 Domain.create(ValueSet.ofRanges(
                                 Range.lessThan(varcharType, utf8Slice("abc_def")),
@@ -1841,7 +1949,7 @@ public class TestDomainTranslator
                         false));
 
         // negation with pattern
-        assertUnsupportedPredicate(not(like(C_VARCHAR, stringLiteral("abc\\_def"))));
+        assertUnsupportedPredicate(not(like(C_VARCHAR, "abc\\_def")));
     }
 
     @Test
@@ -1918,6 +2026,11 @@ public class TestDomainTranslator
         assertPredicateTranslates(expression, tupleDomain, TRUE_LITERAL);
     }
 
+    private void assertPredicateDerives(Expression expression, TupleDomain<Symbol> tupleDomain)
+    {
+        assertPredicateTranslates(expression, tupleDomain, expression);
+    }
+
     private void assertPredicateTranslates(Expression expression, TupleDomain<Symbol> tupleDomain, Expression remainingExpression)
     {
         ExtractionResult result = fromPredicate(expression);
@@ -1936,13 +2049,13 @@ public class TestDomainTranslator
         return transaction(new TestingTransactionManager(), new AllowAllAccessControl())
                 .singleStatement()
                 .execute(TEST_SESSION, transactionSession -> {
-                    return DomainTranslator.fromPredicate(metadata, typeOperators, transactionSession, originalPredicate, TYPES);
+                    return DomainTranslator.getExtractionResult(functionResolution.getPlannerContext(), transactionSession, originalPredicate, TYPES);
                 });
     }
 
     private Expression toPredicate(TupleDomain<Symbol> tupleDomain)
     {
-        return domainTranslator.toPredicate(tupleDomain);
+        return domainTranslator.toPredicate(TEST_SESSION, tupleDomain);
     }
 
     private static Expression unprocessableExpression1(Symbol symbol)
@@ -1998,14 +2111,23 @@ public class TestDomainTranslator
         return isDistinctFrom(symbol.toSymbolReference(), expression);
     }
 
-    private static LikePredicate like(Symbol symbol, Expression expression)
+    private FunctionCall like(Symbol symbol, String pattern)
     {
-        return new LikePredicate(symbol.toSymbolReference(), expression, Optional.empty());
+        return new FunctionCall(QualifiedName.of(LIKE_FUNCTION_NAME), ImmutableList.of(
+                symbol.toSymbolReference(),
+                literalEncoder.toExpression(TEST_SESSION, LikeMatcher.compile(pattern, Optional.empty()), LikePatternType.LIKE_PATTERN)));
     }
 
-    private static LikePredicate like(Symbol symbol, Expression expression, Expression escape)
+    private FunctionCall like(Symbol symbol, Expression pattern, Expression escape)
     {
-        return new LikePredicate(symbol.toSymbolReference(), expression, Optional.of(escape));
+        return new FunctionCall(QualifiedName.of(LIKE_FUNCTION_NAME), ImmutableList.of(symbol.toSymbolReference(), pattern, escape));
+    }
+
+    private FunctionCall like(Symbol symbol, String pattern, Character escape)
+    {
+        return new FunctionCall(QualifiedName.of(LIKE_FUNCTION_NAME), ImmutableList.of(
+                symbol.toSymbolReference(),
+                literalEncoder.toExpression(TEST_SESSION, LikeMatcher.compile(pattern, Optional.of(escape)), LikePatternType.LIKE_PATTERN)));
     }
 
     private static FunctionCall startsWith(Symbol symbol, Expression expression)
@@ -2046,7 +2168,7 @@ public class TestDomainTranslator
     private InPredicate in(Expression expression, Type expressisonType, List<?> values)
     {
         List<Type> types = nCopies(values.size(), expressisonType);
-        List<Expression> expressions = literalEncoder.toExpressions(values, types);
+        List<Expression> expressions = literalEncoder.toExpressions(TEST_SESSION, values, types);
         return new InPredicate(expression, new InListExpression(expressions));
     }
 
@@ -2150,7 +2272,7 @@ public class TestDomainTranslator
 
     private Expression colorLiteral(long value)
     {
-        return literalEncoder.toExpression(value, COLOR);
+        return literalEncoder.toExpression(TEST_SESSION, value, COLOR);
     }
 
     private Expression varbinaryLiteral(Slice value)
@@ -2163,9 +2285,9 @@ public class TestDomainTranslator
         return new BigDecimal(value).unscaledValue().longValueExact();
     }
 
-    private static Slice longDecimal(String value)
+    private static Int128 longDecimal(String value)
     {
-        return encodeScaledValue(new BigDecimal(value));
+        return Decimals.valueOf(new BigDecimal(value));
     }
 
     private static Long realValue(float value)
@@ -2196,7 +2318,7 @@ public class TestDomainTranslator
 
     private Expression toExpression(Object object, Type type)
     {
-        return literalEncoder.toExpression(object, type);
+        return literalEncoder.toExpression(TEST_SESSION, object, type);
     }
 
     private static <T> TupleDomain<T> tupleDomain(T key, Domain domain)

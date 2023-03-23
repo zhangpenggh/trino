@@ -13,25 +13,28 @@
  */
 package io.trino.sql.query;
 
-import org.testng.annotations.AfterClass;
-import org.testng.annotations.BeforeClass;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
 
 import static java.lang.String.format;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
 
+@TestInstance(PER_CLASS)
 public class TestRowPatternMatching
 {
     private QueryAssertions assertions;
 
-    @BeforeClass
+    @BeforeAll
     public void init()
     {
         assertions = new QueryAssertions();
     }
 
-    @AfterClass(alwaysRun = true)
+    @AfterAll
     public void teardown()
     {
         assertions.close();
@@ -1527,5 +1530,36 @@ public class TestRowPatternMatching
 
                 "                ) AS m"))
                 .matches("VALUES (VARCHAR 'B'), ('B'), ('B'), ('B'), ('B'), ('B'), ('B'), ('B'), ('LAST') ");
+    }
+
+    @Test
+    public void testProperties()
+    {
+        assertThat(assertions.query("""
+                WITH
+                    t(a, b) AS (VALUES (1, 1)),
+                    u AS (SELECT * FROM t WHERE b = 1)
+                SELECT *
+                FROM u
+                  MATCH_RECOGNIZE (
+                   PARTITION BY a
+                   PATTERN (X)
+                   DEFINE X AS (b = 1))
+                """))
+                .matches("VALUES 1");
+    }
+
+    @Test
+    public void testKillThread()
+    {
+        assertThat(assertions.query("""
+                SELECT *
+                FROM (VALUES 1, 2, 3, 4, 5)
+                  MATCH_RECOGNIZE (
+                      MEASURES 'foo' AS foo
+                      PATTERN ((Y?){2,})
+                      DEFINE Y AS true)
+                """))
+                .matches("VALUES 'foo'");
     }
 }

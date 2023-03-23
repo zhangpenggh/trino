@@ -27,10 +27,9 @@ import java.util.Optional;
 import java.util.OptionalLong;
 
 import static com.google.common.base.Verify.verify;
-import static io.trino.tests.product.TestGroups.SKIP_ON_CDH;
-import static io.trino.tests.product.hive.HiveProductTest.ERROR_COMMITTING_WRITE_TO_HIVE_ISSUE;
-import static io.trino.tests.product.hive.HiveProductTest.ERROR_COMMITTING_WRITE_TO_HIVE_MATCH;
 import static io.trino.tests.product.hive.util.TableLocationUtils.getTableLocation;
+import static io.trino.tests.product.utils.HadoopTestUtils.RETRYABLE_FAILURES_ISSUES;
+import static io.trino.tests.product.utils.HadoopTestUtils.RETRYABLE_FAILURES_MATCH;
 import static io.trino.tests.product.utils.QueryExecutors.onHive;
 import static io.trino.tests.product.utils.QueryExecutors.onTrino;
 import static java.lang.String.format;
@@ -59,7 +58,7 @@ public class TestHiveBasicTableStatistics
         }
     }
 
-    @Test(groups = SKIP_ON_CDH /* CDH 5 metastore automatically gathers raw data size statistics on its own */)
+    @Test
     public void testCreateExternalUnpartitioned()
     {
         String tableName = "test_basic_statistics_external_unpartitioned_presto";
@@ -176,7 +175,7 @@ public class TestHiveBasicTableStatistics
         }
     }
 
-    @Test(groups = SKIP_ON_CDH /* CDH 5 metastore automatically gathers raw data size statistics on its own */)
+    @Test
     public void testAnalyzePartitioned()
     {
         String tableName = "test_basic_statistics_analyze_partitioned";
@@ -295,7 +294,7 @@ public class TestHiveBasicTableStatistics
     }
 
     @Test
-    @Flaky(issue = ERROR_COMMITTING_WRITE_TO_HIVE_ISSUE, match = ERROR_COMMITTING_WRITE_TO_HIVE_MATCH)
+    @Flaky(issue = RETRYABLE_FAILURES_ISSUES, match = RETRYABLE_FAILURES_MATCH)
     public void testInsertBucketed()
     {
         String tableName = "test_basic_statistics_bucketed_insert_presto";

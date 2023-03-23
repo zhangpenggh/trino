@@ -18,7 +18,8 @@ import io.airlift.configuration.ConfigDescription;
 import org.apache.kafka.common.security.auth.SecurityProtocol;
 
 import javax.annotation.PostConstruct;
-import javax.validation.constraints.NotNull;
+
+import java.util.Optional;
 
 import static com.google.common.base.Preconditions.checkState;
 import static java.lang.String.format;
@@ -32,10 +33,9 @@ public class KafkaSecurityConfig
     private String saslMechanism;
     private String saslJaasConfig;
 
-    @NotNull
-    public SecurityProtocol getSecurityProtocol()
+    public Optional<SecurityProtocol> getSecurityProtocol()
     {
-        return securityProtocol;
+        return Optional.ofNullable(securityProtocol);
     }
 
     @Config("kafka.security-protocol")

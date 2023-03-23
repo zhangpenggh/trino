@@ -17,6 +17,7 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import io.trino.SystemSessionProperties;
+import io.trino.cost.TaskCountEstimator;
 import io.trino.sql.planner.RuleStatsRecorder;
 import io.trino.sql.planner.assertions.BasePlanTest;
 import io.trino.sql.planner.assertions.ExpectedValueProvider;
@@ -51,7 +52,9 @@ public class TestOptimizeMixedDistinctAggregations
 {
     public TestOptimizeMixedDistinctAggregations()
     {
-        super(ImmutableMap.of(SystemSessionProperties.OPTIMIZE_DISTINCT_AGGREGATIONS, "true"));
+        super(ImmutableMap.of(
+                SystemSessionProperties.OPTIMIZE_DISTINCT_AGGREGATIONS, "true",
+                SystemSessionProperties.MARK_DISTINCT_STRATEGY, "always"));
     }
 
     @Test
@@ -118,16 +121,17 @@ public class TestOptimizeMixedDistinctAggregations
         List<PlanOptimizer> optimizers = ImmutableList.of(
                 new UnaliasSymbolReferences(getQueryRunner().getMetadata()),
                 new IterativeOptimizer(
-                        getQueryRunner().getMetadata(),
+                        getQueryRunner().getPlannerContext(),
                         new RuleStatsRecorder(),
                         getQueryRunner().getStatsCalculator(),
                         getQueryRunner().getEstimatedExchangesCostCalculator(),
                         ImmutableSet.of(
                                 new RemoveRedundantIdentityProjections(),
                                 new SingleDistinctAggregationToGroupBy(),
-                                new MultipleDistinctAggregationToMarkDistinct())),
+                                new MultipleDistinctAggregationToMarkDistinct(new TaskCountEstimator(() -> 4)))),
                 new OptimizeMixedDistinctAggregations(getQueryRunner().getMetadata()),
-                new IterativeOptimizer(getQueryRunner().getMetadata(),
+                new IterativeOptimizer(
+                        getQueryRunner().getPlannerContext(),
                         new RuleStatsRecorder(),
                         getQueryRunner().getStatsCalculator(),
                         getQueryRunner().getEstimatedExchangesCostCalculator(),

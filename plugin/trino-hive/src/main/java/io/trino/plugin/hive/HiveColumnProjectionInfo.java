@@ -15,6 +15,7 @@ package io.trino.plugin.hive;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import io.airlift.slice.SizeOf;
 import io.trino.spi.type.Type;
 
 import java.util.List;
@@ -22,10 +23,14 @@ import java.util.Objects;
 import java.util.stream.Collectors;
 
 import static com.google.common.base.Preconditions.checkArgument;
+import static io.airlift.slice.SizeOf.estimatedSizeOf;
+import static io.airlift.slice.SizeOf.instanceSize;
 import static java.util.Objects.requireNonNull;
 
 public class HiveColumnProjectionInfo
 {
+    private static final int INSTANCE_SIZE = instanceSize(HiveColumnProjectionInfo.class);
+
     private final List<Integer> dereferenceIndices;
     private final List<String> dereferenceNames;
     private final HiveType hiveType;
@@ -107,5 +112,15 @@ public class HiveColumnProjectionInfo
         return dereferenceNames.stream()
                 .map(name -> "#" + name)
                 .collect(Collectors.joining());
+    }
+
+    public long getRetainedSizeInBytes()
+    {
+        return INSTANCE_SIZE
+                + estimatedSizeOf(dereferenceIndices, SizeOf::sizeOf)
+                + estimatedSizeOf(dereferenceNames, SizeOf::estimatedSizeOf)
+                + hiveType.getRetainedSizeInBytes()
+                // type is not accounted for as the instances are cached (by TypeRegistry) and shared
+                + estimatedSizeOf(partialName);
     }
 }

@@ -17,12 +17,15 @@ import io.trino.spi.NodeManager;
 import io.trino.spi.PageIndexerFactory;
 import io.trino.spi.PageSorter;
 import io.trino.spi.VersionEmbedder;
+import io.trino.spi.connector.CatalogHandle;
 import io.trino.spi.connector.ConnectorContext;
 import io.trino.spi.connector.MetadataProvider;
 import io.trino.spi.type.TypeManager;
 
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Supplier;
 
+import static com.google.common.base.Preconditions.checkState;
 import static java.util.Objects.requireNonNull;
 
 public class ConnectorContextInstance
@@ -35,8 +38,11 @@ public class ConnectorContextInstance
     private final PageSorter pageSorter;
     private final PageIndexerFactory pageIndexerFactory;
     private final Supplier<ClassLoader> duplicatePluginClassLoaderFactory;
+    private final AtomicBoolean pluginClassLoaderDuplicated = new AtomicBoolean();
+    private final CatalogHandle catalogHandle;
 
     public ConnectorContextInstance(
+            CatalogHandle catalogHandle,
             NodeManager nodeManager,
             VersionEmbedder versionEmbedder,
             TypeManager typeManager,
@@ -52,6 +58,13 @@ public class ConnectorContextInstance
         this.pageSorter = requireNonNull(pageSorter, "pageSorter is null");
         this.pageIndexerFactory = requireNonNull(pageIndexerFactory, "pageIndexerFactory is null");
         this.duplicatePluginClassLoaderFactory = requireNonNull(duplicatePluginClassLoaderFactory, "duplicatePluginClassLoaderFactory is null");
+        this.catalogHandle = requireNonNull(catalogHandle, "catalogHandle is null");
+    }
+
+    @Override
+    public CatalogHandle getCatalogHandle()
+    {
+        return catalogHandle;
     }
 
     @Override
@@ -93,6 +106,7 @@ public class ConnectorContextInstance
     @Override
     public ClassLoader duplicatePluginClassLoader()
     {
+        checkState(!pluginClassLoaderDuplicated.getAndSet(true), "plugin class loader already duplicated");
         return duplicatePluginClassLoaderFactory.get();
     }
 }

@@ -26,10 +26,12 @@ import io.airlift.discovery.store.StoreResource;
 import io.airlift.http.server.HttpServer.ClientCertificate;
 import io.airlift.http.server.HttpServerConfig;
 import io.airlift.jmx.MBeanResource;
+import io.airlift.openmetrics.MetricsResource;
 import io.trino.server.security.jwt.JwtAuthenticator;
 import io.trino.server.security.jwt.JwtAuthenticatorSupportModule;
 import io.trino.server.security.oauth2.OAuth2AuthenticationSupportModule;
 import io.trino.server.security.oauth2.OAuth2Authenticator;
+import io.trino.server.security.oauth2.OAuth2Client;
 
 import java.util.List;
 import java.util.Map;
@@ -58,6 +60,7 @@ public class ServerSecurityModule
         resourceSecurityBinder(binder)
                 .managementReadResource(ServiceResource.class)
                 .managementReadResource(MBeanResource.class)
+                .managementReadResource(MetricsResource.class)
                 .internalOnlyResource(DynamicAnnouncementResource.class)
                 .internalOnlyResource(StoreResource.class);
 
@@ -83,6 +86,7 @@ public class ServerSecurityModule
         }));
         install(authenticatorModule("jwt", JwtAuthenticator.class, new JwtAuthenticatorSupportModule()));
         install(authenticatorModule("oauth2", OAuth2Authenticator.class, new OAuth2AuthenticationSupportModule()));
+        newOptionalBinder(binder, OAuth2Client.class);
 
         configBinder(binder).bindConfig(InsecureAuthenticatorConfig.class);
         binder.bind(InsecureAuthenticator.class).in(Scopes.SINGLETON);

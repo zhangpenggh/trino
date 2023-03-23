@@ -53,6 +53,7 @@ import static io.trino.sql.planner.iterative.rule.AggregationDecorrelation.rewri
 import static io.trino.sql.planner.iterative.rule.Util.restrictOutputs;
 import static io.trino.sql.planner.optimizations.QueryCardinalityUtil.isScalar;
 import static io.trino.sql.planner.plan.AggregationNode.Step.SINGLE;
+import static io.trino.sql.planner.plan.AggregationNode.singleAggregation;
 import static io.trino.sql.planner.plan.AggregationNode.singleGroupingSet;
 import static io.trino.sql.planner.plan.JoinNode.Type.INNER;
 import static io.trino.sql.planner.plan.JoinNode.Type.LEFT;
@@ -162,8 +163,7 @@ public class DecorrelateInnerUnnestWithGlobalAggregation
         // Here, any underlying projection that was a source of the correlated UnnestNode, is appended as a source of the rewritten UnnestNode.
         // If the projection is not necessary for UnnestNode (i.e. it does not produce any unnest symbols), it should be pruned afterwards.
         PlanNode unnestSource = context.getLookup().resolve(unnestNode.getSource());
-        if (unnestSource instanceof ProjectNode) {
-            ProjectNode sourceProjection = (ProjectNode) unnestSource;
+        if (unnestSource instanceof ProjectNode sourceProjection) {
             input = new ProjectNode(
                     sourceProjection.getId(),
                     input,
@@ -213,23 +213,20 @@ public class DecorrelateInnerUnnestWithGlobalAggregation
 
     private static boolean isGlobalAggregation(PlanNode node)
     {
-        if (!(node instanceof AggregationNode)) {
+        if (!(node instanceof AggregationNode aggregationNode)) {
             return false;
         }
 
-        AggregationNode aggregationNode = (AggregationNode) node;
-        return aggregationNode.hasEmptyGroupingSet() &&
-                aggregationNode.getGroupingSetCount() == 1 &&
+        return aggregationNode.hasSingleGlobalAggregation() &&
                 aggregationNode.getStep() == SINGLE;
     }
 
     private static boolean isGroupedAggregation(PlanNode node)
     {
-        if (!(node instanceof AggregationNode)) {
+        if (!(node instanceof AggregationNode aggregationNode)) {
             return false;
         }
 
-        AggregationNode aggregationNode = (AggregationNode) node;
         return aggregationNode.hasNonEmptyGroupingSet() &&
                 aggregationNode.getGroupingSetCount() == 1 &&
                 aggregationNode.getStep() == SINGLE;
@@ -245,11 +242,10 @@ public class DecorrelateInnerUnnestWithGlobalAggregation
      */
     private static boolean isSupportedUnnest(PlanNode node, List<Symbol> correlation, Lookup lookup)
     {
-        if (!(node instanceof UnnestNode)) {
+        if (!(node instanceof UnnestNode unnestNode)) {
             return false;
         }
 
-        UnnestNode unnestNode = (UnnestNode) node;
         List<Symbol> unnestSymbols = unnestNode.getMappings().stream()
                 .map(Mapping::getInput)
                 .collect(toImmutableList());
@@ -293,8 +289,7 @@ public class DecorrelateInnerUnnestWithGlobalAggregation
                     source);
         }
 
-        if (root instanceof ProjectNode) {
-            ProjectNode projectNode = (ProjectNode) root;
+        if (root instanceof ProjectNode projectNode) {
             return new ProjectNode(
                     projectNode.getId(),
                     source,
@@ -337,15 +332,11 @@ public class DecorrelateInnerUnnestWithGlobalAggregation
                             .build());
         }
 
-        return new AggregationNode(
+        return singleAggregation(
                 aggregationNode.getId(),
                 source,
-                rewriteWithMasks(aggregationNode.getAggregations(), masks.build()),
-                singleGroupingSet(groupingSymbols),
-                ImmutableList.of(),
-                SINGLE,
-                Optional.empty(),
-                Optional.empty());
+                rewriteWithMasks(aggregationNode.getAggregations(), masks.buildOrThrow()),
+                singleGroupingSet(groupingSymbols));
     }
 
     private static AggregationNode withGrouping(AggregationNode aggregationNode, List<Symbol> groupingSymbols, PlanNode source)
@@ -354,14 +345,10 @@ public class DecorrelateInnerUnnestWithGlobalAggregation
                 .distinct()
                 .collect(toImmutableList()));
 
-        return new AggregationNode(
+        return singleAggregation(
                 aggregationNode.getId(),
                 source,
                 aggregationNode.getAggregations(),
-                groupingSet,
-                ImmutableList.of(),
-                SINGLE,
-                Optional.empty(),
-                Optional.empty());
+                groupingSet);
     }
 }

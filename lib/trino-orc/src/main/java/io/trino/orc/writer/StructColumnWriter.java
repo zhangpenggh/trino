@@ -29,7 +29,6 @@ import io.trino.orc.stream.PresentOutputStream;
 import io.trino.orc.stream.StreamDataOutput;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.ColumnarRow;
-import org.openjdk.jol.info.ClassLayout;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -39,6 +38,7 @@ import java.util.Optional;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
+import static io.airlift.slice.SizeOf.instanceSize;
 import static io.trino.orc.metadata.ColumnEncoding.ColumnEncodingKind.DIRECT;
 import static io.trino.orc.metadata.CompressionKind.NONE;
 import static io.trino.spi.block.ColumnarRow.toColumnarRow;
@@ -47,7 +47,7 @@ import static java.util.Objects.requireNonNull;
 public class StructColumnWriter
         implements ColumnWriter
 {
-    private static final int INSTANCE_SIZE = ClassLayout.parseClass(StructColumnWriter.class).instanceSize();
+    private static final int INSTANCE_SIZE = instanceSize(StructColumnWriter.class);
     private static final ColumnEncoding COLUMN_ENCODING = new ColumnEncoding(DIRECT, 0);
 
     private final OrcColumnId columnId;
@@ -89,7 +89,7 @@ public class StructColumnWriter
         structFields.stream()
                 .map(ColumnWriter::getColumnEncodings)
                 .forEach(encodings::putAll);
-        return encodings.build();
+        return encodings.buildOrThrow();
     }
 
     @Override
@@ -135,7 +135,7 @@ public class StructColumnWriter
     public Map<OrcColumnId, ColumnStatistics> finishRowGroup()
     {
         checkState(!closed);
-        ColumnStatistics statistics = new ColumnStatistics((long) nonNullValueCount, 0, null, null, null, null, null, null, null, null, null);
+        ColumnStatistics statistics = new ColumnStatistics((long) nonNullValueCount, 0, null, null, null, null, null, null, null, null, null, null);
         rowGroupColumnStatistics.add(statistics);
         nonNullValueCount = 0;
 
@@ -144,7 +144,7 @@ public class StructColumnWriter
         structFields.stream()
                 .map(ColumnWriter::finishRowGroup)
                 .forEach(columnStatistics::putAll);
-        return columnStatistics.build();
+        return columnStatistics.buildOrThrow();
     }
 
     @Override
@@ -164,7 +164,7 @@ public class StructColumnWriter
         structFields.stream()
                 .map(ColumnWriter::getColumnStripeStatistics)
                 .forEach(columnStatistics::putAll);
-        return columnStatistics.build();
+        return columnStatistics.buildOrThrow();
     }
 
     @Override

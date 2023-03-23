@@ -22,7 +22,8 @@ import io.airlift.http.client.testing.TestingHttpClient;
 import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
 import io.trino.FeaturesConfig.DataIntegrityVerification;
-import io.trino.execution.Lifespan;
+import io.trino.exchange.DirectExchangeInput;
+import io.trino.exchange.ExchangeManagerRegistry;
 import io.trino.execution.StageId;
 import io.trino.execution.TaskId;
 import io.trino.execution.buffer.PagesSerdeFactory;
@@ -38,7 +39,6 @@ import org.testng.annotations.BeforeClass;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 
-import java.net.URI;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
@@ -50,7 +50,8 @@ import static com.google.common.collect.Iterables.getOnlyElement;
 import static io.airlift.concurrent.Threads.daemonThreadsNamed;
 import static io.airlift.units.DataSize.Unit.MEGABYTE;
 import static io.trino.SessionTestUtils.TEST_SESSION;
-import static io.trino.operator.ExchangeOperator.REMOTE_CONNECTOR_ID;
+import static io.trino.collect.cache.SafeCaches.buildNonEvictableCacheWithWeakInvalidateAll;
+import static io.trino.operator.ExchangeOperator.REMOTE_CATALOG_HANDLE;
 import static io.trino.operator.PageAssertions.assertPageEquals;
 import static io.trino.operator.TestingTaskBuffer.PAGE;
 import static io.trino.spi.type.VarcharType.VARCHAR;
@@ -70,12 +71,13 @@ public class TestExchangeOperator
     private static final TaskId TASK_2_ID = new TaskId(new StageId("query", 0), 1, 0);
     private static final TaskId TASK_3_ID = new TaskId(new StageId("query", 0), 2, 0);
 
-    private final LoadingCache<TaskId, TestingTaskBuffer> taskBuffers = CacheBuilder.newBuilder().build(CacheLoader.from(TestingTaskBuffer::new));
+    private final LoadingCache<TaskId, TestingTaskBuffer> taskBuffers = buildNonEvictableCacheWithWeakInvalidateAll(
+            CacheBuilder.newBuilder(), CacheLoader.from(TestingTaskBuffer::new));
 
     private ScheduledExecutorService scheduler;
     private ScheduledExecutorService scheduledExecutor;
     private HttpClient httpClient;
-    private ExchangeClientSupplier exchangeClientSupplier;
+    private DirectExchangeClientSupplier directExchangeClientSupplier;
     private ExecutorService pageBufferClientCallbackExecutor;
 
     @SuppressWarnings("resource")
@@ -85,19 +87,19 @@ public class TestExchangeOperator
         scheduler = newScheduledThreadPool(4, daemonThreadsNamed(getClass().getSimpleName() + "-%s"));
         scheduledExecutor = newScheduledThreadPool(2, daemonThreadsNamed(getClass().getSimpleName() + "-scheduledExecutor-%s"));
         pageBufferClientCallbackExecutor = Executors.newSingleThreadExecutor();
-        httpClient = new TestingHttpClient(new TestingExchangeHttpClientHandler(taskBuffers), scheduler);
+        httpClient = new TestingHttpClient(new TestingExchangeHttpClientHandler(taskBuffers, SERDE_FACTORY), scheduler);
 
-        exchangeClientSupplier = (systemMemoryUsageListener, taskFailureListener, retryPolicy) -> new ExchangeClient(
+        directExchangeClientSupplier = (queryId, exchangeId, memoryContext, taskFailureListener, retryPolicy) -> new DirectExchangeClient(
                 "localhost",
                 DataIntegrityVerification.ABORT,
-                new StreamingExchangeClientBuffer(scheduler, DataSize.of(32, MEGABYTE)),
+                new StreamingDirectExchangeBuffer(scheduler, DataSize.of(32, MEGABYTE)),
                 DataSize.of(10, MEGABYTE),
                 3,
                 new Duration(1, TimeUnit.MINUTES),
                 true,
                 httpClient,
                 scheduler,
-                systemMemoryUsageListener,
+                memoryContext,
                 pageBufferClientCallbackExecutor,
                 taskFailureListener);
     }
@@ -121,6 +123,7 @@ public class TestExchangeOperator
     @BeforeMethod
     public void setUpMethod()
     {
+        // the test class is single-threaded, so there should be no ongoing loads and invalidation should be effective
         taskBuffers.invalidateAll();
     }
 
@@ -149,7 +152,7 @@ public class TestExchangeOperator
 
     private static Split newRemoteSplit(TaskId taskId)
     {
-        return new Split(REMOTE_CONNECTOR_ID, new RemoteSplit(taskId, URI.create("http://localhost/" + taskId)), Lifespan.taskWide());
+        return new Split(REMOTE_CATALOG_HANDLE, new RemoteSplit(new DirectExchangeInput(taskId, "http://localhost/" + taskId)));
     }
 
     @Test
@@ -254,14 +257,20 @@ public class TestExchangeOperator
 
     private SourceOperator createExchangeOperator()
     {
-        ExchangeOperatorFactory operatorFactory = new ExchangeOperatorFactory(0, new PlanNodeId("test"), exchangeClientSupplier, SERDE_FACTORY, RetryPolicy.NONE);
+        ExchangeOperatorFactory operatorFactory = new ExchangeOperatorFactory(
+                0,
+                new PlanNodeId("test"),
+                directExchangeClientSupplier,
+                SERDE_FACTORY,
+                RetryPolicy.NONE,
+                new ExchangeManagerRegistry());
 
         DriverContext driverContext = createTaskContext(scheduler, scheduledExecutor, TEST_SESSION)
                 .addPipelineContext(0, true, true, false)
                 .addDriverContext();
 
         SourceOperator operator = operatorFactory.createOperator(driverContext);
-        assertEquals(getOnlyElement(operator.getOperatorContext().getNestedOperatorStats()).getSystemMemoryReservation().toBytes(), 0);
+        operatorFactory.noMoreOperators();
         return operator;
     }
 
@@ -278,13 +287,11 @@ public class TestExchangeOperator
                 break;
             }
 
-            if (operator.getOperatorContext().getDriverContext().getPipelineContext().getPipelineStats().getSystemMemoryReservation().toBytes() > 0) {
+            if (operator.getOperatorContext().getDriverContext().getPipelineContext().getPipelineStats().getUserMemoryReservation().toBytes() > 0) {
                 greaterThanZero = true;
                 break;
             }
-            else {
-                Thread.sleep(10);
-            }
+            Thread.sleep(10);
         }
         assertTrue(greaterThanZero);
 
@@ -316,13 +323,11 @@ public class TestExchangeOperator
             assertPageEquals(TYPES, page, PAGE);
         }
 
-        assertEquals(getOnlyElement(operator.getOperatorContext().getNestedOperatorStats()).getSystemMemoryReservation().toBytes(), 0);
-
         return outputPages;
     }
 
     private static void waitForFinished(Operator operator)
-            throws InterruptedException
+            throws Exception
     {
         // wait for finished or until 10 seconds has passed
         long endTime = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
@@ -339,6 +344,10 @@ public class TestExchangeOperator
         assertEquals(operator.isFinished(), true);
         assertEquals(operator.needsInput(), false);
         assertNull(operator.getOutput());
-        assertEquals(getOnlyElement(operator.getOperatorContext().getNestedOperatorStats()).getSystemMemoryReservation().toBytes(), 0);
+
+        operator.close();
+        operator.getOperatorContext().destroy();
+
+        assertEquals(getOnlyElement(operator.getOperatorContext().getNestedOperatorStats()).getUserMemoryReservation().toBytes(), 0);
     }
 }

@@ -21,7 +21,9 @@ import com.google.common.collect.ImmutableSet;
 import com.google.common.net.HostAndPort;
 import io.airlift.units.Duration;
 import io.trino.client.ClientSession;
+import io.trino.client.auth.external.ExternalRedirectStrategy;
 import okhttp3.logging.HttpLoggingInterceptor;
+import org.jline.reader.LineReader;
 
 import java.net.URI;
 import java.net.URISyntaxException;
@@ -37,7 +39,6 @@ import java.util.Set;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Strings.nullToEmpty;
 import static io.trino.client.KerberosUtil.defaultCredentialCachePath;
-import static java.util.Collections.emptyMap;
 import static java.util.Locale.ENGLISH;
 import static java.util.Objects.requireNonNull;
 import static picocli.CommandLine.Option;
@@ -90,6 +91,9 @@ public class ClientOptions
     @Option(names = "--truststore-type", paramLabel = "<type>", description = "Truststore type")
     public Optional<String> truststoreType;
 
+    @Option(names = "--use-system-truststore", description = "Use default system (OS) truststore")
+    public boolean useSystemTruststore;
+
     @Option(names = "--insecure", description = "Skip validation of HTTP server certificates (should only be used for debugging)")
     public boolean insecure;
 
@@ -104,6 +108,9 @@ public class ClientOptions
 
     @Option(names = "--external-authentication", paramLabel = "<externalAuthentication>", description = "Enable external authentication")
     public boolean externalAuthentication;
+
+    @Option(names = "--external-authentication-redirect-handler", paramLabel = "<externalAuthenticationRedirectHandler>", description = "External authentication redirect handlers: ${COMPLETION-CANDIDATES} " + DEFAULT_VALUE, defaultValue = "ALL")
+    public List<ExternalRedirectStrategy> externalAuthenticationRedirectHandler = new ArrayList<>();
 
     @Option(names = "--source", paramLabel = "<source>", defaultValue = "trino-cli", description = "Name of source making query " + DEFAULT_VALUE)
     public String source;
@@ -129,17 +136,26 @@ public class ClientOptions
     @Option(names = "--debug", paramLabel = "<debug>", description = "Enable debug information")
     public boolean debug;
 
+    @Option(names = "--history-file", paramLabel = "<historyFile>", defaultValue = "${env:TRINO_HISTORY_FILE:-${sys:user.home}/.trino_history}", description = "Path to the history file " + DEFAULT_VALUE)
+    public String historyFile;
+
     @Option(names = "--network-logging", paramLabel = "<level>", defaultValue = "NONE", description = "Network logging level [${COMPLETION-CANDIDATES}] " + DEFAULT_VALUE)
     public HttpLoggingInterceptor.Level networkLogging;
 
-    @Option(names = "--progress", paramLabel = "<progress>", description = "Show query progress in batch mode")
-    public boolean progress;
+    @Option(names = "--progress", paramLabel = "<progress>", description = "Show query progress", negatable = true)
+    public Optional<Boolean> progress;
 
     @Option(names = "--execute", paramLabel = "<execute>", description = "Execute specified statements and exit")
     public String execute;
 
     @Option(names = "--output-format", paramLabel = "<format>", defaultValue = "CSV", description = "Output format for batch mode [${COMPLETION-CANDIDATES}] " + DEFAULT_VALUE)
     public OutputFormat outputFormat;
+
+    @Option(names = "--output-format-interactive", paramLabel = "<format>", defaultValue = "ALIGNED", description = "Output format for interactive mode [${COMPLETION-CANDIDATES}] " + DEFAULT_VALUE)
+    public OutputFormat outputFormatInteractive;
+
+    @Option(names = "--pager", paramLabel = "<pager>", defaultValue = "${env:TRINO_PAGER}", description = "Path to the pager program used to display the query results")
+    public Optional<String> pager;
 
     @Option(names = "--resource-estimate", paramLabel = "<estimate>", description = "Resource estimate (property can be used multiple times; format is key=value)")
     public final List<ClientResourceEstimate> resourceEstimates = new ArrayList<>();
@@ -171,8 +187,15 @@ public class ClientOptions
     @Option(names = "--disable-compression", description = "Disable compression of query results")
     public boolean disableCompression;
 
+    @Option(names = "--editing-mode", paramLabel = "<editing-mode>", defaultValue = "EMACS", description = "Editing mode [${COMPLETION-CANDIDATES}] " + DEFAULT_VALUE)
+    public EditingMode editingMode;
+
+    @Option(names = "--disable-auto-suggestion", description = "Disable auto suggestion")
+    public boolean disableAutoSuggestion;
+
     public enum OutputFormat
     {
+        AUTO,
         ALIGNED,
         VERTICAL,
         TSV,
@@ -185,29 +208,45 @@ public class ClientOptions
         NULL
     }
 
+    public enum EditingMode
+    {
+        EMACS(LineReader.EMACS),
+        VI(LineReader.VIINS);
+
+        private final String keyMap;
+
+        EditingMode(String keyMap)
+        {
+            this.keyMap = keyMap;
+        }
+
+        public String getKeyMap()
+        {
+            return keyMap;
+        }
+    }
+
     public ClientSession toClientSession()
     {
-        return new ClientSession(
-                parseServer(server),
-                user.orElse(null),
-                sessionUser,
-                source,
-                Optional.ofNullable(traceToken),
-                parseClientTags(nullToEmpty(clientTags)),
-                clientInfo,
-                catalog,
-                schema,
-                null,
-                timeZone,
-                Locale.getDefault(),
-                toResourceEstimates(resourceEstimates),
-                toProperties(sessionProperties),
-                emptyMap(),
-                emptyMap(),
-                toExtraCredentials(extraCredentials),
-                null,
-                clientRequestTimeout,
-                disableCompression);
+        return ClientSession.builder()
+                .server(parseServer(server))
+                .principal(user)
+                .user(sessionUser)
+                .source(source)
+                .traceToken(Optional.ofNullable(traceToken))
+                .clientTags(parseClientTags(nullToEmpty(clientTags)))
+                .clientInfo(clientInfo)
+                .catalog(catalog)
+                .schema(schema)
+                .timeZone(timeZone)
+                .locale(Locale.getDefault())
+                .resourceEstimates(toResourceEstimates(resourceEstimates))
+                .properties(toProperties(sessionProperties))
+                .credentials(toExtraCredentials(extraCredentials))
+                .transactionId(null)
+                .clientRequestTimeout(clientRequestTimeout)
+                .compressionDisabled(disableCompression)
+                .build();
     }
 
     public static URI parseServer(String server)
@@ -244,7 +283,7 @@ public class ClientOptions
             }
             builder.put(name, sessionProperty.getValue());
         }
-        return builder.build();
+        return builder.buildOrThrow();
     }
 
     public static Map<String, String> toResourceEstimates(List<ClientResourceEstimate> estimates)
@@ -253,7 +292,7 @@ public class ClientOptions
         for (ClientResourceEstimate estimate : estimates) {
             builder.put(estimate.getResource(), estimate.getEstimate());
         }
-        return builder.build();
+        return builder.buildOrThrow();
     }
 
     public static Map<String, String> toExtraCredentials(List<ClientExtraCredential> extraCredentials)
@@ -262,7 +301,7 @@ public class ClientOptions
         for (ClientExtraCredential credential : extraCredentials) {
             builder.put(credential.getName(), credential.getValue());
         }
-        return builder.build();
+        return builder.buildOrThrow();
     }
 
     public static final class ClientResourceEstimate

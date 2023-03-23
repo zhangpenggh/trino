@@ -23,16 +23,19 @@ import io.airlift.http.client.Response;
 import io.airlift.http.client.testing.TestingHttpClient;
 import io.airlift.http.client.testing.TestingResponse;
 import io.airlift.slice.DynamicSliceOutput;
+import io.airlift.slice.Slice;
 import io.airlift.units.DataSize;
 import io.trino.execution.buffer.BufferResult;
-import io.trino.execution.buffer.PagesSerde;
-import io.trino.execution.buffer.SerializedPage;
+import io.trino.execution.buffer.PageSerializer;
+import io.trino.execution.buffer.PagesSerdeFactory;
+import io.trino.execution.buffer.TestingPagesSerdeFactory;
 import io.trino.server.InternalHeaders;
 import io.trino.spi.Page;
 
 import java.net.URI;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
@@ -43,9 +46,8 @@ import java.util.concurrent.atomic.AtomicReference;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.net.HttpHeaders.CONTENT_TYPE;
 import static io.trino.TrinoMediaTypes.TRINO_PAGES;
+import static io.trino.collect.cache.SafeCaches.buildNonEvictableCache;
 import static io.trino.execution.buffer.PagesSerdeUtil.calculateChecksum;
-import static io.trino.execution.buffer.PagesSerdeUtil.writeSerializedPages;
-import static io.trino.execution.buffer.TestingPagesSerdeFactory.testingPagesSerde;
 import static io.trino.server.InternalHeaders.TRINO_BUFFER_COMPLETE;
 import static io.trino.server.InternalHeaders.TRINO_PAGE_NEXT_TOKEN;
 import static io.trino.server.InternalHeaders.TRINO_PAGE_TOKEN;
@@ -59,9 +61,10 @@ public class MockExchangeRequestProcessor
         implements TestingHttpClient.Processor
 {
     private static final String TASK_INSTANCE_ID = "task-instance-id";
-    private static final PagesSerde PAGES_SERDE = testingPagesSerde();
 
-    private final LoadingCache<URI, MockBuffer> buffers = CacheBuilder.newBuilder().build(CacheLoader.from(MockBuffer::new));
+    private final PagesSerdeFactory serdeFactory = new TestingPagesSerdeFactory();
+
+    private final LoadingCache<URI, MockBuffer> buffers = buildNonEvictableCache(CacheBuilder.newBuilder(), CacheLoader.from(location -> new MockBuffer(location, serdeFactory.createSerializer(Optional.empty()))));
 
     private final DataSize expectedMaxSize;
 
@@ -75,7 +78,7 @@ public class MockExchangeRequestProcessor
         buffers.getUnchecked(location).addPage(page);
     }
 
-    public void addPage(URI location, SerializedPage page)
+    public void addPage(URI location, Slice page)
     {
         buffers.getUnchecked(location).addPage(page);
     }
@@ -114,7 +117,9 @@ public class MockExchangeRequestProcessor
             sliceOutput.writeInt(SERIALIZED_PAGES_MAGIC);
             sliceOutput.writeLong(calculateChecksum(result.getSerializedPages()));
             sliceOutput.writeInt(result.getSerializedPages().size());
-            writeSerializedPages(sliceOutput, result.getSerializedPages());
+            for (Slice page : result.getSerializedPages()) {
+                sliceOutput.writeBytes(page);
+            }
             bytes = sliceOutput.slice().getBytes();
             status = HttpStatus.OK;
         }
@@ -162,14 +167,16 @@ public class MockExchangeRequestProcessor
     private static class MockBuffer
     {
         private final URI location;
+        private final PageSerializer serializer;
         private final AtomicBoolean completed = new AtomicBoolean();
         private final AtomicLong token = new AtomicLong();
-        private final BlockingQueue<SerializedPage> serializedPages = new LinkedBlockingQueue<>();
+        private final BlockingQueue<Slice> serializedPages = new LinkedBlockingQueue<>();
         private final AtomicReference<RuntimeException> failure = new AtomicReference<>();
 
-        private MockBuffer(URI location)
+        private MockBuffer(URI location, PageSerializer serializer)
         {
             this.location = location;
+            this.serializer = serializer;
         }
 
         public void setCompleted()
@@ -177,7 +184,7 @@ public class MockExchangeRequestProcessor
             completed.set(true);
         }
 
-        public synchronized void addPage(SerializedPage page)
+        public synchronized void addPage(Slice page)
         {
             checkState(completed.get() != Boolean.TRUE, "Location %s is complete", location);
             serializedPages.add(page);
@@ -186,9 +193,7 @@ public class MockExchangeRequestProcessor
         public synchronized void addPage(Page page)
         {
             checkState(completed.get() != Boolean.TRUE, "Location %s is complete", location);
-            try (PagesSerde.PagesSerdeContext context = PAGES_SERDE.newContext()) {
-                serializedPages.add(PAGES_SERDE.serialize(context, page));
-            }
+            serializedPages.add(serializer.serialize(page));
         }
 
         public void setFailed(RuntimeException t)
@@ -211,7 +216,7 @@ public class MockExchangeRequestProcessor
             assertEquals(sequenceId, token.get(), "token");
 
             // wait for a single page to arrive
-            SerializedPage serializedPage = null;
+            Slice serializedPage = null;
             try {
                 serializedPage = serializedPages.poll(10, TimeUnit.MILLISECONDS);
             }
@@ -225,16 +230,16 @@ public class MockExchangeRequestProcessor
             }
 
             // add serializedPages up to the size limit
-            List<SerializedPage> responsePages = new ArrayList<>();
+            List<Slice> responsePages = new ArrayList<>();
             responsePages.add(serializedPage);
-            long responseSize = serializedPage.getSizeInBytes();
+            long responseSize = serializedPage.length();
             while (responseSize < maxSize.toBytes()) {
                 serializedPage = serializedPages.poll();
                 if (serializedPage == null) {
                     break;
                 }
                 responsePages.add(serializedPage);
-                responseSize += serializedPage.getSizeInBytes();
+                responseSize += serializedPage.length();
             }
 
             // update sequence id

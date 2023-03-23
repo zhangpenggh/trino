@@ -14,13 +14,17 @@
 package io.trino.type;
 
 import com.google.common.collect.ImmutableSet;
-import io.trino.metadata.Metadata;
+import io.trino.FeaturesConfig;
 import io.trino.metadata.TestingFunctionResolution;
+import io.trino.metadata.TypeRegistry;
 import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.Type;
+import io.trino.spi.type.TypeManager;
+import io.trino.spi.type.TypeOperators;
 import io.trino.spi.type.TypeSignature;
 import org.testng.annotations.Test;
 
+import java.util.Collection;
 import java.util.Optional;
 import java.util.Set;
 
@@ -35,10 +39,14 @@ import static io.trino.spi.type.RowType.anonymousRow;
 import static io.trino.spi.type.RowType.field;
 import static io.trino.spi.type.RowType.rowType;
 import static io.trino.spi.type.SmallintType.SMALLINT;
-import static io.trino.spi.type.TimeType.TIME;
-import static io.trino.spi.type.TimeWithTimeZoneType.TIME_WITH_TIME_ZONE;
+import static io.trino.spi.type.TimeType.TIME_MILLIS;
+import static io.trino.spi.type.TimeType.createTimeType;
+import static io.trino.spi.type.TimeWithTimeZoneType.TIME_TZ_MILLIS;
+import static io.trino.spi.type.TimeWithTimeZoneType.createTimeWithTimeZoneType;
 import static io.trino.spi.type.TimestampType.TIMESTAMP_MILLIS;
-import static io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_WITH_TIME_ZONE;
+import static io.trino.spi.type.TimestampType.createTimestampType;
+import static io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_MILLIS;
+import static io.trino.spi.type.TimestampWithTimeZoneType.createTimestampWithTimeZoneType;
 import static io.trino.spi.type.TinyintType.TINYINT;
 import static io.trino.spi.type.VarbinaryType.VARBINARY;
 import static io.trino.spi.type.VarcharType.VARCHAR;
@@ -58,9 +66,10 @@ import static org.testng.Assert.fail;
 public class TestTypeCoercion
 {
     private final TestingFunctionResolution functionResolution = new TestingFunctionResolution();
-    private final Metadata metadata = functionResolution.getMetadata();
-    private final Type re2jType = metadata.getType(RE2J_REGEXP_SIGNATURE);
-    private final TypeCoercion typeCoercion = new TypeCoercion(metadata::getType);
+    private final TypeManager typeManager = functionResolution.getPlannerContext().getTypeManager();
+    private final Collection<Type> standardTypes = new TypeRegistry(new TypeOperators(), new FeaturesConfig()).getTypes();
+    private final Type re2jType = typeManager.getType(RE2J_REGEXP_SIGNATURE);
+    private final TypeCoercion typeCoercion = new TypeCoercion(typeManager::getType);
 
     @Test
     public void testIsTypeOnlyCoercion()
@@ -108,7 +117,7 @@ public class TestTypeCoercion
 
     private Type mapType(Type keyType, Type valueType)
     {
-        return metadata.getType(TypeSignature.mapType(keyType.getTypeSignature(), valueType.getTypeSignature()));
+        return typeManager.getType(TypeSignature.mapType(keyType.getTypeSignature(), valueType.getTypeSignature()));
     }
 
     @Test
@@ -119,10 +128,21 @@ public class TestTypeCoercion
         assertThat(UNKNOWN, BIGINT).hasCommonSuperType(BIGINT).canCoerceFirstToSecondOnly();
 
         assertThat(BIGINT, DOUBLE).hasCommonSuperType(DOUBLE).canCoerceFirstToSecondOnly();
+
+        // date / timestamp
+        assertThat(DATE, createTimestampType(0)).hasCommonSuperType(createTimestampType(0));
+        assertThat(DATE, createTimestampType(2)).hasCommonSuperType(createTimestampType(2));
         assertThat(DATE, TIMESTAMP_MILLIS).hasCommonSuperType(TIMESTAMP_MILLIS).canCoerceFirstToSecondOnly();
-        assertThat(DATE, TIMESTAMP_WITH_TIME_ZONE).hasCommonSuperType(TIMESTAMP_WITH_TIME_ZONE).canCoerceFirstToSecondOnly();
-        assertThat(TIME, TIME_WITH_TIME_ZONE).hasCommonSuperType(TIME_WITH_TIME_ZONE).canCoerceFirstToSecondOnly();
-        assertThat(TIMESTAMP_MILLIS, TIMESTAMP_WITH_TIME_ZONE).hasCommonSuperType(TIMESTAMP_WITH_TIME_ZONE).canCoerceFirstToSecondOnly();
+        assertThat(DATE, createTimestampType(7)).hasCommonSuperType(createTimestampType(7));
+
+        // date / timestamp with time zone
+        assertThat(DATE, createTimestampWithTimeZoneType(0)).hasCommonSuperType(createTimestampWithTimeZoneType(0));
+        assertThat(DATE, createTimestampWithTimeZoneType(2)).hasCommonSuperType(createTimestampWithTimeZoneType(2));
+        assertThat(DATE, TIMESTAMP_TZ_MILLIS).hasCommonSuperType(TIMESTAMP_TZ_MILLIS).canCoerceFirstToSecondOnly();
+        assertThat(DATE, createTimestampWithTimeZoneType(7)).hasCommonSuperType(createTimestampWithTimeZoneType(7));
+
+        assertThat(TIME_MILLIS, TIME_TZ_MILLIS).hasCommonSuperType(TIME_TZ_MILLIS).canCoerceFirstToSecondOnly();
+        assertThat(TIMESTAMP_MILLIS, TIMESTAMP_TZ_MILLIS).hasCommonSuperType(TIMESTAMP_TZ_MILLIS).canCoerceFirstToSecondOnly();
         assertThat(VARCHAR, JONI_REGEXP).hasCommonSuperType(JONI_REGEXP).canCoerceFirstToSecondOnly();
         assertThat(VARCHAR, re2jType).hasCommonSuperType(re2jType).canCoerceFirstToSecondOnly();
         assertThat(VARCHAR, JSON_PATH).hasCommonSuperType(JSON_PATH).canCoerceFirstToSecondOnly();
@@ -133,7 +153,7 @@ public class TestTypeCoercion
         assertThat(REAL, INTEGER).hasCommonSuperType(REAL).canCoerceSecondToFirstOnly();
         assertThat(REAL, BIGINT).hasCommonSuperType(REAL).canCoerceSecondToFirstOnly();
 
-        assertThat(TIMESTAMP_MILLIS, TIME_WITH_TIME_ZONE).isIncompatible();
+        assertThat(TIMESTAMP_MILLIS, TIME_TZ_MILLIS).isIncompatible();
         assertThat(VARBINARY, VARCHAR).isIncompatible();
 
         assertThat(UNKNOWN, new ArrayType(BIGINT)).hasCommonSuperType(new ArrayType(BIGINT)).canCoerceFirstToSecondOnly();
@@ -141,6 +161,20 @@ public class TestTypeCoercion
         assertThat(new ArrayType(BIGINT), new ArrayType(UNKNOWN)).hasCommonSuperType(new ArrayType(BIGINT)).canCoerceSecondToFirstOnly();
         assertThat(mapType(BIGINT, DOUBLE), mapType(BIGINT, DOUBLE)).hasCommonSuperType(mapType(BIGINT, DOUBLE)).canCoerceToEachOther();
         assertThat(mapType(BIGINT, DOUBLE), mapType(DOUBLE, DOUBLE)).hasCommonSuperType(mapType(DOUBLE, DOUBLE)).canCoerceFirstToSecondOnly();
+
+        // time / time
+        assertThat(createTimeType(5), createTimeType(9)).hasCommonSuperType(createTimeType(9));
+        assertThat(createTimeType(9), createTimeType(5)).hasCommonSuperType(createTimeType(9));
+
+        // time / time with time zone
+        assertThat(createTimeType(5), createTimeWithTimeZoneType(9)).hasCommonSuperType(createTimeWithTimeZoneType(9));
+        assertThat(createTimeType(9), createTimeWithTimeZoneType(5)).hasCommonSuperType(createTimeWithTimeZoneType(9));
+        assertThat(createTimeWithTimeZoneType(5), createTimeType(9)).hasCommonSuperType(createTimeWithTimeZoneType(9));
+        assertThat(createTimeWithTimeZoneType(9), createTimeType(5)).hasCommonSuperType(createTimeWithTimeZoneType(9));
+
+        // time with time zone / time with time zone
+        assertThat(createTimeWithTimeZoneType(5), createTimeWithTimeZoneType(9)).hasCommonSuperType(createTimeWithTimeZoneType(9));
+        assertThat(createTimeWithTimeZoneType(9), createTimeWithTimeZoneType(5)).hasCommonSuperType(createTimeWithTimeZoneType(9));
 
         assertThat(
                 rowType(field("a", BIGINT), field("b", DOUBLE), field("c", VARCHAR)),
@@ -312,7 +346,7 @@ public class TestTypeCoercion
     {
         ImmutableSet.Builder<Type> builder = ImmutableSet.builder();
         // add unparametrized types
-        builder.addAll(metadata.getTypes());
+        builder.addAll(standardTypes);
         // add corner cases for parametrized types
         builder.add(createDecimalType(1, 0));
         builder.add(createDecimalType(17, 0));

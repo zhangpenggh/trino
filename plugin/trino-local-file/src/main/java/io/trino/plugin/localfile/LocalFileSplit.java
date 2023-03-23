@@ -22,11 +22,14 @@ import io.trino.spi.connector.ConnectorSplit;
 import java.util.List;
 
 import static com.google.common.base.MoreObjects.toStringHelper;
+import static io.airlift.slice.SizeOf.instanceSize;
 import static java.util.Objects.requireNonNull;
 
 public class LocalFileSplit
         implements ConnectorSplit
 {
+    private static final int INSTANCE_SIZE = instanceSize(LocalFileSplit.class);
+
     private final HostAddress address;
 
     @JsonCreator
@@ -57,6 +60,13 @@ public class LocalFileSplit
     public Object getInfo()
     {
         return this;
+    }
+
+    @Override
+    public long getRetainedSizeInBytes()
+    {
+        return INSTANCE_SIZE
+                + address.getRetainedSizeInBytes();
     }
 
     @Override

@@ -17,29 +17,26 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import io.trino.Session;
 import io.trino.plugin.jdbc.BaseJdbcConnectorTest;
-import io.trino.plugin.jdbc.JdbcColumnHandle;
 import io.trino.plugin.jdbc.JdbcTableHandle;
-import io.trino.spi.connector.ColumnHandle;
-import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.sql.planner.plan.FilterNode;
 import io.trino.testing.TestingConnectorBehavior;
 import io.trino.testing.sql.TestTable;
+import io.trino.testng.services.Flaky;
+import org.testng.SkipException;
 import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
 import java.util.List;
 import java.util.Optional;
+import java.util.OptionalInt;
 
-import static com.google.common.collect.MoreCollectors.onlyElement;
-import static io.airlift.slice.Slices.utf8Slice;
 import static io.trino.plugin.sqlserver.DataCompression.NONE;
 import static io.trino.plugin.sqlserver.DataCompression.PAGE;
 import static io.trino.plugin.sqlserver.DataCompression.ROW;
-import static io.trino.spi.type.VarcharType.createVarcharType;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.node;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.tableScan;
-import static io.trino.testing.sql.TestTable.randomTableSuffix;
+import static io.trino.testing.TestingNames.randomNameSuffix;
 import static java.lang.String.format;
 import static java.util.stream.Collectors.joining;
 import static java.util.stream.IntStream.range;
@@ -50,22 +47,37 @@ import static org.testng.Assert.assertTrue;
 public abstract class BaseSqlServerConnectorTest
         extends BaseJdbcConnectorTest
 {
+    @SuppressWarnings("DuplicateBranchesInSwitch")
     @Override
     protected boolean hasBehavior(TestingConnectorBehavior connectorBehavior)
     {
         switch (connectorBehavior) {
+            case SUPPORTS_JOIN_PUSHDOWN_WITH_VARCHAR_EQUALITY:
             case SUPPORTS_PREDICATE_PUSHDOWN_WITH_VARCHAR_EQUALITY:
+                return true;
             case SUPPORTS_PREDICATE_PUSHDOWN_WITH_VARCHAR_INEQUALITY:
                 return false;
 
+            case SUPPORTS_PREDICATE_EXPRESSION_PUSHDOWN:
             case SUPPORTS_AGGREGATION_PUSHDOWN_STDDEV:
             case SUPPORTS_AGGREGATION_PUSHDOWN_VARIANCE:
                 return true;
 
             case SUPPORTS_JOIN_PUSHDOWN:
                 return true;
-
             case SUPPORTS_JOIN_PUSHDOWN_WITH_DISTINCT_FROM:
+                return false;
+
+            case SUPPORTS_RENAME_SCHEMA:
+                return false;
+
+            case SUPPORTS_CREATE_TABLE_WITH_TABLE_COMMENT:
+            case SUPPORTS_CREATE_TABLE_WITH_COLUMN_COMMENT:
+            case SUPPORTS_RENAME_TABLE_ACROSS_SCHEMAS:
+                return false;
+
+            case SUPPORTS_ADD_COLUMN_WITH_COMMENT:
+            case SUPPORTS_SET_COLUMN_TYPE:
                 return false;
 
             case SUPPORTS_COMMENT_ON_TABLE:
@@ -73,12 +85,8 @@ public abstract class BaseSqlServerConnectorTest
                 return false;
 
             case SUPPORTS_ARRAY:
-                return false;
-
-            case SUPPORTS_RENAME_TABLE_ACROSS_SCHEMAS:
-                return false;
-
-            case SUPPORTS_RENAME_SCHEMA:
+            case SUPPORTS_ROW_TYPE:
+            case SUPPORTS_NEGATIVE_DATE:
                 return false;
 
             default:
@@ -118,7 +126,8 @@ public abstract class BaseSqlServerConnectorTest
                 return Optional.empty();
             }
         }
-        if (typeName.equals("timestamp(3) with time zone")) {
+        if (typeName.equals("timestamp(3) with time zone") ||
+                typeName.equals("timestamp(6) with time zone")) {
             return Optional.of(dataMappingTestSetup.asUnsupported());
         }
 
@@ -134,9 +143,52 @@ public abstract class BaseSqlServerConnectorTest
         onRemoteDatabase().execute("DROP VIEW IF EXISTS test_view");
     }
 
+    // TODO (https://github.com/trinodb/trino/issues/10846): Test is expected to be flaky because tests execute in parallel
+    @Flaky(issue = "https://github.com/trinodb/trino/issues/10846", match = "was deadlocked on lock resources with another process and has been chosen as the deadlock victim")
+    @Test
+    @Override
+    public void testSelectInformationSchemaColumns()
+    {
+        super.testSelectInformationSchemaColumns();
+    }
+
+    @Test
+    @Override
+    public void testReadMetadataWithRelationsConcurrentModifications()
+    {
+        try {
+            super.testReadMetadataWithRelationsConcurrentModifications();
+        }
+        catch (Exception expected) {
+            // The test failure is not guaranteed
+            assertThat(expected)
+                    .hasMessageMatching("(?s).*(" +
+                            "No task completed before timeout|" +
+                            "was deadlocked on lock resources with another process and has been chosen as the deadlock victim|" +
+                            // E.g. system.metadata.table_comments can return empty results, when underlying metadata list tables call fails
+                            "Expecting actual not to be empty).*");
+            throw new SkipException("to be fixed");
+        }
+    }
+
+    @Override
+    protected void verifyAddNotNullColumnToNonEmptyTableFailurePermissible(Throwable e)
+    {
+        assertThat(e).hasMessageMatching(
+                "ALTER TABLE only allows columns to be added that can contain nulls, " +
+                        "or have a DEFAULT definition specified, or the column being added is an identity or timestamp column, " +
+                        "or alternatively if none of the previous conditions are satisfied the table must be empty to allow addition of this column\\. " +
+                        "Column '.*' cannot be added to non-empty table '.*' because it does not satisfy these conditions\\.");
+    }
+
+    @Override
+    protected void verifyConcurrentAddColumnFailurePermissible(Exception e)
+    {
+        assertThat(e).hasMessageContaining("was deadlocked on lock resources");
+    }
+
     @Test
     public void testColumnComment()
-            throws Exception
     {
         try (TestTable testTable = new TestTable(onRemoteDatabase(), "test_column_comment", "(col1 bigint, col2 bigint, col3 bigint)")) {
             onRemoteDatabase().execute("" +
@@ -155,48 +207,48 @@ public abstract class BaseSqlServerConnectorTest
 
     @Test
     public void testPredicatePushdown()
-            throws Exception
     {
+        // varchar inequality
+        assertThat(query("SELECT regionkey, nationkey, name FROM nation WHERE name != 'ROMANIA' AND name != 'ALGERIA'"))
+                .isFullyPushedDown();
+
         // varchar equality
         assertThat(query("SELECT regionkey, nationkey, name FROM nation WHERE name = 'ROMANIA'"))
                 .matches("VALUES (BIGINT '3', BIGINT '19', CAST('ROMANIA' AS varchar(25)))")
-                // SQL Server is case insensitive by default
-                .isNotFullyPushedDown(FilterNode.class);
+                .isFullyPushedDown();
 
         // varchar range
         assertThat(query("SELECT regionkey, nationkey, name FROM nation WHERE name BETWEEN 'POLAND' AND 'RPA'"))
                 .matches("VALUES (BIGINT '3', BIGINT '19', CAST('ROMANIA' AS varchar(25)))")
-                // SQL Server is case insensitive by default
+                // We are not supporting range predicate pushdown for varchars
                 .isNotFullyPushedDown(FilterNode.class);
+
+        // varchar NOT IN
+        assertThat(query("SELECT regionkey, nationkey, name FROM nation WHERE name NOT IN ('POLAND', 'ROMANIA', 'VIETNAM')"))
+                .isFullyPushedDown();
+
+        // varchar NOT IN with small compaction threshold
+        assertThat(query(
+                Session.builder(getSession())
+                        .setCatalogSessionProperty("sqlserver", "domain_compaction_threshold", "1")
+                        .build(),
+                "SELECT regionkey, nationkey, name FROM nation WHERE name NOT IN ('POLAND', 'ROMANIA', 'VIETNAM')"))
+                // no pushdown because it was converted to range predicate
+                .isNotFullyPushedDown(
+                        node(
+                                FilterNode.class,
+                                // verify that no constraint is applied by the connector
+                                tableScan(
+                                        tableHandle -> ((JdbcTableHandle) tableHandle).getConstraint().isAll(),
+                                        TupleDomain.all(),
+                                        ImmutableMap.of())));
 
         // varchar IN without domain compaction
         assertThat(query("SELECT regionkey, nationkey, name FROM nation WHERE name IN ('POLAND', 'ROMANIA', 'VIETNAM')"))
                 .matches("VALUES " +
                         "(BIGINT '3', BIGINT '19', CAST('ROMANIA' AS varchar(25))), " +
                         "(BIGINT '2', BIGINT '21', CAST('VIETNAM' AS varchar(25)))")
-                // SQL Server is case insensitive by default
-                .isNotFullyPushedDown(
-                        node(
-                                FilterNode.class,
-                                // verify that pushed down constraint is applied by the connector
-                                tableScan(
-                                        tableHandle -> {
-                                            TupleDomain<ColumnHandle> constraint = ((JdbcTableHandle) tableHandle).getConstraint();
-                                            ColumnHandle nameColumn = constraint.getDomains().orElseThrow()
-                                                    .keySet().stream()
-                                                    .map(JdbcColumnHandle.class::cast)
-                                                    .filter(column -> column.getColumnName().equals("name"))
-                                                    .collect(onlyElement());
-                                            return constraint.getDomains().get().get(nameColumn)
-                                                    .equals(Domain.multipleValues(
-                                                            createVarcharType(25),
-                                                            ImmutableList.of(
-                                                                    utf8Slice("POLAND"),
-                                                                    utf8Slice("ROMANIA"),
-                                                                    utf8Slice("VIETNAM"))));
-                                        },
-                                        TupleDomain.all(),
-                                        ImmutableMap.of())));
+                .isFullyPushedDown();
 
         // varchar IN with small compaction threshold
         assertThat(query(
@@ -207,7 +259,7 @@ public abstract class BaseSqlServerConnectorTest
                 .matches("VALUES " +
                         "(BIGINT '3', BIGINT '19', CAST('ROMANIA' AS varchar(25))), " +
                         "(BIGINT '2', BIGINT '21', CAST('VIETNAM' AS varchar(25)))")
-                // SQL Server is case insensitive by default
+                // no pushdown because it was converted to range predicate
                 .isNotFullyPushedDown(
                         node(
                                 FilterNode.class,
@@ -220,8 +272,7 @@ public abstract class BaseSqlServerConnectorTest
         // varchar different case
         assertThat(query("SELECT regionkey, nationkey, name FROM nation WHERE name = 'romania'"))
                 .returnsEmptyResult()
-                // SQL Server is case insensitive by default
-                .isNotFullyPushedDown(FilterNode.class);
+                .isFullyPushedDown();
 
         // bigint equality
         assertThat(query("SELECT regionkey, nationkey, name FROM nation WHERE nationkey = 19"))
@@ -286,6 +337,86 @@ public abstract class BaseSqlServerConnectorTest
             assertThat(query("SELECT * FROM " + testTable.getName() + " WHERE long_decimal = 123456789.987654321"))
                     .matches("VALUES (CAST(123.321 AS decimal(9,3)), CAST(123456789.987654321 AS decimal(30, 10)))")
                     .isFullyPushedDown();
+
+            // varchar predicate over join
+            Session joinPushdownEnabled = joinPushdownEnabled(getSession());
+            assertThat(query(joinPushdownEnabled, "SELECT c.name, n.name FROM customer c JOIN nation n ON c.custkey = n.nationkey WHERE n.name = 'POLAND'"))
+                    .isFullyPushedDown();
+
+            // join on varchar columns
+            assertThat(query(joinPushdownEnabled, "SELECT n.name, n2.regionkey FROM nation n JOIN nation n2 ON n.name = n2.name"))
+                    .isFullyPushedDown();
+        }
+    }
+
+    @Test
+    public void testNoPushdownOnCaseInsensitiveVarcharColumn()
+    {
+        // if collation on column is caseinsensitive we should not apply pushdown
+        try (TestTable testTable = new TestTable(
+                onRemoteDatabase(),
+                "test_collate",
+                "(collate_column varchar(25) COLLATE Latin1_General_CI_AS)",
+                List.of("'collation'", "'no_collation'"))) {
+            assertThat(query("SELECT * FROM " + testTable.getName() + " WHERE collate_column = 'collation'"))
+                    .matches("VALUES " +
+                            "(CAST('collation' AS varchar(25)))")
+                    .isNotFullyPushedDown(FilterNode.class);
+            assertThat(query("SELECT * FROM " + testTable.getName() + " WHERE collate_column != 'collation'"))
+                    .matches("VALUES " +
+                            "(CAST('no_collation' AS varchar(25)))")
+                    .isNotFullyPushedDown(FilterNode.class);
+            assertThat(query("SELECT * FROM " + testTable.getName() + " WHERE collate_column > 'collation'"))
+                    .matches("VALUES " +
+                            "(CAST('no_collation' AS varchar(25)))")
+                    .isNotFullyPushedDown(FilterNode.class);
+            assertThat(query("SELECT * FROM " + testTable.getName() + " WHERE collate_column < 'no_collation'"))
+                    .matches("VALUES " +
+                            "(CAST('collation' AS varchar(25)))")
+                    .isNotFullyPushedDown(FilterNode.class);
+        }
+    }
+
+    @Test
+    public void testNoJoinPushdownOnCaseInsensitiveVarcharColumn()
+    {
+        // if collation on column is caseinsensitive we should not apply join pushdown
+        try (TestTable testTable = new TestTable(
+                onRemoteDatabase(),
+                "test_join_collate",
+                "(collate_column_1 varchar(25) COLLATE Latin1_General_CI_AS, collate_column_2 varchar(25) COLLATE Latin1_General_CI_AS)",
+                List.of("'Collation', 'Collation'", "'collation', 'collation'"))) {
+            assertThat(query(format("SELECT n.collate_column_1, n2.collate_column_2 FROM %1$s n JOIN %1$s n2 ON n.collate_column_1 = n2.collate_column_2", testTable.getName())))
+                    .matches("VALUES " +
+                            "((CAST('Collation' AS varchar(25))), (CAST('Collation' AS varchar(25)))), " +
+                            "((CAST('collation' AS varchar(25))), (CAST('collation' AS varchar(25))))")
+                    .joinIsNotFullyPushedDown();
+            assertThat(query(format("SELECT n.collate_column_1, n2.collate_column_2 FROM %1$s n JOIN %1$s n2 ON n.collate_column_1 != n2.collate_column_2", testTable.getName())))
+                    .matches("VALUES " +
+                            "((CAST('collation' AS varchar(25))), (CAST('Collation' AS varchar(25)))), " +
+                            "((CAST('Collation' AS varchar(25))), (CAST('collation' AS varchar(25))))")
+                    .joinIsNotFullyPushedDown();
+            assertThat(query(format("SELECT n.collate_column_1, n2.collate_column_2 FROM %1$s n JOIN %1$s n2 ON n.collate_column_1 = n2.collate_column_2 WHERE n.collate_column_1 = 'Collation'", testTable.getName())))
+                    .matches("VALUES " +
+                            "((CAST('Collation' AS varchar(25))), (CAST('Collation' AS varchar(25))))")
+                    .joinIsNotFullyPushedDown();
+            assertThat(query(format("SELECT n.collate_column_1, n2.collate_column_2 FROM %1$s n JOIN %1$s n2 ON n.collate_column_1 != n2.collate_column_2 WHERE n.collate_column_1 != 'collation'", testTable.getName())))
+                    .matches("VALUES " +
+                            "((CAST('Collation' AS varchar(25))), (CAST('collation' AS varchar(25))))")
+                    .joinIsNotFullyPushedDown();
+        }
+    }
+
+    @Override
+    @Test
+    public void testDeleteWithVarcharInequalityPredicate()
+    {
+        // Override this because by enabling this flag SUPPORTS_PREDICATE_PUSHDOWN_WITH_VARCHAR_INEQUALITY,
+        // we assume that we also support range pushdowns, but for now we only support 'not equal' pushdown,
+        // so cannot enable this flag for now
+        try (TestTable table = new TestTable(getQueryRunner()::execute, "test_delete_varchar", "(col varchar(1))", ImmutableList.of("'a'", "'A'", "null"))) {
+            assertUpdate("DELETE FROM " + table.getName() + " WHERE col != 'A'", 1);
+            assertQuery("SELECT * FROM " + table.getName(), "VALUES 'A', null");
         }
     }
 
@@ -354,7 +485,7 @@ public abstract class BaseSqlServerConnectorTest
     @Test(dataProvider = "dataCompression")
     public void testCreateWithDataCompression(DataCompression dataCompression)
     {
-        String tableName = "test_create_with_compression_" + randomTableSuffix();
+        String tableName = "test_create_with_compression_" + randomNameSuffix();
         String createQuery = format("CREATE TABLE sqlserver.dbo.%s (\n" +
                         "   a bigint,\n" +
                         "   b bigint\n" +
@@ -459,10 +590,76 @@ public abstract class BaseSqlServerConnectorTest
         assertUpdate("DROP TABLE test_show_unique_constraint_table");
     }
 
+    @Test
+    @Override
+    public void testDateYearOfEraPredicate()
+    {
+        // SQL Server throws an exception instead of an empty result when the value is out of range
+        assertQuery("SELECT orderdate FROM orders WHERE orderdate = DATE '1997-09-14'", "VALUES DATE '1997-09-14'");
+        assertQueryFails(
+                "SELECT * FROM orders WHERE orderdate = DATE '-1996-09-14'",
+                "Conversion failed when converting date and/or time from character string\\.");
+    }
+
+    @Override
+    public void testNativeQuerySimple()
+    {
+        // override because SQL Server provides an empty string as the name for unnamed column
+        assertQuery("SELECT * FROM TABLE(system.query(query => 'SELECT 1 a'))", "VALUES 1");
+    }
+
+    @Override
+    protected String errorMessageForCreateTableAsSelectNegativeDate(String date)
+    {
+        return "Failed to insert data: Conversion failed when converting date and/or time from character string.";
+    }
+
+    @Override
+    protected String errorMessageForInsertNegativeDate(String date)
+    {
+        return "Failed to insert data: Conversion failed when converting date and/or time from character string.";
+    }
+
     @Override
     protected String errorMessageForInsertIntoNotNullColumn(String columnName)
     {
         return format("Cannot insert the value NULL into column '%s'.*", columnName);
+    }
+
+    @Override
+    protected OptionalInt maxSchemaNameLength()
+    {
+        return OptionalInt.of(128);
+    }
+
+    @Override
+    protected void verifySchemaNameLengthFailurePermissible(Throwable e)
+    {
+        assertThat(e).hasMessageMatching("The identifier that starts with '.*' is too long. Maximum length is 128.");
+    }
+
+    @Override
+    protected OptionalInt maxTableNameLength()
+    {
+        return OptionalInt.of(128);
+    }
+
+    @Override
+    protected void verifyTableNameLengthFailurePermissible(Throwable e)
+    {
+        assertThat(e).hasMessageMatching("(The identifier that starts with '.*' is too long. Maximum length is 128.|Table name must be shorter than or equal to '128' characters but got '129')");
+    }
+
+    @Override
+    protected OptionalInt maxColumnNameLength()
+    {
+        return OptionalInt.of(128);
+    }
+
+    @Override
+    protected void verifyColumnNameLengthFailurePermissible(Throwable e)
+    {
+        assertThat(e).hasMessageMatching("Column name must be shorter than or equal to '128' characters but got '129': '.*'");
     }
 
     private String getLongInClause(int start, int length)
@@ -471,5 +668,14 @@ public abstract class BaseSqlServerConnectorTest
                 .mapToObj(Integer::toString)
                 .collect(joining(", "));
         return "orderkey IN (" + longValues + ")";
+    }
+
+    @Override
+    protected Session joinPushdownEnabled(Session session)
+    {
+        return Session.builder(super.joinPushdownEnabled(session))
+                // strategy is AUTOMATIC by default and would not work for certain test cases (even if statistics are collected)
+                .setCatalogSessionProperty(session.getCatalog().orElseThrow(), "join_pushdown_strategy", "EAGER")
+                .build();
     }
 }

@@ -17,14 +17,18 @@ import io.trino.Session;
 import io.trino.cost.StatsCalculator;
 import io.trino.execution.FailureInjector.InjectedFailureType;
 import io.trino.execution.warnings.WarningCollector;
+import io.trino.metadata.FunctionBundle;
+import io.trino.metadata.FunctionManager;
 import io.trino.metadata.Metadata;
 import io.trino.metadata.QualifiedObjectName;
-import io.trino.metadata.SqlFunction;
+import io.trino.metadata.SessionPropertyManager;
 import io.trino.spi.ErrorType;
 import io.trino.spi.Plugin;
+import io.trino.spi.exchange.ExchangeManager;
+import io.trino.spi.type.TypeManager;
 import io.trino.split.PageSourceManager;
 import io.trino.split.SplitManager;
-import io.trino.sql.analyzer.AnalyzerFactory;
+import io.trino.sql.analyzer.QueryExplainer;
 import io.trino.sql.planner.NodePartitioningManager;
 import io.trino.sql.planner.Plan;
 import io.trino.transaction.TransactionManager;
@@ -50,9 +54,17 @@ public interface QueryRunner
 
     Metadata getMetadata();
 
-    AnalyzerFactory getAnalyzerFactory();
+    TypeManager getTypeManager();
+
+    QueryExplainer getQueryExplainer();
+
+    SessionPropertyManager getSessionPropertyManager();
+
+    FunctionManager getFunctionManager();
 
     SplitManager getSplitManager();
+
+    ExchangeManager getExchangeManager();
 
     PageSourceManager getPageSourceManager();
 
@@ -60,7 +72,7 @@ public interface QueryRunner
 
     StatsCalculator getStatsCalculator();
 
-    TestingGroupProvider getGroupProvider();
+    TestingGroupProviderManager getGroupProvider();
 
     TestingAccessControlManager getAccessControl();
 
@@ -84,7 +96,7 @@ public interface QueryRunner
 
     void installPlugin(Plugin plugin);
 
-    void addFunctions(List<? extends SqlFunction> functions);
+    void addFunctions(FunctionBundle functionBundle);
 
     void createCatalog(String catalogName, String connectorName, Map<String, String> properties);
 
@@ -97,6 +109,8 @@ public interface QueryRunner
             int attemptId,
             InjectedFailureType injectionType,
             Optional<ErrorType> errorType);
+
+    void loadExchangeManager(String name, Map<String, String> properties);
 
     class MaterializedResultWithPlan
     {

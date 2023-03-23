@@ -27,6 +27,7 @@ import io.trino.plugin.jdbc.PreparedQuery;
 import io.trino.plugin.jdbc.RemoteTableName;
 import io.trino.plugin.jdbc.WriteFunction;
 import io.trino.plugin.jdbc.WriteMapping;
+import io.trino.plugin.jdbc.expression.ParameterizedExpression;
 import io.trino.spi.connector.AggregateFunction;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
@@ -38,6 +39,7 @@ import io.trino.spi.connector.JoinType;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.connector.SystemTable;
 import io.trino.spi.connector.TableScanRedirectApplicationResult;
+import io.trino.spi.expression.ConnectorExpression;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.statistics.TableStatistics;
 import io.trino.spi.type.Type;
@@ -104,6 +106,12 @@ public final class StatisticsAwareJdbcClient
     }
 
     @Override
+    public JdbcTableHandle getTableHandle(ConnectorSession session, PreparedQuery preparedQuery)
+    {
+        return stats.getGetTableHandleForQuery().wrap(() -> delegate().getTableHandle(session, preparedQuery));
+    }
+
+    @Override
     public List<JdbcColumnHandle> getColumns(ConnectorSession session, JdbcTableHandle tableHandle)
     {
         return stats.getGetColumns().wrap(() -> delegate().getColumns(session, tableHandle));
@@ -112,7 +120,7 @@ public final class StatisticsAwareJdbcClient
     @Override
     public Optional<ColumnMapping> toColumnMapping(ConnectorSession session, Connection connection, JdbcTypeHandle typeHandle)
     {
-        return stats.getToPrestoType().wrap(() -> delegate().toColumnMapping(session, connection, typeHandle));
+        return stats.getToTrinoType().wrap(() -> delegate().toColumnMapping(session, connection, typeHandle));
     }
 
     @Override
@@ -140,16 +148,22 @@ public final class StatisticsAwareJdbcClient
     }
 
     @Override
+    public Optional<ParameterizedExpression> convertPredicate(ConnectorSession session, ConnectorExpression expression, Map<String, ColumnHandle> assignments)
+    {
+        return stats.getConvertPredicate().wrap(() -> delegate().convertPredicate(session, expression, assignments));
+    }
+
+    @Override
     public ConnectorSplitSource getSplits(ConnectorSession session, JdbcTableHandle layoutHandle)
     {
         return stats.getGetSplits().wrap(() -> delegate().getSplits(session, layoutHandle));
     }
 
     @Override
-    public Connection getConnection(ConnectorSession session, JdbcSplit split)
+    public Connection getConnection(ConnectorSession session, JdbcSplit split, JdbcTableHandle tableHandle)
             throws SQLException
     {
-        return stats.getGetConnectionWithSplit().wrap(() -> delegate().getConnection(session, split));
+        return stats.getGetConnectionWithSplit().wrap(() -> delegate().getConnection(session, split, tableHandle));
     }
 
     @Override
@@ -165,7 +179,7 @@ public final class StatisticsAwareJdbcClient
             JdbcTableHandle table,
             Optional<List<List<JdbcColumnHandle>>> groupingSets,
             List<JdbcColumnHandle> columns,
-            Map<String, String> columnExpressions)
+            Map<String, ParameterizedExpression> columnExpressions)
     {
         return stats.getPrepareQuery().wrap(() -> delegate().prepareQuery(session, table, groupingSets, columns, columnExpressions));
     }
@@ -188,6 +202,19 @@ public final class StatisticsAwareJdbcClient
             JoinStatistics statistics)
     {
         return stats.getImplementJoin().wrap(() -> delegate().implementJoin(session, joinType, leftSource, rightSource, joinConditions, rightAssignments, leftAssignments, statistics));
+    }
+
+    @Override
+    public Optional<String> getTableComment(ResultSet resultSet)
+            throws SQLException
+    {
+        return stats.getGetTableComment().wrap(() -> delegate().getTableComment(resultSet));
+    }
+
+    @Override
+    public void setTableComment(ConnectorSession session, JdbcTableHandle handle, Optional<String> comment)
+    {
+        stats.getSetTableComment().wrap(() -> delegate().setTableComment(session, handle, comment));
     }
 
     @Override
@@ -215,13 +242,19 @@ public final class StatisticsAwareJdbcClient
     }
 
     @Override
+    public void setColumnType(ConnectorSession session, JdbcTableHandle handle, JdbcColumnHandle column, Type type)
+    {
+        stats.getSetColumnType().wrap(() -> delegate().setColumnType(session, handle, column, type));
+    }
+
+    @Override
     public void renameTable(ConnectorSession session, JdbcTableHandle handle, SchemaTableName newTableName)
     {
         stats.getRenameTable().wrap(() -> delegate().renameTable(session, handle, newTableName));
     }
 
     @Override
-    public void setTableProperties(ConnectorSession session, JdbcTableHandle handle, Map<String, Object> properties)
+    public void setTableProperties(ConnectorSession session, JdbcTableHandle handle, Map<String, Optional<Object>> properties)
     {
         stats.getSetTableProperties().wrap(() -> delegate().setTableProperties(session, handle, properties));
     }
@@ -239,9 +272,9 @@ public final class StatisticsAwareJdbcClient
     }
 
     @Override
-    public void commitCreateTable(ConnectorSession session, JdbcOutputTableHandle handle)
+    public void commitCreateTable(ConnectorSession session, JdbcOutputTableHandle handle, Set<Long> pageSinkIds)
     {
-        stats.getCommitCreateTable().wrap(() -> delegate().commitCreateTable(session, handle));
+        stats.getCommitCreateTable().wrap(() -> delegate().commitCreateTable(session, handle, pageSinkIds));
     }
 
     @Override
@@ -251,9 +284,9 @@ public final class StatisticsAwareJdbcClient
     }
 
     @Override
-    public void finishInsertTable(ConnectorSession session, JdbcOutputTableHandle handle)
+    public void finishInsertTable(ConnectorSession session, JdbcOutputTableHandle handle, Set<Long> pageSinkIds)
     {
-        stats.getFinishInsertTable().wrap(() -> delegate().finishInsertTable(session, handle));
+        stats.getFinishInsertTable().wrap(() -> delegate().finishInsertTable(session, handle, pageSinkIds));
     }
 
     @Override
@@ -266,6 +299,12 @@ public final class StatisticsAwareJdbcClient
     public void rollbackCreateTable(ConnectorSession session, JdbcOutputTableHandle handle)
     {
         stats.getRollbackCreateTable().wrap(() -> delegate().rollbackCreateTable(session, handle));
+    }
+
+    @Override
+    public boolean supportsRetries()
+    {
+        return delegate().supportsRetries();
     }
 
     @Override
@@ -282,16 +321,22 @@ public final class StatisticsAwareJdbcClient
     }
 
     @Override
-    public PreparedStatement getPreparedStatement(Connection connection, String sql)
+    public PreparedStatement getPreparedStatement(Connection connection, String sql, Optional<Integer> columnCount)
             throws SQLException
     {
-        return stats.getGetPreparedStatement().wrap(() -> delegate().getPreparedStatement(connection, sql));
+        return stats.getGetPreparedStatement().wrap(() -> delegate().getPreparedStatement(connection, sql, columnCount));
     }
 
     @Override
     public TableStatistics getTableStatistics(ConnectorSession session, JdbcTableHandle handle, TupleDomain<ColumnHandle> tupleDomain)
     {
         return stats.getGetTableStatistics().wrap(() -> delegate().getTableStatistics(session, handle, tupleDomain));
+    }
+
+    @Override
+    public TableStatistics getTableStatistics(ConnectorSession session, JdbcTableHandle handle)
+    {
+        return stats.getGetTableStatistics().wrap(() -> delegate().getTableStatistics(session, handle));
     }
 
     @Override
@@ -328,6 +373,12 @@ public final class StatisticsAwareJdbcClient
     public void dropSchema(ConnectorSession session, String schemaName)
     {
         stats.getDropSchema().wrap(() -> delegate().dropSchema(session, schemaName));
+    }
+
+    @Override
+    public void renameSchema(ConnectorSession session, String schemaName, String newSchemaName)
+    {
+        stats.getRenameSchema().wrap(() -> delegate().renameSchema(session, schemaName, newSchemaName));
     }
 
     @Override

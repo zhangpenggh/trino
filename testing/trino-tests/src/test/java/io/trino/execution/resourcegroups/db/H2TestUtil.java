@@ -102,7 +102,7 @@ final class H2TestUtil
 
     public static String getDbConfigUrl()
     {
-        return "jdbc:h2:mem:test_" + Math.abs(new Random().nextLong());
+        return "jdbc:h2:mem:test_" + Math.abs(new Random().nextLong()) + ";NON_KEYWORDS=KEY,VALUE"; // key and value are reserved keywords in H2 2.x
     }
 
     public static H2ResourceGroupsDao getDao(String url)
@@ -165,13 +165,13 @@ final class H2TestUtil
         dao.insertResourceGroup(5, "dashboard-${USER}", "1MB", 1, 1, 1, null, null, null, null, null, 3L, TEST_ENVIRONMENT);
         dao.insertResourceGroup(6, "no-queueing", "1MB", 0, 1, 1, null, null, null, null, null, null, TEST_ENVIRONMENT_2);
         dao.insertResourceGroup(7, "explain", "1MB", 0, 1, 1, null, null, null, null, null, null, TEST_ENVIRONMENT);
-        dao.insertSelector(2, 10_000, "user.*", "test", null, null, null);
-        dao.insertSelector(4, 1_000, "user.*", "(?i).*adhoc.*", null, null, null);
-        dao.insertSelector(5, 100, "user.*", "(?i).*dashboard.*", null, null, null);
-        dao.insertSelector(4, 10, "user.*", null, null, CLIENT_TAGS_CODEC.toJson(ImmutableList.of("tag1", "tag2")), null);
-        dao.insertSelector(2, 1, "user.*", null, null, CLIENT_TAGS_CODEC.toJson(ImmutableList.of("tag1")), null);
-        dao.insertSelector(6, 6, ".*", ".*", null, null, null);
-        dao.insertSelector(7, 100_000, null, null, EXPLAIN.name(), null, null);
+        dao.insertSelector(2, 10_000, "user.*", null, "test", null, null, null);
+        dao.insertSelector(4, 1_000, "user.*", null, "(?i).*adhoc.*", null, null, null);
+        dao.insertSelector(5, 100, "user.*", null, "(?i).*dashboard.*", null, null, null);
+        dao.insertSelector(4, 10, "user.*", null, null, null, CLIENT_TAGS_CODEC.toJson(ImmutableList.of("tag1", "tag2")), null);
+        dao.insertSelector(2, 1, "user.*", null, null, null, CLIENT_TAGS_CODEC.toJson(ImmutableList.of("tag1")), null);
+        dao.insertSelector(6, 6, ".*", null, ".*", null, null, null);
+        dao.insertSelector(7, 100_000, null, null, null, EXPLAIN.name(), null, null);
 
         int expectedSelectors = 6;
         if (environment.equals(TEST_ENVIRONMENT_2)) {

@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.jdbc;
 
+import io.trino.plugin.jdbc.expression.ParameterizedExpression;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.AggregateFunction;
 import io.trino.spi.connector.ColumnHandle;
@@ -25,6 +26,7 @@ import io.trino.spi.connector.JoinType;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.connector.SystemTable;
 import io.trino.spi.connector.TableScanRedirectApplicationResult;
+import io.trino.spi.expression.ConnectorExpression;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.statistics.TableStatistics;
 import io.trino.spi.type.Type;
@@ -54,6 +56,8 @@ public interface JdbcClient
 
     Optional<JdbcTableHandle> getTableHandle(ConnectorSession session, SchemaTableName schemaTableName);
 
+    JdbcTableHandle getTableHandle(ConnectorSession session, PreparedQuery preparedQuery);
+
     List<JdbcColumnHandle> getColumns(ConnectorSession session, JdbcTableHandle tableHandle);
 
     Optional<ColumnMapping> toColumnMapping(ConnectorSession session, Connection connection, JdbcTypeHandle typeHandle);
@@ -75,9 +79,14 @@ public interface JdbcClient
         return Optional.empty();
     }
 
+    default Optional<ParameterizedExpression> convertPredicate(ConnectorSession session, ConnectorExpression expression, Map<String, ColumnHandle> assignments)
+    {
+        return Optional.empty();
+    }
+
     ConnectorSplitSource getSplits(ConnectorSession session, JdbcTableHandle tableHandle);
 
-    Connection getConnection(ConnectorSession session, JdbcSplit split)
+    Connection getConnection(ConnectorSession session, JdbcSplit split, JdbcTableHandle tableHandle)
             throws SQLException;
 
     default void abortReadConnection(Connection connection, ResultSet resultSet)
@@ -91,7 +100,7 @@ public interface JdbcClient
             JdbcTableHandle table,
             Optional<List<List<JdbcColumnHandle>>> groupingSets,
             List<JdbcColumnHandle> columns,
-            Map<String, String> columnExpressions);
+            Map<String, ParameterizedExpression> columnExpressions);
 
     PreparedStatement buildSql(ConnectorSession session, Connection connection, JdbcSplit split, JdbcTableHandle table, List<JdbcColumnHandle> columns)
             throws SQLException;
@@ -117,6 +126,17 @@ public interface JdbcClient
 
     boolean isLimitGuaranteed(ConnectorSession session);
 
+    default Optional<String> getTableComment(ResultSet resultSet)
+            throws SQLException
+    {
+        return Optional.ofNullable(resultSet.getString("REMARKS"));
+    }
+
+    default void setTableComment(ConnectorSession session, JdbcTableHandle handle, Optional<String> comment)
+    {
+        throw new TrinoException(NOT_SUPPORTED, "This connector does not support setting table comments");
+    }
+
     default void setColumnComment(ConnectorSession session, JdbcTableHandle handle, JdbcColumnHandle column, Optional<String> comment)
     {
         throw new TrinoException(NOT_SUPPORTED, "This connector does not support setting column comments");
@@ -128,9 +148,11 @@ public interface JdbcClient
 
     void renameColumn(ConnectorSession session, JdbcTableHandle handle, JdbcColumnHandle jdbcColumn, String newColumnName);
 
+    void setColumnType(ConnectorSession session, JdbcTableHandle handle, JdbcColumnHandle column, Type type);
+
     void renameTable(ConnectorSession session, JdbcTableHandle handle, SchemaTableName newTableName);
 
-    default void setTableProperties(ConnectorSession session, JdbcTableHandle handle, Map<String, Object> properties)
+    default void setTableProperties(ConnectorSession session, JdbcTableHandle handle, Map<String, Optional<Object>> properties)
     {
         throw new TrinoException(NOT_SUPPORTED, "This connector does not support setting table properties");
     }
@@ -139,29 +161,42 @@ public interface JdbcClient
 
     JdbcOutputTableHandle beginCreateTable(ConnectorSession session, ConnectorTableMetadata tableMetadata);
 
-    void commitCreateTable(ConnectorSession session, JdbcOutputTableHandle handle);
+    void commitCreateTable(ConnectorSession session, JdbcOutputTableHandle handle, Set<Long> pageSinkIds);
 
     JdbcOutputTableHandle beginInsertTable(ConnectorSession session, JdbcTableHandle tableHandle, List<JdbcColumnHandle> columns);
 
-    void finishInsertTable(ConnectorSession session, JdbcOutputTableHandle handle);
+    void finishInsertTable(ConnectorSession session, JdbcOutputTableHandle handle, Set<Long> pageSinkIds);
 
     void dropTable(ConnectorSession session, JdbcTableHandle jdbcTableHandle);
 
     void rollbackCreateTable(ConnectorSession session, JdbcOutputTableHandle handle);
+
+    boolean supportsRetries();
 
     String buildInsertSql(JdbcOutputTableHandle handle, List<WriteFunction> columnWriters);
 
     Connection getConnection(ConnectorSession session, JdbcOutputTableHandle handle)
             throws SQLException;
 
-    PreparedStatement getPreparedStatement(Connection connection, String sql)
+    PreparedStatement getPreparedStatement(Connection connection, String sql, Optional<Integer> columnCount)
             throws SQLException;
 
+    /**
+     * @deprecated Use {@link #getTableStatistics(ConnectorSession, JdbcTableHandle)}
+     */
+    @Deprecated
     TableStatistics getTableStatistics(ConnectorSession session, JdbcTableHandle handle, TupleDomain<ColumnHandle> tupleDomain);
+
+    default TableStatistics getTableStatistics(ConnectorSession session, JdbcTableHandle handle)
+    {
+        return getTableStatistics(session, handle, TupleDomain.all());
+    }
 
     void createSchema(ConnectorSession session, String schemaName);
 
     void dropSchema(ConnectorSession session, String schemaName);
+
+    void renameSchema(ConnectorSession session, String schemaName, String newSchemaName);
 
     default Optional<SystemTable> getSystemTable(ConnectorSession session, SchemaTableName tableName)
     {

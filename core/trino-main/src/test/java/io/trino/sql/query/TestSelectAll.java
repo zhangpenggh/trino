@@ -14,28 +14,31 @@
 package io.trino.sql.query;
 
 import io.trino.testing.MaterializedResult;
-import org.testng.annotations.AfterClass;
-import org.testng.annotations.BeforeClass;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.testng.Assert.assertEquals;
-import static org.testng.Assert.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
 
+@TestInstance(PER_CLASS)
 public class TestSelectAll
 {
     private QueryAssertions assertions;
 
     private static final String UNSUPPORTED_DECORRELATION_MESSAGE = ".*: Given correlated subquery is not supported";
 
-    @BeforeClass
+    @BeforeAll
     public void init()
     {
         assertions = new QueryAssertions();
     }
 
-    @AfterClass(alwaysRun = true)
+    @AfterAll
     public void teardown()
     {
         assertions.close();
@@ -80,12 +83,14 @@ public class TestSelectAll
         // non-deterministic expression precomputed
         MaterializedResult materializedResult = assertions.execute("SELECT (x, x, x, x, x, x, x, x).* FROM (SELECT rand()) T(x)");
         long distinctValuesCount = materializedResult.getMaterializedRows().get(0).getFields().stream().distinct().count();
-        assertEquals(distinctValuesCount, 1, "rand() must be computed once only");
+        assertEquals(1, distinctValuesCount, "rand() must be computed once only");
 
         // non-deterministic subquery
         MaterializedResult materializedResult1 = assertions.execute("SELECT (SELECT (rand(), rand(), rand(), rand())).*");
         long distinctValuesCount1 = materializedResult1.getMaterializedRows().get(0).getFields().stream().distinct().count();
         assertTrue(distinctValuesCount1 >= 3, "rand() must be computed multiple times");
+
+        assertThat(assertions.query("SELECT 1, (2, 3).*")).matches("SELECT 1, 2, 3");
     }
 
     @Test
@@ -244,6 +249,6 @@ public class TestSelectAll
         assertThat(assertions.query("SELECT * FROM (VALUES 0, 1) t(a), LATERAL (SELECT t2.* from (VALUES 2), LATERAL (SELECT t.*) t2(b))")).matches("VALUES (0, 0), (1, 1)");
         assertThat(assertions.query("SELECT * FROM (VALUES 0, 1) t(a), LATERAL (SELECT t2.b from (VALUES 2), LATERAL (SELECT t.*) t2(b))")).matches("VALUES (0, 0), (1, 1)");
         assertThatThrownBy(() -> assertions.query("SELECT * FROM (VALUES 0) t(a), LATERAL (SELECT t2.* from (VALUES 1, 2), LATERAL (SELECT t.*) t2(b))")).hasMessageMatching(UNSUPPORTED_DECORRELATION_MESSAGE);
-        assertThatThrownBy(() -> assertions.query("SELECT * FROM (VALUES 0, 1) t(a), LATERAL (SELECT * from (VALUES 2), LATERAL (SELECT t.*))")).hasMessageMatching(UNSUPPORTED_DECORRELATION_MESSAGE);
+        assertThat(assertions.query("SELECT * FROM (VALUES 0, 1) t(a), LATERAL (SELECT * from (VALUES 2), LATERAL (SELECT t.*))")).matches("VALUES (0, 2, 0), (1, 2, 1)");
     }
 }

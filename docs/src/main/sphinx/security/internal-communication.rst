@@ -3,15 +3,22 @@ Secure internal communication
 =============================
 
 The Trino cluster can be configured to use secured communication with internal
-authentication of the nodes in the cluster, and optionally added security with
-:ref:`TLS <glossTLS>`.
+authentication of the nodes in the cluster, and to optionally use added security
+with :ref:`TLS <glossTLS>`.
 
-Internal authentication
+Configure shared secret
 -----------------------
 
-Requests between Trino nodes are authenticated using a shared secret. For secure
-internal communication, the shared secret must be set to the same value on all
-nodes in the cluster:
+Configure a shared secret to authenticate all communication between nodes of the
+cluster. Use this configuration under the following conditions:
+
+* When opting to configure `internal TLS encryption <#configure-internal-tls>`_
+  between nodes of the cluster
+* When using any :doc:`external authentication <authentication-types>` method
+  between clients and the coordinator
+
+Set the shared secret to the same value in :ref:`config.properties
+<config_properties>` on all nodes of the cluster:
 
 .. code-block:: text
 
@@ -24,8 +31,32 @@ command:
 
     openssl rand 512 | base64
 
-Internal TLS configuration
---------------------------
+.. _verify_secrets:
+
+Verify configuration
+^^^^^^^^^^^^^^^^^^^^
+
+To verify shared secret configuration:
+
+1. Start your Trino cluster with two or more nodes configured with a shared
+   secret.
+2. Connect to the :doc:`Web UI </admin/web-interface>`.
+3. Confirm the number of ``ACTIVE WORKERS`` equals the number of nodes
+   configured with your shared secret.
+4. Change the value of the shared secret on one worker, and restart the worker.
+5. Log in to the Web UI and confirm the number of ``ACTIVE WORKERS`` is one
+   less. The worker with the invalid secret is not authenticated, and therefore
+   not registered with the coordinator.
+6. Stop your Trino cluster, revert the value change on the worker, and restart
+   your cluster.
+7. Confirm the number of ``ACTIVE WORKERS`` equals the number of nodes
+   configured with your shared secret.
+
+Configure internal TLS
+----------------------
+
+You can optionally add an extra layer of security by configuring the cluster to
+encrypt communication between nodes with :ref:`TLS <glossTLS>`.
 
 You can configure the coordinator and all workers to encrypt all communication
 with each other using TLS. Every node in the cluster must be configured. Nodes
@@ -36,7 +67,7 @@ In typical deployments, you should enable :ref:`TLS directly on the coordinator
 <https-secure-directly>` for fully encrypted access to the cluster by client
 tools.
 
-Now you can enable TLS for internal communication with the following
+Enable TLS for internal communication with the following
 configuration identical on all cluster nodes.
 
 1. Configure a shared secret for internal communication as described in
@@ -58,8 +89,7 @@ configuration identical on all cluster nodes.
 
    Note that using hostnames or fully qualified domain names for the URI is
    not supported. The automatic certificate creation for internal TLS only
-   supports IP addresses. Java 17 is known to be incompatible with this feature
-   and can not be used as a runtime for Trino with this feature enabled.
+   supports IP addresses.
 
 4. Enable the HTTPS endpoint on all workers.
 
@@ -84,7 +114,7 @@ inside the cluster is secured with TLS.
     * ``node.internal-address-source``
 
 Performance with SSL/TLS enabled
---------------------------------
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 Enabling encryption impacts performance. The performance degradation can vary
 based on the environment, queries, and concurrency.
@@ -99,7 +129,7 @@ considerable. The slowdown may vary from 10% to even 100%+, depending on the net
 traffic and the CPU utilization.
 
 Advanced performance tuning
----------------------------
+^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 In some cases, changing the source of random numbers improves performance
 significantly.

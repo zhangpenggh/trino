@@ -16,7 +16,11 @@ package io.trino.tests.product.launcher.cli;
 import com.google.common.base.Splitter;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.io.Files;
 import com.google.inject.Module;
+import dev.failsafe.Failsafe;
+import dev.failsafe.Timeout;
+import dev.failsafe.TimeoutExceededException;
 import io.airlift.log.Logger;
 import io.airlift.units.Duration;
 import io.trino.tests.product.launcher.Extensions;
@@ -29,9 +33,6 @@ import io.trino.tests.product.launcher.env.EnvironmentModule;
 import io.trino.tests.product.launcher.env.EnvironmentOptions;
 import io.trino.tests.product.launcher.env.SupportedTrinoJdk;
 import io.trino.tests.product.launcher.testcontainers.ExistingNetwork;
-import net.jodah.failsafe.Failsafe;
-import net.jodah.failsafe.Timeout;
-import net.jodah.failsafe.TimeoutExceededException;
 import picocli.CommandLine.ExitCode;
 import picocli.CommandLine.Mixin;
 import picocli.CommandLine.Parameters;
@@ -39,6 +40,8 @@ import picocli.CommandLine.Parameters;
 import javax.inject.Inject;
 
 import java.io.File;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -59,6 +62,9 @@ import static io.trino.tests.product.launcher.testcontainers.PortBinder.unsafely
 import static java.lang.StrictMath.toIntExact;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
+import static java.util.stream.Collectors.groupingBy;
+import static java.util.stream.Collectors.mapping;
+import static java.util.stream.Collectors.toList;
 import static org.testcontainers.containers.BindMode.READ_ONLY;
 import static org.testcontainers.containers.BindMode.READ_WRITE;
 import static org.testcontainers.utility.MountableFile.forClasspathResource;
@@ -88,7 +94,7 @@ public final class TestRun
 
     public TestRun(Extensions extensions)
     {
-        this.additionalEnvironments = requireNonNull(extensions, "extensions is null").getAdditionalEnvironments();
+        this.additionalEnvironments = extensions.getAdditionalEnvironments();
     }
 
     @Override
@@ -119,6 +125,9 @@ public final class TestRun
         @Option(names = "--option", paramLabel = "<option>", description = "Extra options to provide to environment (property can be used multiple times; format is key=value)")
         public Map<String, String> extraOptions = new HashMap<>();
 
+        @Option(names = "--impacted-features", paramLabel = "<file>", description = "Skip tests not using these features " + DEFAULT_VALUE)
+        public Optional<File> impactedFeatures;
+
         @Option(names = "--attach", description = "attach to an existing environment")
         public boolean attach;
 
@@ -138,7 +147,7 @@ public final class TestRun
         public Duration timeout;
 
         @Parameters(paramLabel = "<argument>", description = "Test arguments")
-        public List<String> testArguments;
+        public List<String> testArguments = List.of();
 
         public Module toModule()
         {
@@ -166,6 +175,9 @@ public final class TestRun
         private final Optional<Path> logsDirBase;
         private final EnvironmentConfig environmentConfig;
         private final Map<String, String> extraOptions;
+        private final Optional<List<String>> impactedFeatures;
+
+        public static final Integer ENVIRONMENT_SKIPPED_EXIT_CODE = 98;
 
         @Inject
         public Execution(EnvironmentFactory environmentFactory, EnvironmentOptions environmentOptions, EnvironmentConfig environmentConfig, TestRunOptions testRunOptions)
@@ -173,7 +185,7 @@ public final class TestRun
             this.environmentFactory = requireNonNull(environmentFactory, "environmentFactory is null");
             requireNonNull(environmentOptions, "environmentOptions is null");
             this.debug = environmentOptions.debug;
-            this.debugSuspend = requireNonNull(testRunOptions, "testRunOptions is null").debugSuspend;
+            this.debugSuspend = testRunOptions.debugSuspend;
             this.jdkVersion = requireNonNull(environmentOptions.jdkVersion, "environmentOptions.jdkVersion is null");
             this.testJar = requireNonNull(testRunOptions.testJar, "testRunOptions.testJar is null");
             this.cliJar = requireNonNull(testRunOptions.cliJar, "testRunOptions.cliJar is null");
@@ -187,6 +199,19 @@ public final class TestRun
             this.logsDirBase = requireNonNull(testRunOptions.logsDirBase, "testRunOptions.logsDirBase is empty");
             this.environmentConfig = requireNonNull(environmentConfig, "environmentConfig is null");
             this.extraOptions = ImmutableMap.copyOf(requireNonNull(testRunOptions.extraOptions, "testRunOptions.extraOptions is null"));
+            Optional<File> impactedFeaturesFile = requireNonNull(testRunOptions.impactedFeatures, "testRunOptions.impactedFeatures is null");
+            if (impactedFeaturesFile.isPresent()) {
+                try {
+                    this.impactedFeatures = Optional.of(Files.asCharSource(impactedFeaturesFile.get(), StandardCharsets.UTF_8).readLines());
+                    log.info("Impacted features: %s", this.impactedFeatures);
+                }
+                catch (IOException e) {
+                    throw new RuntimeException(e);
+                }
+            }
+            else {
+                this.impactedFeatures = Optional.empty();
+            }
         }
 
         @Override
@@ -200,8 +225,9 @@ public final class TestRun
 
             try {
                 int exitCode = Failsafe
-                        .with(Timeout.of(java.time.Duration.ofMillis(timeoutMillis))
-                                .withCancel(true))
+                        .with(Timeout.builder(java.time.Duration.ofMillis(timeoutMillis))
+                                .withInterrupt()
+                                .build())
                         .get(this::tryExecuteTests);
 
                 log.info("Tests execution completed with code %d", exitCode);
@@ -219,8 +245,13 @@ public final class TestRun
 
         private Integer tryExecuteTests()
         {
-            try (Environment environment = startEnvironment()) {
-                return toIntExact(environment.awaitTestsCompletion());
+            Environment environment = getEnvironment();
+            if (!hasImpactedFeatures(environment)) {
+                log.warn("Skipping test due to impacted features not overlapping with any features configured in environment");
+                return toIntExact(ENVIRONMENT_SKIPPED_EXIT_CODE);
+            }
+            try (Environment runningEnvironment = startEnvironment(environment)) {
+                return toIntExact(runningEnvironment.awaitTestsCompletion());
             }
             catch (RuntimeException e) {
                 log.warn(e, "Failed to execute tests");
@@ -228,10 +259,41 @@ public final class TestRun
             }
         }
 
-        private Environment startEnvironment()
+        private boolean hasImpactedFeatures(Environment environment)
         {
-            Environment environment = getEnvironment();
+            if (impactedFeatures.isEmpty()) {
+                return true;
+            }
+            if (impactedFeatures.get().size() == 0) {
+                return false;
+            }
+            Map<String, List<String>> featuresByName = impactedFeatures.get().stream().collect(groupingBy(feature -> {
+                String[] parts = feature.split(":", 2);
+                return parts.length < 1 ? "" : parts[0];
+            }, mapping(feature -> {
+                String[] parts = feature.split(":", 2);
+                return parts.length < 2 ? "" : parts[1];
+            }, toList())));
+            // see PluginReader. printPluginFeatures() for all possible feature prefixes
+            Map<String, List<String>> environmentFeaturesByName = environment.getConfiguredFeatures();
+            for (Map.Entry<String, List<String>> entry : featuresByName.entrySet()) {
+                String name = entry.getKey();
+                List<String> features = entry.getValue();
+                if (!environmentFeaturesByName.containsKey(name)) {
+                    return true;
+                }
+                List<String> environmentFeatures = environmentFeaturesByName.get(name);
+                log.info("Checking if impacted %s %s are overlapping with %s configured in the environment",
+                        name, features, environmentFeatures);
+                if (environmentFeatures.stream().anyMatch(features::contains)) {
+                    return true;
+                }
+            }
+            return false;
+        }
 
+        private Environment startEnvironment(Environment environment)
+        {
             Collection<DockerContainer> allContainers = environment.getContainers();
             DockerContainer testsContainer = environment.getContainer(TESTS);
 
@@ -275,7 +337,6 @@ public final class TestRun
                 if (System.getenv("CONTINUOUS_INTEGRATION") != null) {
                     container.withEnv("CONTINUOUS_INTEGRATION", "true");
                 }
-
                 container
                         // the test jar is hundreds MB and file system bind is much more efficient
                         .withFileSystemBind(testJar.getPath(), "/docker/test.jar", READ_ONLY)
@@ -289,7 +350,7 @@ public final class TestRun
                                         // Force Parallel GC to ensure MaxHeapFreeRatio is respected
                                         "-XX:+UseParallelGC",
                                         "-XX:MinHeapFreeRatio=10",
-                                        "-XX:MaxHeapFreeRatio=10",
+                                        "-XX:MaxHeapFreeRatio=50",
                                         "-Djava.util.logging.config.file=/docker/presto-product-tests/conf/tempto/logging.properties",
                                         "-Duser.timezone=Asia/Kathmandu",
                                         // Tempto has progress logging built in

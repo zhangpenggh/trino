@@ -48,7 +48,7 @@ public class WindowNode
 {
     private final PlanNode source;
     private final Set<Symbol> prePartitionedInputs;
-    private final Specification specification;
+    private final DataOrganizationSpecification specification;
     private final int preSortedOrderPrefix;
     private final Map<Symbol, Function> windowFunctions;
     private final Optional<Symbol> hashSymbol;
@@ -57,7 +57,7 @@ public class WindowNode
     public WindowNode(
             @JsonProperty("id") PlanNodeId id,
             @JsonProperty("source") PlanNode source,
-            @JsonProperty("specification") Specification specification,
+            @JsonProperty("specification") DataOrganizationSpecification specification,
             @JsonProperty("windowFunctions") Map<Symbol, Function> windowFunctions,
             @JsonProperty("hashSymbol") Optional<Symbol> hashSymbol,
             @JsonProperty("prePartitionedInputs") Set<Symbol> prePartitionedInputs,
@@ -69,13 +69,18 @@ public class WindowNode
         requireNonNull(specification, "specification is null");
         requireNonNull(windowFunctions, "windowFunctions is null");
         requireNonNull(hashSymbol, "hashSymbol is null");
-        checkArgument(specification.getPartitionBy().containsAll(prePartitionedInputs), "prePartitionedInputs must be contained in partitionBy");
+        requireNonNull(prePartitionedInputs, "prePartitionedInputs is null");
+        // Make the defensive copy eagerly, so it can be used for both the validation checks and assigned directly to the field afterwards
+        prePartitionedInputs = ImmutableSet.copyOf(prePartitionedInputs);
+
+        ImmutableSet<Symbol> partitionBy = ImmutableSet.copyOf(specification.getPartitionBy());
         Optional<OrderingScheme> orderingScheme = specification.getOrderingScheme();
+        checkArgument(partitionBy.containsAll(prePartitionedInputs), "prePartitionedInputs must be contained in partitionBy");
         checkArgument(preSortedOrderPrefix == 0 || (orderingScheme.isPresent() && preSortedOrderPrefix <= orderingScheme.get().getOrderBy().size()), "Cannot have sorted more symbols than those requested");
-        checkArgument(preSortedOrderPrefix == 0 || ImmutableSet.copyOf(prePartitionedInputs).equals(ImmutableSet.copyOf(specification.getPartitionBy())), "preSortedOrderPrefix can only be greater than zero if all partition symbols are pre-partitioned");
+        checkArgument(preSortedOrderPrefix == 0 || partitionBy.equals(prePartitionedInputs), "preSortedOrderPrefix can only be greater than zero if all partition symbols are pre-partitioned");
 
         this.source = source;
-        this.prePartitionedInputs = ImmutableSet.copyOf(prePartitionedInputs);
+        this.prePartitionedInputs = prePartitionedInputs;
         this.specification = specification;
         this.windowFunctions = ImmutableMap.copyOf(windowFunctions);
         this.hashSymbol = hashSymbol;
@@ -106,7 +111,7 @@ public class WindowNode
     }
 
     @JsonProperty
-    public Specification getSpecification()
+    public DataOrganizationSpecification getSpecification()
     {
         return specification;
     }
@@ -118,7 +123,7 @@ public class WindowNode
 
     public Optional<OrderingScheme> getOrderingScheme()
     {
-        return specification.orderingScheme;
+        return specification.getOrderingScheme();
     }
 
     @JsonProperty
@@ -162,60 +167,6 @@ public class WindowNode
     public PlanNode replaceChildren(List<PlanNode> newChildren)
     {
         return new WindowNode(getId(), Iterables.getOnlyElement(newChildren), specification, windowFunctions, hashSymbol, prePartitionedInputs, preSortedOrderPrefix);
-    }
-
-    @Immutable
-    public static class Specification
-    {
-        private final List<Symbol> partitionBy;
-        private final Optional<OrderingScheme> orderingScheme;
-
-        @JsonCreator
-        public Specification(
-                @JsonProperty("partitionBy") List<Symbol> partitionBy,
-                @JsonProperty("orderingScheme") Optional<OrderingScheme> orderingScheme)
-        {
-            requireNonNull(partitionBy, "partitionBy is null");
-            requireNonNull(orderingScheme, "orderingScheme is null");
-
-            this.partitionBy = ImmutableList.copyOf(partitionBy);
-            this.orderingScheme = requireNonNull(orderingScheme, "orderingScheme is null");
-        }
-
-        @JsonProperty
-        public List<Symbol> getPartitionBy()
-        {
-            return partitionBy;
-        }
-
-        @JsonProperty
-        public Optional<OrderingScheme> getOrderingScheme()
-        {
-            return orderingScheme;
-        }
-
-        @Override
-        public int hashCode()
-        {
-            return Objects.hash(partitionBy, orderingScheme);
-        }
-
-        @Override
-        public boolean equals(Object obj)
-        {
-            if (this == obj) {
-                return true;
-            }
-
-            if (obj == null || getClass() != obj.getClass()) {
-                return false;
-            }
-
-            Specification other = (Specification) obj;
-
-            return Objects.equals(this.partitionBy, other.partitionBy) &&
-                    Objects.equals(this.orderingScheme, other.orderingScheme);
-        }
     }
 
     @Immutable

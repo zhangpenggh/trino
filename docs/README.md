@@ -4,7 +4,7 @@ The `docs` module contains the reference documentation for Trino.
 
 - [Writing and contributing](#writing-and-contributing)
 - [Tools](#tools)
-- [Faster build for authoring](#faster-build-for-authoring)
+- [Fast doc build option](#fast-doc-build-option)
 - [Default build](#default-build)
 - [Viewing documentation](#viewing-documentation)
 - [Versioning](#versioning)
@@ -32,6 +32,12 @@ new documentation:
 The Google guidelines include more material than listed here, and are used as a
 guide that enable easy decision making about proposed doc changes. Changes to
 existing documentation to follow these guidelines are underway.
+
+As a specific style note, because different readers may perceive the phrases "a
+SQL" or "an SQL" to be incorrect depending on how they pronounce SQL, aim to
+avoid use of "a/an SQL" in Trino documentation. Try to reword, re-order, or
+adjust writing so that it is not necessary. If there is absolutely no way around
+it, default to using "a SQL."
 
 Other useful resources:
 
@@ -208,8 +214,8 @@ contribution](https://trino.io/development/process.html).
 
 2. You might select a GitHub doc issue to work on that requires you to verify
    how Trino handles a situation, such as [adding
-   documentation](https://github.com/trinodb/trino/issues/7660) for a SQL
-   language function.
+   documentation](https://github.com/trinodb/trino/issues/7660) for SQL
+   functions.
 
    In this case, the five-minute video [Learning Trino SQL with
    Docker](https://www.youtube.com/watch?v=y58sb9bW2mA) gives you a starting

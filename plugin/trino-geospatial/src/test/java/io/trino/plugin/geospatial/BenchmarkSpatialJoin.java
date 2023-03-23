@@ -38,6 +38,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Optional;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import static com.google.common.io.Resources.getResource;
 import static io.trino.jmh.Benchmarks.benchmark;
@@ -82,10 +83,13 @@ public class BenchmarkSpatialJoin
             queryRunner.createCatalog("memory", new MemoryConnectorFactory(), ImmutableMap.of());
 
             Path path = new File(getResource("us-states.tsv").toURI()).toPath();
-            String polygonValues = Files.lines(path)
-                    .map(line -> line.split("\t"))
-                    .map(parts -> format("('%s', '%s')", parts[0], parts[1]))
-                    .collect(Collectors.joining(","));
+            String polygonValues;
+            try (Stream<String> lines = Files.lines(path)) {
+                polygonValues = lines
+                        .map(line -> line.split("\t"))
+                        .map(parts -> format("('%s', '%s')", parts[0], parts[1]))
+                        .collect(Collectors.joining(","));
+            }
             queryRunner.execute(format("CREATE TABLE memory.default.polygons AS SELECT * FROM (VALUES %s) as t (name, wkt)", polygonValues));
         }
 
@@ -105,9 +109,10 @@ public class BenchmarkSpatialJoin
         {
             queryRunner.inTransaction(queryRunner.getDefaultSession(), transactionSession -> {
                 Metadata metadata = queryRunner.getMetadata();
-                Optional<TableHandle> tableHandle = metadata.getTableHandle(transactionSession, QualifiedObjectName.valueOf("memory.default.points"));
+                QualifiedObjectName tableName = QualifiedObjectName.valueOf("memory.default.points");
+                Optional<TableHandle> tableHandle = metadata.getTableHandle(transactionSession, tableName);
                 assertTrue(tableHandle.isPresent(), "Table memory.default.points does not exist");
-                metadata.dropTable(transactionSession, tableHandle.get());
+                metadata.dropTable(transactionSession, tableHandle.get(), tableName.asCatalogSchemaTableName());
                 return null;
             });
         }

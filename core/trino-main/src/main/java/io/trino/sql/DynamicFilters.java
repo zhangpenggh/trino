@@ -179,11 +179,10 @@ public final class DynamicFilters
 
     public static Optional<Descriptor> getDescriptor(Expression expression)
     {
-        if (!(expression instanceof FunctionCall)) {
+        if (!(expression instanceof FunctionCall functionCall)) {
             return Optional.empty();
         }
 
-        FunctionCall functionCall = (FunctionCall) expression;
         if (!isDynamicFilterFunction(functionCall)) {
             return Optional.empty();
         }
@@ -362,7 +361,7 @@ public final class DynamicFilters
     {
         private Function() {}
 
-        private static final String NAME = "$internal$dynamic_filter_function";
+        public static final String NAME = "$internal$dynamic_filter_function";
 
         @TypeParameter("T")
         @SqlType(BOOLEAN)

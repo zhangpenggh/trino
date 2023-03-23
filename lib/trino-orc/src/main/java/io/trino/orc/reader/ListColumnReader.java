@@ -29,7 +29,6 @@ import io.trino.spi.block.ArrayBlock;
 import io.trino.spi.block.Block;
 import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.Type;
-import org.openjdk.jol.info.ClassLayout;
 
 import javax.annotation.Nullable;
 
@@ -39,6 +38,7 @@ import java.time.ZoneId;
 import java.util.Optional;
 
 import static com.google.common.base.MoreObjects.toStringHelper;
+import static io.airlift.slice.SizeOf.instanceSize;
 import static io.trino.orc.OrcReader.fullyProjectedLayout;
 import static io.trino.orc.metadata.Stream.StreamKind.LENGTH;
 import static io.trino.orc.metadata.Stream.StreamKind.PRESENT;
@@ -53,7 +53,7 @@ import static java.util.Objects.requireNonNull;
 public class ListColumnReader
         implements ColumnReader
 {
-    private static final int INSTANCE_SIZE = ClassLayout.parseClass(ListColumnReader.class).instanceSize();
+    private static final int INSTANCE_SIZE = instanceSize(ListColumnReader.class);
 
     private final Type elementType;
     private final OrcColumn column;
@@ -74,7 +74,7 @@ public class ListColumnReader
 
     private boolean rowGroupOpen;
 
-    public ListColumnReader(Type type, OrcColumn column, AggregatedMemoryContext systemMemoryContext, OrcBlockFactory blockFactory, FieldMapperFactory fieldMapperFactory)
+    public ListColumnReader(Type type, OrcColumn column, AggregatedMemoryContext memoryContext, OrcBlockFactory blockFactory, FieldMapperFactory fieldMapperFactory)
             throws OrcCorruptionException
     {
         requireNonNull(type, "type is null");
@@ -87,7 +87,7 @@ public class ListColumnReader
                 elementType,
                 column.getNestedColumns().get(0),
                 fullyProjectedLayout(),
-                systemMemoryContext,
+                memoryContext,
                 blockFactory,
                 fieldMapperFactory);
     }

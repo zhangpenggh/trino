@@ -14,12 +14,15 @@
 package io.trino.security;
 
 import io.trino.metadata.QualifiedObjectName;
+import io.trino.spi.connector.CatalogSchemaTableName;
+import io.trino.spi.function.FunctionKind;
 import io.trino.spi.security.AccessDeniedException;
 import io.trino.spi.security.Identity;
 import io.trino.spi.security.ViewExpression;
 import io.trino.spi.type.Type;
 
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 
 import static com.google.common.base.Verify.verify;
@@ -54,6 +57,12 @@ public class ViewAccessControl
     }
 
     @Override
+    public Set<String> filterColumns(SecurityContext context, CatalogSchemaTableName tableName, Set<String> columns)
+    {
+        return delegate.filterColumns(context, tableName, columns);
+    }
+
+    @Override
     public void checkCanCreateViewWithSelectFromColumns(SecurityContext context, QualifiedObjectName tableName, Set<String> columnNames)
     {
         wrapAccessDeniedException(() -> delegate.checkCanCreateViewWithSelectFromColumns(context, tableName, columnNames));
@@ -63,6 +72,12 @@ public class ViewAccessControl
     public void checkCanExecuteFunction(SecurityContext context, String functionName)
     {
         wrapAccessDeniedException(() -> delegate.checkCanGrantExecuteFunctionPrivilege(context, functionName, invoker, false));
+    }
+
+    @Override
+    public void checkCanExecuteFunction(SecurityContext context, FunctionKind functionKind, QualifiedObjectName functionName)
+    {
+        wrapAccessDeniedException(() -> delegate.checkCanGrantExecuteFunctionPrivilege(context, functionKind, functionName, invoker, false));
     }
 
     @Override
@@ -78,9 +93,9 @@ public class ViewAccessControl
     }
 
     @Override
-    public List<ViewExpression> getColumnMasks(SecurityContext context, QualifiedObjectName tableName, String columnName, Type type)
+    public Optional<ViewExpression> getColumnMask(SecurityContext context, QualifiedObjectName tableName, String columnName, Type type)
     {
-        return delegate.getColumnMasks(context, tableName, columnName, type);
+        return delegate.getColumnMask(context, tableName, columnName, type);
     }
 
     private static void wrapAccessDeniedException(Runnable runnable)

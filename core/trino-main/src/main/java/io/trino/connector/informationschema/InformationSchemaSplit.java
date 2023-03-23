@@ -22,11 +22,15 @@ import io.trino.spi.connector.ConnectorSplit;
 import java.util.List;
 
 import static com.google.common.base.Preconditions.checkArgument;
+import static io.airlift.slice.SizeOf.estimatedSizeOf;
+import static io.airlift.slice.SizeOf.instanceSize;
 import static java.util.Objects.requireNonNull;
 
 public class InformationSchemaSplit
         implements ConnectorSplit
 {
+    private static final int INSTANCE_SIZE = instanceSize(InformationSchemaSplit.class);
+
     private final List<HostAddress> addresses;
 
     @JsonCreator
@@ -55,5 +59,12 @@ public class InformationSchemaSplit
     public Object getInfo()
     {
         return this;
+    }
+
+    @Override
+    public long getRetainedSizeInBytes()
+    {
+        return INSTANCE_SIZE
+                + estimatedSizeOf(addresses, HostAddress::getRetainedSizeInBytes);
     }
 }

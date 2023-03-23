@@ -24,11 +24,15 @@ import java.util.List;
 import java.util.Objects;
 
 import static com.google.common.base.MoreObjects.toStringHelper;
+import static io.airlift.slice.SizeOf.estimatedSizeOf;
+import static io.airlift.slice.SizeOf.instanceSize;
 import static java.util.Objects.requireNonNull;
 
 public class ThriftConnectorSplit
         implements ConnectorSplit
 {
+    private static final int INSTANCE_SIZE = instanceSize(ThriftConnectorSplit.class);
+
     private final TrinoThriftId splitId;
     private final List<HostAddress> addresses;
 
@@ -58,6 +62,14 @@ public class ThriftConnectorSplit
     public Object getInfo()
     {
         return "";
+    }
+
+    @Override
+    public long getRetainedSizeInBytes()
+    {
+        return INSTANCE_SIZE
+                + splitId.getRetainedSizeInBytes()
+                + estimatedSizeOf(addresses, HostAddress::getRetainedSizeInBytes);
     }
 
     @Override

@@ -69,7 +69,7 @@ public class TestRevokeOnTable
         tableGrants.grant(new TrinoPrincipal(USER, userWithDelete.getUser()), table, ImmutableSet.of(Privilege.DELETE), true);
         MockConnectorFactory connectorFactory = MockConnectorFactory.builder()
                 .withListSchemaNames(session -> ImmutableList.of("default"))
-                .withListTables((session, schemaName) -> "default".equalsIgnoreCase(schemaName) ? ImmutableList.of(table) : ImmutableList.of())
+                .withListTables((session, schemaName) -> "default".equalsIgnoreCase(schemaName) ? ImmutableList.of(table.getTableName()) : ImmutableList.of())
                 .withGetTableHandle((session, tableName) -> tableName.equals(table) ? new MockConnectorTableHandle(tableName) : null)
                 .withSchemaGrants(new MutableGrants<>())
                 .withTableGrants(tableGrants)
@@ -84,6 +84,7 @@ public class TestRevokeOnTable
     {
         assertions.close();
         assertions = null;
+        queryRunner = null; // closed by assertions.close
     }
 
     @Test(dataProvider = "privilegesAndUsers")
@@ -121,9 +122,9 @@ public class TestRevokeOnTable
     public void testAccessDenied(String privilege)
     {
         assertThatThrownBy(() -> queryRunner.execute(sessionOf(randomUsername()), format("REVOKE %s ON TABLE table_one FROM %s", privilege, randomUsername())))
-                .hasMessageContaining(format(
+                .hasMessageContaining(
                         "Access Denied: Cannot revoke privilege %s on table default.table_one",
-                        privilege.equals("ALL PRIVILEGES") ? "CREATE" : privilege));
+                        privilege.equals("ALL PRIVILEGES") ? "CREATE" : privilege);
     }
 
     @DataProvider(name = "privilegesAndUsers")

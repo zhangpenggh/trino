@@ -40,14 +40,13 @@ import org.testng.annotations.AfterMethod;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 
-import java.io.File;
 import java.io.IOException;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.OptionalInt;
 import java.util.Set;
 import java.util.UUID;
 
-import static com.google.common.io.Files.createTempDir;
 import static com.google.common.io.MoreFiles.deleteRecursively;
 import static com.google.common.io.RecursiveDeleteOption.ALLOW_INSECURE;
 import static io.airlift.concurrent.MoreFutures.getFutureValue;
@@ -63,10 +62,12 @@ import static io.trino.spi.type.VarcharType.createVarcharType;
 import static io.trino.testing.MaterializedResult.materializeSourceDataStream;
 import static io.trino.testing.QueryAssertions.assertEqualsIgnoreOrder;
 import static io.trino.testing.TestingConnectorSession.SESSION;
-import static io.trino.testing.assertions.Assert.assertEquals;
+import static java.nio.file.Files.createTempDirectory;
 import static java.util.Collections.nCopies;
 import static java.util.stream.Collectors.toList;
 import static java.util.stream.Collectors.toSet;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.testng.Assert.assertEquals;
 
 @Test(singleThreaded = true)
 public class TestShardCompactor
@@ -81,16 +82,17 @@ public class TestShardCompactor
 
     private RaptorStorageManager storageManager;
     private ShardCompactor compactor;
-    private File temporary;
+    private Path temporary;
     private Handle dummyHandle;
 
     @BeforeMethod
     public void setup()
+            throws IOException
     {
-        temporary = createTempDir();
+        temporary = createTempDirectory(null);
         Jdbi dbi = createTestingJdbi();
         dummyHandle = dbi.open();
-        storageManager = createRaptorStorageManager(dbi, temporary, MAX_SHARD_ROWS);
+        storageManager = createRaptorStorageManager(dbi, temporary.toFile(), MAX_SHARD_ROWS);
         compactor = new ShardCompactor(storageManager, READER_OPTIONS, new TypeOperators());
     }
 
@@ -100,8 +102,9 @@ public class TestShardCompactor
     {
         if (dummyHandle != null) {
             dummyHandle.close();
+            dummyHandle = null;
         }
-        deleteRecursively(temporary.toPath(), ALLOW_INSECURE);
+        deleteRecursively(temporary, ALLOW_INSECURE);
     }
 
     @Test
@@ -182,7 +185,7 @@ public class TestShardCompactor
         MaterializedResult inputRowsSorted = sortAndMaterialize(inputPages, columnTypes, sortIndexes, sortOrders, sortTypes);
         MaterializedResult outputRows = extractColumns(getMaterializedRows(outputUuids, columnIds, columnTypes), sortIndexes, sortTypes);
 
-        assertEquals(outputRows, inputRowsSorted);
+        assertThat(outputRows).containsExactlyElementsOf(inputRowsSorted);
     }
 
     private static MaterializedResult extractColumns(MaterializedResult materializedRows, List<Integer> indexes, List<Type> types)

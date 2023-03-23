@@ -15,6 +15,7 @@ package io.trino.spi.eventlistener;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import io.trino.spi.Unstable;
 
 import java.time.Duration;
 import java.util.List;
@@ -28,21 +29,28 @@ import static java.util.Objects.requireNonNull;
 public class QueryStatistics
 {
     private final Duration cpuTime;
+    private final Duration failedCpuTime;
     private final Duration wallTime;
     private final Duration queuedTime;
     private final Optional<Duration> scheduledTime;
-    private final Optional<Duration> waitingTime;
+    private final Optional<Duration> failedScheduledTime;
+    private final Optional<Duration> resourceWaitingTime;
     private final Optional<Duration> analysisTime;
     private final Optional<Duration> planningTime;
     private final Optional<Duration> executionTime;
+    private final Optional<Duration> inputBlockedTime;
+    private final Optional<Duration> failedInputBlockedTime;
+    private final Optional<Duration> outputBlockedTime;
+    private final Optional<Duration> failedOutputBlockedTime;
+    private final Optional<Duration> physicalInputReadTime;
 
     private final long peakUserMemoryBytes;
-    // peak of user + system memory
-    private final long peakTotalNonRevocableMemoryBytes;
     private final long peakTaskUserMemory;
     private final long peakTaskTotalMemory;
     private final long physicalInputBytes;
     private final long physicalInputRows;
+    private final long processedInputBytes;
+    private final long processedInputRows;
     private final long internalNetworkBytes;
     private final long internalNetworkRows;
     private final long totalBytes;
@@ -51,9 +59,10 @@ public class QueryStatistics
     private final long outputRows;
     private final long writtenBytes;
     private final long writtenRows;
+    private final long spilledBytes;
 
     private final double cumulativeMemory;
-    private final double cumulativeSystemMemory;
+    private final double failedCumulativeMemory;
 
     private final List<StageGcStatistics> stageGcStatistics;
 
@@ -61,6 +70,7 @@ public class QueryStatistics
     private final boolean complete;
 
     private final List<StageCpuDistribution> cpuTimeDistribution;
+    private final List<StageOutputBufferUtilization> outputBufferUtilization;
 
     /**
      * Operator summaries serialized to JSON. Serialization format and structure
@@ -74,21 +84,30 @@ public class QueryStatistics
     private final Optional<String> planNodeStatsAndCosts;
 
     @JsonCreator
+    @Unstable
     public QueryStatistics(
             Duration cpuTime,
+            Duration failedCpuTime,
             Duration wallTime,
             Duration queuedTime,
             Optional<Duration> scheduledTime,
-            Optional<Duration> waitingTime,
+            Optional<Duration> failedScheduledTime,
+            Optional<Duration> resourceWaitingTime,
             Optional<Duration> analysisTime,
             Optional<Duration> planningTime,
             Optional<Duration> executionTime,
+            Optional<Duration> inputBlockedTime,
+            Optional<Duration> failedInputBlockedTime,
+            Optional<Duration> outputBlockedTime,
+            Optional<Duration> failedOutputBlockedTime,
+            Optional<Duration> physicalInputReadTime,
             long peakUserMemoryBytes,
-            long peakTotalNonRevocableMemoryBytes,
             long peakTaskUserMemory,
             long peakTaskTotalMemory,
             long physicalInputBytes,
             long physicalInputRows,
+            long processedInputBytes,
+            long processedInputRows,
             long internalNetworkBytes,
             long internalNetworkRows,
             long totalBytes,
@@ -97,29 +116,39 @@ public class QueryStatistics
             long outputRows,
             long writtenBytes,
             long writtenRows,
+            long spilledBytes,
             double cumulativeMemory,
-            double cumulativeSystemMemory,
+            double failedCumulativeMemory,
             List<StageGcStatistics> stageGcStatistics,
             int completedSplits,
             boolean complete,
             List<StageCpuDistribution> cpuTimeDistribution,
+            List<StageOutputBufferUtilization> outputBufferUtilization,
             List<String> operatorSummaries,
             Optional<String> planNodeStatsAndCosts)
     {
         this.cpuTime = requireNonNull(cpuTime, "cpuTime is null");
+        this.failedCpuTime = requireNonNull(failedCpuTime, "failedCpuTime is null");
         this.wallTime = requireNonNull(wallTime, "wallTime is null");
         this.queuedTime = requireNonNull(queuedTime, "queuedTime is null");
         this.scheduledTime = requireNonNull(scheduledTime, "scheduledTime is null");
-        this.waitingTime = requireNonNull(waitingTime, "waitingTime is null");
+        this.failedScheduledTime = requireNonNull(failedScheduledTime, "failedScheduledTime is null");
+        this.resourceWaitingTime = requireNonNull(resourceWaitingTime, "resourceWaitingTime is null");
         this.analysisTime = requireNonNull(analysisTime, "analysisTime is null");
         this.planningTime = requireNonNull(planningTime, "planningTime is null");
         this.executionTime = requireNonNull(executionTime, "executionTime is null");
+        this.inputBlockedTime = requireNonNull(inputBlockedTime, "inputBlockedTime is null");
+        this.failedInputBlockedTime = requireNonNull(failedInputBlockedTime, "failedInputBlockedTime is null");
+        this.outputBlockedTime = requireNonNull(outputBlockedTime, "outputBlockedTime is null");
+        this.failedOutputBlockedTime = requireNonNull(failedOutputBlockedTime, "failedOutputBlockedTime is null");
+        this.physicalInputReadTime = requireNonNull(physicalInputReadTime, "physicalInputReadTime is null");
         this.peakUserMemoryBytes = peakUserMemoryBytes;
-        this.peakTotalNonRevocableMemoryBytes = peakTotalNonRevocableMemoryBytes;
         this.peakTaskUserMemory = peakTaskUserMemory;
         this.peakTaskTotalMemory = peakTaskTotalMemory;
         this.physicalInputBytes = physicalInputBytes;
         this.physicalInputRows = physicalInputRows;
+        this.processedInputBytes = processedInputBytes;
+        this.processedInputRows = processedInputRows;
         this.internalNetworkBytes = internalNetworkBytes;
         this.internalNetworkRows = internalNetworkRows;
         this.totalBytes = totalBytes;
@@ -128,12 +157,14 @@ public class QueryStatistics
         this.outputRows = outputRows;
         this.writtenBytes = writtenBytes;
         this.writtenRows = writtenRows;
+        this.spilledBytes = spilledBytes;
         this.cumulativeMemory = cumulativeMemory;
-        this.cumulativeSystemMemory = cumulativeSystemMemory;
+        this.failedCumulativeMemory = failedCumulativeMemory;
         this.stageGcStatistics = requireNonNull(stageGcStatistics, "stageGcStatistics is null");
         this.completedSplits = completedSplits;
         this.complete = complete;
         this.cpuTimeDistribution = requireNonNull(cpuTimeDistribution, "cpuTimeDistribution is null");
+        this.outputBufferUtilization = requireNonNull(outputBufferUtilization, "outputBufferUtilization is null");
         this.operatorSummaries = requireNonNull(operatorSummaries, "operatorSummaries is null");
         this.planNodeStatsAndCosts = requireNonNull(planNodeStatsAndCosts, "planNodeStatsAndCosts is null");
     }
@@ -142,6 +173,12 @@ public class QueryStatistics
     public Duration getCpuTime()
     {
         return cpuTime;
+    }
+
+    @JsonProperty
+    public Duration getFailedCpuTime()
+    {
+        return failedCpuTime;
     }
 
     @JsonProperty
@@ -163,9 +200,15 @@ public class QueryStatistics
     }
 
     @JsonProperty
+    public Optional<Duration> getFailedScheduledTime()
+    {
+        return failedScheduledTime;
+    }
+
+    @JsonProperty
     public Optional<Duration> getResourceWaitingTime()
     {
-        return waitingTime;
+        return resourceWaitingTime;
     }
 
     @JsonProperty
@@ -187,15 +230,39 @@ public class QueryStatistics
     }
 
     @JsonProperty
-    public long getPeakUserMemoryBytes()
+    public Optional<Duration> getInputBlockedTime()
     {
-        return peakUserMemoryBytes;
+        return inputBlockedTime;
     }
 
     @JsonProperty
-    public long getPeakTotalNonRevocableMemoryBytes()
+    public Optional<Duration> getFailedInputBlockedTime()
     {
-        return peakTotalNonRevocableMemoryBytes;
+        return failedInputBlockedTime;
+    }
+
+    @JsonProperty
+    public Optional<Duration> getOutputBlockedTime()
+    {
+        return outputBlockedTime;
+    }
+
+    @JsonProperty
+    public Optional<Duration> getFailedOutputBlockedTime()
+    {
+        return failedOutputBlockedTime;
+    }
+
+    @JsonProperty
+    public Optional<Duration> getPhysicalInputReadTime()
+    {
+        return physicalInputReadTime;
+    }
+
+    @JsonProperty
+    public long getPeakUserMemoryBytes()
+    {
+        return peakUserMemoryBytes;
     }
 
     @JsonProperty
@@ -220,6 +287,18 @@ public class QueryStatistics
     public long getPhysicalInputRows()
     {
         return physicalInputRows;
+    }
+
+    @JsonProperty
+    public long getProcessedInputBytes()
+    {
+        return processedInputBytes;
+    }
+
+    @JsonProperty
+    public long getProcessedInputRows()
+    {
+        return processedInputRows;
     }
 
     @JsonProperty
@@ -271,15 +350,21 @@ public class QueryStatistics
     }
 
     @JsonProperty
+    public long getSpilledBytes()
+    {
+        return spilledBytes;
+    }
+
+    @JsonProperty
     public double getCumulativeMemory()
     {
         return cumulativeMemory;
     }
 
     @JsonProperty
-    public double getCumulativeSystemMemory()
+    public double getFailedCumulativeMemory()
     {
-        return cumulativeSystemMemory;
+        return failedCumulativeMemory;
     }
 
     @JsonProperty
@@ -304,6 +389,12 @@ public class QueryStatistics
     public List<StageCpuDistribution> getCpuTimeDistribution()
     {
         return cpuTimeDistribution;
+    }
+
+    @JsonProperty
+    public List<StageOutputBufferUtilization> getOutputBufferUtilization()
+    {
+        return outputBufferUtilization;
     }
 
     @JsonProperty

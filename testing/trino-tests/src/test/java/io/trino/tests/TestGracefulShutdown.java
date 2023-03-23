@@ -19,7 +19,7 @@ import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.ListeningExecutorService;
 import com.google.common.util.concurrent.MoreExecutors;
 import io.trino.Session;
-import io.trino.execution.TaskManager;
+import io.trino.execution.SqlTaskManager;
 import io.trino.server.BasicQueryInfo;
 import io.trino.server.testing.TestingTrinoServer;
 import io.trino.server.testing.TestingTrinoServer.TestShutdownAction;
@@ -32,11 +32,13 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
+import static com.google.common.collect.MoreCollectors.onlyElement;
 import static io.trino.execution.QueryState.FINISHED;
 import static io.trino.memory.TestMemoryManager.createQueryRunner;
 import static io.trino.testing.TestingSession.testSessionBuilder;
 import static java.util.concurrent.Executors.newCachedThreadPool;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertTrue;
 
@@ -70,7 +72,7 @@ public class TestGracefulShutdown
         Map<String, String> properties = ImmutableMap.<String, String>builder()
                 .put("node-scheduler.include-coordinator", "false")
                 .put("shutdown.grace-period", "10s")
-                .build();
+                .buildOrThrow();
 
         try (DistributedQueryRunner queryRunner = createQueryRunner(TINY_SESSION, properties)) {
             List<ListenableFuture<Void>> queryFutures = new ArrayList<>();
@@ -82,13 +84,14 @@ public class TestGracefulShutdown
                         executor));
             }
 
+            @SuppressWarnings("resource")
             TestingTrinoServer worker = queryRunner.getServers()
                     .stream()
                     .filter(server -> !server.isCoordinator())
                     .findFirst()
-                    .get();
+                    .orElseThrow();
 
-            TaskManager taskManager = worker.getTaskManager();
+            SqlTaskManager taskManager = worker.getTaskManager();
 
             // wait until tasks show up on the worker
             while (taskManager.getAllTaskInfo().isEmpty()) {
@@ -110,18 +113,20 @@ public class TestGracefulShutdown
         }
     }
 
-    @Test(expectedExceptions = UnsupportedOperationException.class)
+    @Test
     public void testCoordinatorShutdown()
             throws Exception
     {
         try (DistributedQueryRunner queryRunner = createQueryRunner(TINY_SESSION, ImmutableMap.of())) {
+            @SuppressWarnings("resource")
             TestingTrinoServer coordinator = queryRunner.getServers()
                     .stream()
                     .filter(TestingTrinoServer::isCoordinator)
-                    .findFirst()
-                    .get();
+                    .collect(onlyElement());
 
-            coordinator.getGracefulShutdownHandler().requestShutdown();
+            assertThatThrownBy(coordinator.getGracefulShutdownHandler()::requestShutdown)
+                    .isInstanceOf(UnsupportedOperationException.class)
+                    .hasMessage("Cannot shutdown coordinator");
         }
     }
 }

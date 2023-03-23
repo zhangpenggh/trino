@@ -56,7 +56,7 @@ that can be set when creating a new table.
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 The materialized views table contains the following information about all
-:ref:`materialized views <sql-materialized-views-management>`:
+:ref:`materialized views <sql-materialized-view-management>`:
 
 .. list-table:: Metadata for materialized views
   :widths: 30, 70
@@ -78,9 +78,9 @@ The materialized views table contains the following information about all
       backing the materialized view.
   * - ``storage_table``
     - Name of the storage table backing the materialized view.
-  * - ``is_fresh``
-    - Flag to signal if data in the storage table is up to date. Queries on the
-      materialized view access the storage table if ``true``, otherwise
+  * - ``freshness``
+    - Freshness of data in the storage table. Queries on the
+      materialized view access the storage table if not ``STALE``, otherwise
       the ``definition`` is used to access the underlying data in the source
       tables.
   * - ``owner``
@@ -149,7 +149,15 @@ System connector procedures
 .. function:: runtime.kill_query(query_id, message)
 
     Kill the query identified by ``query_id``. The query failure message
-    includes the specified ``message``.
+    includes the specified ``message``. ``message`` is optional.
+
+.. _system-type-mapping:
+
+Type mapping
+------------
+
+Trino supports all data types used within the System schemas so no mapping
+is required.
 
 .. _system-sql-support:
 

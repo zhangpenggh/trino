@@ -13,7 +13,9 @@
  */
 package io.trino.plugin.clickhouse;
 
+import io.trino.testing.ResourcePresence;
 import org.testcontainers.containers.ClickHouseContainer;
+import org.testcontainers.utility.DockerImageName;
 
 import java.io.Closeable;
 import java.sql.Connection;
@@ -22,17 +24,31 @@ import java.sql.Statement;
 
 import static java.lang.String.format;
 import static org.testcontainers.containers.ClickHouseContainer.HTTP_PORT;
+import static org.testcontainers.utility.MountableFile.forClasspathResource;
 
 public class TestingClickHouseServer
         implements Closeable
 {
-    private static final String CLICKHOUSE_IMAGE = "yandex/clickhouse-server:20.8";
+    private static final DockerImageName CLICKHOUSE_IMAGE = DockerImageName.parse("yandex/clickhouse-server");
+    public static final DockerImageName CLICKHOUSE_LATEST_IMAGE = CLICKHOUSE_IMAGE.withTag("21.11.10.1");
+    public static final DockerImageName CLICKHOUSE_DEFAULT_IMAGE = CLICKHOUSE_IMAGE.withTag("21.8.14.5"); // EOL is 31 Aug 2022
+
+    // Altinity Stable Builds Life-Cycle Table https://docs.altinity.com/altinitystablebuilds/#altinity-stable-builds-life-cycle-table
+    private static final DockerImageName ALTINITY_IMAGE = DockerImageName.parse("altinity/clickhouse-server").asCompatibleSubstituteFor("yandex/clickhouse-server");
+    public static final DockerImageName ALTINITY_LATEST_IMAGE = ALTINITY_IMAGE.withTag("21.8.13.1.altinitystable");
+    public static final DockerImageName ALTINITY_DEFAULT_IMAGE = ALTINITY_IMAGE.withTag("20.8.4.11_aes"); // EOL is 02 December 2022
+
     private final ClickHouseContainer dockerContainer;
 
     public TestingClickHouseServer()
     {
-        // Use 2nd stable version
-        dockerContainer = (ClickHouseContainer) new ClickHouseContainer(CLICKHOUSE_IMAGE)
+        this(CLICKHOUSE_DEFAULT_IMAGE);
+    }
+
+    public TestingClickHouseServer(DockerImageName image)
+    {
+        dockerContainer = new ClickHouseContainer(image)
+                .withCopyFileToContainer(forClasspathResource("custom.xml"), "/etc/clickhouse-server/config.d/custom.xml")
                 .withStartupAttempts(10);
 
         dockerContainer.start();
@@ -51,7 +67,7 @@ public class TestingClickHouseServer
 
     public String getJdbcUrl()
     {
-        return format("jdbc:clickhouse://%s:%s/", dockerContainer.getContainerIpAddress(),
+        return format("jdbc:clickhouse://%s:%s/", dockerContainer.getHost(),
                 dockerContainer.getMappedPort(HTTP_PORT));
     }
 
@@ -59,5 +75,11 @@ public class TestingClickHouseServer
     public void close()
     {
         dockerContainer.stop();
+    }
+
+    @ResourcePresence
+    public boolean isRunning()
+    {
+        return dockerContainer.getContainerId() != null;
     }
 }
