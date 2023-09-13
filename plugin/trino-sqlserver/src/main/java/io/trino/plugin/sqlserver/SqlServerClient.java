@@ -19,6 +19,7 @@ import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
+import com.google.inject.Inject;
 import com.microsoft.sqlserver.jdbc.SQLServerConnection;
 import com.microsoft.sqlserver.jdbc.SQLServerException;
 import dev.failsafe.Failsafe;
@@ -29,6 +30,7 @@ import io.airlift.slice.Slice;
 import io.trino.plugin.base.aggregation.AggregateFunctionRewriter;
 import io.trino.plugin.base.aggregation.AggregateFunctionRule;
 import io.trino.plugin.base.expression.ConnectorExpressionRewriter;
+import io.trino.plugin.base.mapping.IdentifierMapping;
 import io.trino.plugin.jdbc.BaseJdbcClient;
 import io.trino.plugin.jdbc.BaseJdbcConfig;
 import io.trino.plugin.jdbc.CaseSensitivity;
@@ -38,6 +40,8 @@ import io.trino.plugin.jdbc.JdbcColumnHandle;
 import io.trino.plugin.jdbc.JdbcExpression;
 import io.trino.plugin.jdbc.JdbcJoinCondition;
 import io.trino.plugin.jdbc.JdbcOutputTableHandle;
+import io.trino.plugin.jdbc.JdbcProcedureHandle;
+import io.trino.plugin.jdbc.JdbcProcedureHandle.ProcedureQuery;
 import io.trino.plugin.jdbc.JdbcSortItem;
 import io.trino.plugin.jdbc.JdbcStatisticsConfig;
 import io.trino.plugin.jdbc.JdbcTableHandle;
@@ -61,7 +65,6 @@ import io.trino.plugin.jdbc.expression.ParameterizedExpression;
 import io.trino.plugin.jdbc.expression.RewriteComparison;
 import io.trino.plugin.jdbc.expression.RewriteIn;
 import io.trino.plugin.jdbc.logging.RemoteQueryModifier;
-import io.trino.plugin.jdbc.mapping.IdentifierMapping;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.AggregateFunction;
 import io.trino.spi.connector.ColumnHandle;
@@ -91,8 +94,6 @@ import io.trino.spi.type.VarcharType;
 import org.jdbi.v3.core.Handle;
 import org.jdbi.v3.core.Jdbi;
 
-import javax.inject.Inject;
-
 import java.sql.CallableStatement;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
@@ -100,6 +101,7 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
+import java.sql.Statement;
 import java.sql.Types;
 import java.time.Instant;
 import java.time.LocalDate;
@@ -289,6 +291,17 @@ public class SqlServerClient
                         .add(new ImplementSqlServerVariancePop())
                         // SQL Server doesn't have covar_samp and covar_pop functions so we can't implement pushdown for them
                         .build());
+    }
+
+    @Override
+    protected void dropSchema(ConnectorSession session, Connection connection, String remoteSchemaName, boolean cascade)
+            throws SQLException
+    {
+        if (cascade) {
+            // SQL Server doesn't support CASCADE option https://learn.microsoft.com/en-us/sql/t-sql/statements/drop-schema-transact-sql
+            throw new TrinoException(NOT_SUPPORTED, "This connector does not support dropping schemas with CASCADE option");
+        }
+        execute(session, connection, "DROP SCHEMA " + quoted(remoteSchemaName));
     }
 
     @Override
@@ -653,6 +666,29 @@ public class SqlServerClient
         catch (SQLException | RuntimeException e) {
             throwIfInstanceOf(e, TrinoException.class);
             throw new TrinoException(JDBC_ERROR, "Failed fetching statistics for table: " + handle, e);
+        }
+    }
+
+    @Override
+    public JdbcProcedureHandle getProcedureHandle(ConnectorSession session, ProcedureQuery procedureQuery)
+    {
+        try (Connection connection = connectionFactory.openConnection(session)) {
+            try (Statement statement = connection.createStatement();
+                    // When FMTONLY is ON , a rowset is returned with the column names for the query
+                    ResultSet resultSet = statement.executeQuery("set fmtonly on %s \nset fmtonly off".formatted(procedureQuery.query()))) {
+                ResultSetMetaData metadata = resultSet.getMetaData();
+                if (metadata == null) {
+                    throw new TrinoException(NOT_SUPPORTED, "Procedure not supported: ResultSetMetaData not available for query: " + procedureQuery.query());
+                }
+                JdbcProcedureHandle procedureHandle = new JdbcProcedureHandle(procedureQuery, getColumns(session, connection, metadata));
+                if (statement.getMoreResults()) {
+                    throw new TrinoException(NOT_SUPPORTED, "Procedure has multiple ResultSets for query: " + procedureQuery.query());
+                }
+                return procedureHandle;
+            }
+        }
+        catch (SQLException e) {
+            throw new TrinoException(JDBC_ERROR, "Failed to get table handle for procedure query. " + firstNonNull(e.getMessage(), e), e);
         }
     }
 

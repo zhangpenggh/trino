@@ -36,28 +36,16 @@ public class TestHiveConnectorSmokeTest
                 .build();
     }
 
-    @SuppressWarnings("DuplicateBranchesInSwitch")
     @Override
     protected boolean hasBehavior(TestingConnectorBehavior connectorBehavior)
     {
-        switch (connectorBehavior) {
-            case SUPPORTS_TOPN_PUSHDOWN:
-                return false;
-
-            case SUPPORTS_CREATE_VIEW:
-                return true;
-
-            case SUPPORTS_DELETE:
-            case SUPPORTS_UPDATE:
-            case SUPPORTS_MERGE:
-                return true;
-
-            case SUPPORTS_MULTI_STATEMENT_WRITES:
-                return true;
-
-            default:
-                return super.hasBehavior(connectorBehavior);
-        }
+        return switch (connectorBehavior) {
+            case SUPPORTS_MULTI_STATEMENT_WRITES -> true;
+            case SUPPORTS_CREATE_MATERIALIZED_VIEW,
+                    SUPPORTS_TOPN_PUSHDOWN,
+                    SUPPORTS_TRUNCATE -> false;
+            default -> super.hasBehavior(connectorBehavior);
+        };
     }
 
     @Override
@@ -95,5 +83,14 @@ public class TestHiveConnectorSmokeTest
                         "WITH (\n" +
                         "   format = 'ORC'\n" +
                         ")");
+    }
+
+    @Override
+    public void testCreateSchemaWithNonLowercaseOwnerName()
+    {
+        // Override because HivePrincipal's username is case-sensitive unlike TrinoPrincipal
+        assertThatThrownBy(super::testCreateSchemaWithNonLowercaseOwnerName)
+                .hasMessageContaining("Access Denied: Cannot create schema")
+                .hasStackTraceContaining("CREATE SCHEMA");
     }
 }

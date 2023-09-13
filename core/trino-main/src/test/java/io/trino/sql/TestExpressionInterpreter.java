@@ -285,6 +285,25 @@ public class TestExpressionInterpreter
     }
 
     @Test
+    public void testLambdaBody()
+    {
+        assertOptimizedEquals("transform(ARRAY[bound_long], n -> CAST(n as BIGINT))",
+                "transform(ARRAY[bound_long], n -> n)");
+        assertOptimizedEquals("transform(ARRAY[bound_long], n -> CAST(n as VARCHAR(5)))",
+                "transform(ARRAY[bound_long], n -> CAST(n as VARCHAR(5)))");
+        assertOptimizedEquals("transform(ARRAY[bound_long], n -> IF(false, 1, 0 / 0))",
+                "transform(ARRAY[bound_long], n -> 0 / 0)");
+        assertOptimizedEquals("transform(ARRAY[bound_long], n -> 5 / 0)",
+                "transform(ARRAY[bound_long], n -> 5 / 0)");
+        assertOptimizedEquals("transform(ARRAY[bound_long], n -> nullif(true, true))",
+                "transform(ARRAY[bound_long], n -> CAST(null AS Boolean))");
+        assertOptimizedEquals("transform(ARRAY[bound_long], n -> n + 10 * 10)",
+                "transform(ARRAY[bound_long], n -> n + 100)");
+        assertOptimizedEquals("reduce_agg(bound_long, 0, (a, b) -> IF(false, a, b), (a, b) -> IF(true, a, b))",
+                "reduce_agg(bound_long, 0, (a, b) -> b, (a, b) -> a)");
+    }
+
+    @Test
     public void testNullIf()
     {
         assertOptimizedEquals("nullif(true, true)", "NULL");
@@ -396,6 +415,8 @@ public class TestExpressionInterpreter
         assertOptimizedEquals("NULL BETWEEN 2 AND 4", "NULL");
         assertOptimizedEquals("3 BETWEEN NULL AND 4", "NULL");
         assertOptimizedEquals("3 BETWEEN 2 AND NULL", "NULL");
+        assertOptimizedEquals("2 BETWEEN 3 AND NULL", "false");
+        assertOptimizedEquals("8 BETWEEN NULL AND 6", "false");
 
         assertOptimizedEquals("'cc' BETWEEN 'b' AND 'd'", "true");
         assertOptimizedEquals("'b' BETWEEN 'cc' AND 'd'", "false");

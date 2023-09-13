@@ -33,9 +33,9 @@ import io.trino.spi.connector.CatalogHandle;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.connector.SortOrder;
-import io.trino.spi.function.SchemaFunctionName;
+import io.trino.spi.connector.WriterScalingOptions;
+import io.trino.spi.function.table.ConnectorTableFunctionHandle;
 import io.trino.spi.predicate.TupleDomain;
-import io.trino.spi.ptf.ConnectorTableFunctionHandle;
 import io.trino.spi.type.Type;
 import io.trino.sql.ExpressionUtils;
 import io.trino.sql.analyzer.TypeSignatureProvider;
@@ -92,6 +92,7 @@ import io.trino.sql.planner.plan.TableExecuteNode;
 import io.trino.sql.planner.plan.TableFinishNode;
 import io.trino.sql.planner.plan.TableFunctionNode;
 import io.trino.sql.planner.plan.TableFunctionNode.TableArgumentProperties;
+import io.trino.sql.planner.plan.TableFunctionProcessorNode;
 import io.trino.sql.planner.plan.TableScanNode;
 import io.trino.sql.planner.plan.TableWriterNode;
 import io.trino.sql.planner.plan.TableWriterNode.CreateTarget;
@@ -375,7 +376,11 @@ public class PlanBuilder
                 .flatMap(Collection::stream)
                 .distinct()
                 .collect(toImmutableMap(identity(), identity()));
+        return groupId(groupingSets, groupingColumns, aggregationArguments, groupIdSymbol, source);
+    }
 
+    public GroupIdNode groupId(List<List<Symbol>> groupingSets, Map<Symbol, Symbol> groupingColumns, List<Symbol> aggregationArguments, Symbol groupIdSymbol, PlanNode source)
+    {
         return new GroupIdNode(
                 idAllocator.getNextId(),
                 source,
@@ -684,28 +689,35 @@ public class PlanBuilder
         }
     }
 
-    public TableFinishNode tableWithExchangeCreate(WriterTarget target, PlanNode source, Symbol rowCountSymbol, PartitioningScheme partitioningScheme)
+    public TableFinishNode tableFinish(PlanNode source, WriterTarget target, Symbol rowCountSymbol)
     {
         return new TableFinishNode(
                 idAllocator.getNextId(),
-                exchange(e -> e
-                        .addSource(tableWriter(
-                                ImmutableList.of(rowCountSymbol),
-                                ImmutableList.of("column_a"),
-                                Optional.empty(),
-                                Optional.empty(),
-                                target,
-                                source,
-                                rowCountSymbol))
-                        .addInputsSet(rowCountSymbol)
-                        .partitioningScheme(partitioningScheme)),
+                source,
                 target,
                 rowCountSymbol,
                 Optional.empty(),
                 Optional.empty());
     }
 
-    public CreateTarget createTarget(CatalogHandle catalogHandle, SchemaTableName schemaTableName, boolean reportingWrittenBytesSupported, boolean multipleWritersPerPartitionSupported, OptionalInt maxWriterTasks)
+    public TableFinishNode tableWithExchangeCreate(WriterTarget target, PlanNode source, Symbol rowCountSymbol)
+    {
+        return tableFinish(
+                exchange(e -> e
+                        .addSource(tableWriter(
+                                ImmutableList.of(rowCountSymbol),
+                                ImmutableList.of("column_a"),
+                                Optional.empty(),
+                                target,
+                                source,
+                                rowCountSymbol))
+                        .addInputsSet(rowCountSymbol)
+                        .partitioningScheme(new PartitioningScheme(Partitioning.create(SINGLE_DISTRIBUTION, ImmutableList.of()), ImmutableList.of(rowCountSymbol)))),
+                target,
+                rowCountSymbol);
+    }
+
+    public CreateTarget createTarget(CatalogHandle catalogHandle, SchemaTableName schemaTableName, boolean multipleWritersPerPartitionSupported, OptionalInt maxWriterTasks, WriterScalingOptions writerScalingOptions)
     {
         OutputTableHandle tableHandle = new OutputTableHandle(
                 catalogHandle,
@@ -715,14 +727,14 @@ public class PlanBuilder
         return new CreateTarget(
                 tableHandle,
                 schemaTableName,
-                reportingWrittenBytesSupported,
                 multipleWritersPerPartitionSupported,
-                maxWriterTasks);
+                maxWriterTasks,
+                writerScalingOptions);
     }
 
-    public CreateTarget createTarget(CatalogHandle catalogHandle, SchemaTableName schemaTableName, boolean reportingWrittenBytesSupported, boolean multipleWritersPerPartitionSupported)
+    public CreateTarget createTarget(CatalogHandle catalogHandle, SchemaTableName schemaTableName, boolean multipleWritersPerPartitionSupported, WriterScalingOptions writerScalingOptions)
     {
-        return createTarget(catalogHandle, schemaTableName, reportingWrittenBytesSupported, multipleWritersPerPartitionSupported, OptionalInt.empty());
+        return createTarget(catalogHandle, schemaTableName, multipleWritersPerPartitionSupported, OptionalInt.empty(), writerScalingOptions);
     }
 
     public MergeWriterNode merge(SchemaTableName schemaTableName, PlanNode mergeSource, Symbol mergeRow, Symbol rowId, List<Symbol> outputs)
@@ -1131,14 +1143,13 @@ public class PlanBuilder
 
     public TableWriterNode tableWriter(List<Symbol> columns, List<String> columnNames, PlanNode source)
     {
-        return tableWriter(columns, columnNames, Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), source);
+        return tableWriter(columns, columnNames, Optional.empty(), Optional.empty(), Optional.empty(), source);
     }
 
     public TableWriterNode tableWriter(
             List<Symbol> columns,
             List<String> columnNames,
             Optional<PartitioningScheme> partitioningScheme,
-            Optional<PartitioningScheme> preferredPartitioningScheme,
             TableWriterNode.WriterTarget target,
             PlanNode source,
             Symbol rowCountSymbol)
@@ -1152,7 +1163,6 @@ public class PlanBuilder
                 columns,
                 columnNames,
                 partitioningScheme,
-                preferredPartitioningScheme,
                 Optional.empty(),
                 Optional.empty());
     }
@@ -1161,7 +1171,6 @@ public class PlanBuilder
             List<Symbol> columns,
             List<String> columnNames,
             Optional<PartitioningScheme> partitioningScheme,
-            Optional<PartitioningScheme> preferredPartitioningScheme,
             Optional<StatisticAggregations> statisticAggregations,
             Optional<StatisticAggregationsDescriptor<Symbol>> statisticAggregationsDescriptor,
             PlanNode source)
@@ -1175,21 +1184,19 @@ public class PlanBuilder
                 columns,
                 columnNames,
                 partitioningScheme,
-                preferredPartitioningScheme,
                 statisticAggregations,
                 statisticAggregationsDescriptor);
     }
 
     public TableExecuteNode tableExecute(List<Symbol> columns, List<String> columnNames, PlanNode source)
     {
-        return tableExecute(columns, columnNames, Optional.empty(), Optional.empty(), source);
+        return tableExecute(columns, columnNames, Optional.empty(), source);
     }
 
     public TableExecuteNode tableExecute(
             List<Symbol> columns,
             List<String> columnNames,
             Optional<PartitioningScheme> partitioningScheme,
-            Optional<PartitioningScheme> preferredPartitioningScheme,
             PlanNode source)
     {
         return new TableExecuteNode(
@@ -1202,13 +1209,12 @@ public class PlanBuilder
                                 new TestingTableExecuteHandle()),
                         Optional.empty(),
                         new SchemaTableName("schemaName", "tableName"),
-                        false),
+                        WriterScalingOptions.DISABLED),
                 symbol("partialrows", BIGINT),
                 symbol("fragment", VARBINARY),
                 columns,
                 columnNames,
-                partitioningScheme,
-                preferredPartitioningScheme);
+                partitioningScheme);
     }
 
     public TableFunctionNode tableFunction(
@@ -1228,7 +1234,14 @@ public class PlanBuilder
                 sources,
                 tableArgumentProperties,
                 copartitioningLists,
-                new TableFunctionHandle(TEST_CATALOG_HANDLE, new SchemaFunctionName("system", name), new ConnectorTableFunctionHandle() {}, TestingTransactionHandle.create()));
+                new TableFunctionHandle(TEST_CATALOG_HANDLE, new ConnectorTableFunctionHandle() {}, TestingTransactionHandle.create()));
+    }
+
+    public TableFunctionProcessorNode tableFunctionProcessor(Consumer<TableFunctionProcessorBuilder> consumer)
+    {
+        TableFunctionProcessorBuilder tableFunctionProcessorBuilder = new TableFunctionProcessorBuilder();
+        consumer.accept(tableFunctionProcessorBuilder);
+        return tableFunctionProcessorBuilder.build(idAllocator);
     }
 
     public PartitioningScheme partitioningScheme(List<Symbol> outputSymbols, List<Symbol> partitioningSymbols, Symbol hashSymbol)

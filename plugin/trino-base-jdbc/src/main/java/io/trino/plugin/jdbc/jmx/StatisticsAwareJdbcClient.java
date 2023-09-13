@@ -19,6 +19,8 @@ import io.trino.plugin.jdbc.JdbcColumnHandle;
 import io.trino.plugin.jdbc.JdbcExpression;
 import io.trino.plugin.jdbc.JdbcJoinCondition;
 import io.trino.plugin.jdbc.JdbcOutputTableHandle;
+import io.trino.plugin.jdbc.JdbcProcedureHandle;
+import io.trino.plugin.jdbc.JdbcProcedureHandle.ProcedureQuery;
 import io.trino.plugin.jdbc.JdbcSortItem;
 import io.trino.plugin.jdbc.JdbcSplit;
 import io.trino.plugin.jdbc.JdbcTableHandle;
@@ -46,6 +48,7 @@ import io.trino.spi.type.Type;
 import org.weakref.jmx.Flatten;
 import org.weakref.jmx.Managed;
 
+import java.sql.CallableStatement;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -53,6 +56,7 @@ import java.sql.SQLException;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.OptionalLong;
 import java.util.Set;
 
@@ -112,6 +116,12 @@ public final class StatisticsAwareJdbcClient
     }
 
     @Override
+    public JdbcProcedureHandle getProcedureHandle(ConnectorSession session, ProcedureQuery procedureQuery)
+    {
+        return stats.getGetProcedureHandle().wrap(() -> delegate().getProcedureHandle(session, procedureQuery));
+    }
+
+    @Override
     public List<JdbcColumnHandle> getColumns(ConnectorSession session, JdbcTableHandle tableHandle)
     {
         return stats.getGetColumns().wrap(() -> delegate().getColumns(session, tableHandle));
@@ -133,6 +143,12 @@ public final class StatisticsAwareJdbcClient
     public WriteMapping toWriteMapping(ConnectorSession session, Type type)
     {
         return stats.getToWriteMapping().wrap(() -> delegate().toWriteMapping(session, type));
+    }
+
+    @Override
+    public Optional<Type> getSupportedType(ConnectorSession session, Type type)
+    {
+        return delegate.getSupportedType(session, type);
     }
 
     @Override
@@ -160,10 +176,23 @@ public final class StatisticsAwareJdbcClient
     }
 
     @Override
+    public ConnectorSplitSource getSplits(ConnectorSession session, JdbcProcedureHandle procedureHandle)
+    {
+        return stats.getGetSplitsForProcedure().wrap(() -> delegate().getSplits(session, procedureHandle));
+    }
+
+    @Override
     public Connection getConnection(ConnectorSession session, JdbcSplit split, JdbcTableHandle tableHandle)
             throws SQLException
     {
         return stats.getGetConnectionWithSplit().wrap(() -> delegate().getConnection(session, split, tableHandle));
+    }
+
+    @Override
+    public Connection getConnection(ConnectorSession session, JdbcSplit split, JdbcProcedureHandle procedureHandle)
+            throws SQLException
+    {
+        return stats.getGetConnectionWithProcedure().wrap(() -> delegate().getConnection(session, split, procedureHandle));
     }
 
     @Override
@@ -189,6 +218,13 @@ public final class StatisticsAwareJdbcClient
             throws SQLException
     {
         return stats.getBuildSql().wrap(() -> delegate().buildSql(session, connection, split, tableHandle, columnHandles));
+    }
+
+    @Override
+    public CallableStatement buildProcedure(ConnectorSession session, Connection connection, JdbcSplit split, JdbcProcedureHandle procedureHandle)
+            throws SQLException
+    {
+        return stats.getBuildProcedure().wrap(() -> delegate().buildProcedure(session, connection, split, procedureHandle));
     }
 
     @Override
@@ -370,9 +406,9 @@ public final class StatisticsAwareJdbcClient
     }
 
     @Override
-    public void dropSchema(ConnectorSession session, String schemaName)
+    public void dropSchema(ConnectorSession session, String schemaName, boolean cascade)
     {
-        stats.getDropSchema().wrap(() -> delegate().dropSchema(session, schemaName));
+        stats.getDropSchema().wrap(() -> delegate().dropSchema(session, schemaName, cascade));
     }
 
     @Override
@@ -421,5 +457,11 @@ public final class StatisticsAwareJdbcClient
     public void truncateTable(ConnectorSession session, JdbcTableHandle handle)
     {
         stats.getTruncateTable().wrap(() -> delegate().truncateTable(session, handle));
+    }
+
+    @Override
+    public OptionalInt getMaxWriteParallelism(ConnectorSession session)
+    {
+        return delegate().getMaxWriteParallelism(session);
     }
 }

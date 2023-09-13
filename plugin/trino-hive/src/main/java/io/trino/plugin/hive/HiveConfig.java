@@ -25,14 +25,13 @@ import io.airlift.units.Duration;
 import io.airlift.units.MaxDataSize;
 import io.airlift.units.MinDataSize;
 import io.trino.plugin.hive.HiveSessionProperties.InsertExistingPartitionsBehavior;
+import jakarta.annotation.Nullable;
+import jakarta.validation.constraints.AssertTrue;
+import jakarta.validation.constraints.DecimalMax;
+import jakarta.validation.constraints.DecimalMin;
+import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.NotNull;
 import org.joda.time.DateTimeZone;
-
-import javax.annotation.Nullable;
-import javax.validation.constraints.AssertTrue;
-import javax.validation.constraints.DecimalMax;
-import javax.validation.constraints.DecimalMin;
-import javax.validation.constraints.Min;
-import javax.validation.constraints.NotNull;
 
 import java.util.List;
 import java.util.Optional;
@@ -40,6 +39,7 @@ import java.util.Set;
 import java.util.TimeZone;
 
 import static io.airlift.units.DataSize.Unit.GIGABYTE;
+import static io.airlift.units.DataSize.Unit.KILOBYTE;
 import static io.airlift.units.DataSize.Unit.MEGABYTE;
 import static io.trino.plugin.hive.HiveSessionProperties.InsertExistingPartitionsBehavior.APPEND;
 import static io.trino.plugin.hive.HiveSessionProperties.InsertExistingPartitionsBehavior.ERROR;
@@ -80,7 +80,7 @@ public class HiveConfig
     private int splitLoaderConcurrency = 64;
     private Integer maxSplitsPerSecond;
     private DataSize maxInitialSplitSize;
-    private int domainCompactionThreshold = 100;
+    private int domainCompactionThreshold = 1000;
     private boolean forceLocalScheduling;
     private boolean recursiveDirWalkerEnabled;
     private boolean ignoreAbsentPartitions;
@@ -134,6 +134,7 @@ public class HiveConfig
     private boolean collectColumnStatisticsOnWrite = true;
 
     private boolean s3SelectPushdownEnabled;
+    private boolean s3SelectExperimentalPushdownEnabled;
     private int s3SelectPushdownMaxConnections = 500;
 
     private boolean isTemporaryStagingDirectoryEnabled = true;
@@ -141,9 +142,9 @@ public class HiveConfig
     private boolean delegateTransactionalManagedTableLocationToMetastore;
 
     private Duration fileStatusCacheExpireAfterWrite = new Duration(1, MINUTES);
-    private long fileStatusCacheMaxSize = 1000 * 1000;
+    private DataSize fileStatusCacheMaxRetainedSize = DataSize.of(1, GIGABYTE);
     private List<String> fileStatusCacheTables = ImmutableList.of();
-    private long perTransactionFileStatusCacheMaximumSize = 1000 * 1000;
+    private DataSize perTransactionFileStatusCacheMaxRetainedSize = DataSize.of(100, MEGABYTE);
 
     private boolean translateHiveViews;
     private boolean legacyHiveViewTranslation;
@@ -755,17 +756,28 @@ public class HiveConfig
         return this;
     }
 
-    @Min(0)
-    public long getPerTransactionFileStatusCacheMaximumSize()
+    @MinDataSize("0MB")
+    @NotNull
+    public DataSize getPerTransactionFileStatusCacheMaxRetainedSize()
     {
-        return perTransactionFileStatusCacheMaximumSize;
+        return perTransactionFileStatusCacheMaxRetainedSize;
     }
 
-    @Config("hive.per-transaction-file-status-cache-maximum-size")
+    @Config("hive.per-transaction-file-status-cache.max-retained-size")
+    @ConfigDescription("Maximum retained size of file statuses cached by transactional file status cache")
+    public HiveConfig setPerTransactionFileStatusCacheMaxRetainedSize(DataSize perTransactionFileStatusCacheMaxRetainedSize)
+    {
+        this.perTransactionFileStatusCacheMaxRetainedSize = perTransactionFileStatusCacheMaxRetainedSize;
+        return this;
+    }
+
+    @Deprecated
+    @LegacyConfig(value = "hive.per-transaction-file-status-cache-maximum-size", replacedBy = "hive.per-transaction-file-status-cache.max-retained-size")
     @ConfigDescription("Maximum number of file statuses cached by transactional file status cache")
     public HiveConfig setPerTransactionFileStatusCacheMaximumSize(long perTransactionFileStatusCacheMaximumSize)
     {
-        this.perTransactionFileStatusCacheMaximumSize = perTransactionFileStatusCacheMaximumSize;
+        // assume some fixed size per entry in order to keep the deprecated property for backward compatibility
+        this.perTransactionFileStatusCacheMaxRetainedSize = DataSize.of(perTransactionFileStatusCacheMaximumSize, KILOBYTE);
         return this;
     }
 
@@ -810,15 +822,26 @@ public class HiveConfig
         return this;
     }
 
-    public long getFileStatusCacheMaxSize()
+    @MinDataSize("0MB")
+    @NotNull
+    public DataSize getFileStatusCacheMaxRetainedSize()
     {
-        return fileStatusCacheMaxSize;
+        return fileStatusCacheMaxRetainedSize;
     }
 
-    @Config("hive.file-status-cache-size")
+    @Config("hive.file-status-cache.max-retained-size")
+    public HiveConfig setFileStatusCacheMaxRetainedSize(DataSize fileStatusCacheMaxRetainedSize)
+    {
+        this.fileStatusCacheMaxRetainedSize = fileStatusCacheMaxRetainedSize;
+        return this;
+    }
+
+    @Deprecated
+    @LegacyConfig(value = "hive.file-status-cache-size", replacedBy = "hive.file-status-cache.max-retained-size")
     public HiveConfig setFileStatusCacheMaxSize(long fileStatusCacheMaxSize)
     {
-        this.fileStatusCacheMaxSize = fileStatusCacheMaxSize;
+        // assume some fixed size per entry in order to keep the deprecated property for backward compatibility
+        this.fileStatusCacheMaxRetainedSize = DataSize.of(fileStatusCacheMaxSize, KILOBYTE);
         return this;
     }
 
@@ -984,10 +1007,23 @@ public class HiveConfig
     }
 
     @Config("hive.s3select-pushdown.enabled")
-    @ConfigDescription("Enable query pushdown to AWS S3 Select service")
+    @ConfigDescription("Enable query pushdown to JSON files using the AWS S3 Select service")
     public HiveConfig setS3SelectPushdownEnabled(boolean s3SelectPushdownEnabled)
     {
         this.s3SelectPushdownEnabled = s3SelectPushdownEnabled;
+        return this;
+    }
+
+    public boolean isS3SelectExperimentalPushdownEnabled()
+    {
+        return s3SelectExperimentalPushdownEnabled;
+    }
+
+    @Config("hive.s3select-pushdown.experimental-textfile-pushdown-enabled")
+    @ConfigDescription("Enable query pushdown to TEXTFILE tables using the AWS S3 Select service")
+    public HiveConfig setS3SelectExperimentalPushdownEnabled(boolean s3SelectExperimentalPushdownEnabled)
+    {
+        this.s3SelectExperimentalPushdownEnabled = s3SelectExperimentalPushdownEnabled;
         return this;
     }
 

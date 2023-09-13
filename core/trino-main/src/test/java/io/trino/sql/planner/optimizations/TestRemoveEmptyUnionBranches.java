@@ -31,7 +31,7 @@ import io.trino.spi.predicate.NullableValue;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.sql.planner.assertions.BasePlanTest;
 import io.trino.testing.LocalQueryRunner;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
@@ -121,7 +121,7 @@ public class TestRemoveEmptyUnionBranches
                         .collect(toImmutableList()))
                 .withGetTableProperties((session, handle) -> {
                     MockConnectorTableHandle table = (MockConnectorTableHandle) handle;
-                    return new ConnectorTableProperties(table.getConstraint(), Optional.empty(), Optional.empty(), Optional.empty(), emptyList());
+                    return new ConnectorTableProperties(table.getConstraint(), Optional.empty(), Optional.empty(), emptyList());
                 })
                 .withApplyFilter(applyFilter())
                 .withName(catalogHandle)

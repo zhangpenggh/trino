@@ -19,9 +19,11 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.primitives.Ints;
 import com.google.common.util.concurrent.UncheckedExecutionException;
+import com.google.inject.Inject;
 import io.airlift.jmx.CacheStatsMBean;
 import io.airlift.log.Logger;
-import io.trino.collect.cache.EvictableCacheBuilder;
+import io.trino.cache.EvictableCacheBuilder;
+import io.trino.filesystem.Location;
 import io.trino.filesystem.TrinoFileSystem;
 import io.trino.filesystem.TrinoFileSystemFactory;
 import io.trino.filesystem.TrinoInputFile;
@@ -45,8 +47,7 @@ import io.trino.spi.type.VarbinaryType;
 import org.weakref.jmx.Managed;
 import org.weakref.jmx.Nested;
 
-import javax.inject.Inject;
-
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.time.Instant;
@@ -68,6 +69,8 @@ import static com.google.common.base.Throwables.throwIfUnchecked;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static io.airlift.slice.SizeOf.estimatedSizeOf;
+import static io.airlift.slice.SizeOf.instanceSize;
+import static io.trino.cache.CacheUtils.invalidateAllIf;
 import static io.trino.plugin.deltalake.DeltaLakeErrorCode.DELTA_LAKE_INVALID_SCHEMA;
 import static io.trino.plugin.deltalake.transactionlog.TransactionLogUtil.getTransactionLogJsonEntryPath;
 import static io.trino.plugin.deltalake.transactionlog.checkpoint.CheckpointEntryIterator.EntryType.ADD;
@@ -76,7 +79,6 @@ import static io.trino.plugin.deltalake.transactionlog.checkpoint.CheckpointEntr
 import static io.trino.plugin.deltalake.transactionlog.checkpoint.CheckpointEntryIterator.EntryType.PROTOCOL;
 import static io.trino.plugin.deltalake.transactionlog.checkpoint.CheckpointEntryIterator.EntryType.REMOVE;
 import static io.trino.plugin.deltalake.transactionlog.checkpoint.TransactionLogTail.getEntriesFromJson;
-import static io.trino.plugin.deltalake.transactionlog.checkpoint.TransactionLogTail.isFileNotFoundException;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 
@@ -89,8 +91,8 @@ public class TransactionLogAccess
     private final FileFormatDataSourceStats fileFormatDataSourceStats;
     private final TrinoFileSystemFactory fileSystemFactory;
     private final ParquetReaderOptions parquetReaderOptions;
-    private final Cache<String /* table location */, TableSnapshot> tableSnapshots;
-    private final Cache<String /* table location */, DeltaLakeDataFileCacheEntry> activeDataFileCache;
+    private final Cache<CacheKey, TableSnapshot> tableSnapshots;
+    private final Cache<CacheKey, DeltaLakeDataFileCacheEntry> activeDataFileCache;
     private final boolean checkpointRowStatisticsWritingEnabled;
     private final int domainCompactionThreshold;
 
@@ -118,7 +120,7 @@ public class TransactionLogAccess
                 .recordStats()
                 .build();
         activeDataFileCache = EvictableCacheBuilder.newBuilder()
-                .weigher((Weigher<String, DeltaLakeDataFileCacheEntry>) (key, value) -> Ints.saturatedCast(estimatedSizeOf(key) + value.getRetainedSizeInBytes()))
+                .weigher((Weigher<CacheKey, DeltaLakeDataFileCacheEntry>) (key, value) -> Ints.saturatedCast(key.getRetainedSizeInBytes() + value.getRetainedSizeInBytes()))
                 .maximumWeight(deltaLakeConfig.getDataFileCacheSize().toBytes())
                 .expireAfterWrite(deltaLakeConfig.getDataFileCacheTtl().toMillis(), TimeUnit.MILLISECONDS)
                 .shareNothingWhenDisabled()
@@ -143,12 +145,13 @@ public class TransactionLogAccess
     public TableSnapshot loadSnapshot(SchemaTableName table, String tableLocation, ConnectorSession session)
             throws IOException
     {
-        TableSnapshot cachedSnapshot = tableSnapshots.getIfPresent(tableLocation);
+        CacheKey cacheKey = new CacheKey(table, tableLocation);
+        TableSnapshot cachedSnapshot = tableSnapshots.getIfPresent(cacheKey);
         TableSnapshot snapshot;
         TrinoFileSystem fileSystem = fileSystemFactory.create(session);
         if (cachedSnapshot == null) {
             try {
-                snapshot = tableSnapshots.get(tableLocation, () ->
+                snapshot = tableSnapshots.get(cacheKey, () ->
                         TableSnapshot.load(
                                 table,
                                 fileSystem,
@@ -166,7 +169,7 @@ public class TransactionLogAccess
             Optional<TableSnapshot> updatedSnapshot = cachedSnapshot.getUpdatedSnapshot(fileSystem);
             if (updatedSnapshot.isPresent()) {
                 snapshot = updatedSnapshot.get();
-                tableSnapshots.asMap().replace(tableLocation, cachedSnapshot, snapshot);
+                tableSnapshots.asMap().replace(cacheKey, cachedSnapshot, snapshot);
             }
             else {
                 snapshot = cachedSnapshot;
@@ -181,13 +184,19 @@ public class TransactionLogAccess
         activeDataFileCache.invalidateAll();
     }
 
-    public void invalidateCaches(String tableLocation)
+    public void invalidateCache(SchemaTableName schemaTableName, Optional<String> tableLocation)
     {
-        tableSnapshots.invalidate(tableLocation);
-        activeDataFileCache.invalidate(tableLocation);
+        requireNonNull(schemaTableName, "schemaTableName is null");
+        // Invalidate by location in case one table (location) unregistered and re-register under different name
+        tableLocation.ifPresent(location -> {
+            invalidateAllIf(tableSnapshots, cacheKey -> cacheKey.location().equals(location));
+            invalidateAllIf(activeDataFileCache, cacheKey -> cacheKey.location().equals(location));
+        });
+        invalidateAllIf(tableSnapshots, cacheKey -> cacheKey.tableName().equals(schemaTableName));
+        invalidateAllIf(activeDataFileCache, cacheKey -> cacheKey.tableName().equals(schemaTableName));
     }
 
-    public Optional<MetadataEntry> getMetadataEntry(TableSnapshot tableSnapshot, ConnectorSession session)
+    public MetadataEntry getMetadataEntry(TableSnapshot tableSnapshot, ConnectorSession session)
     {
         if (tableSnapshot.getCachedMetadata().isEmpty()) {
             try (Stream<MetadataEntry> metadataEntries = getEntries(
@@ -201,14 +210,15 @@ public class TransactionLogAccess
                 tableSnapshot.setCachedMetadata(metadataEntries.reduce((first, second) -> second));
             }
         }
-        return tableSnapshot.getCachedMetadata();
+        return tableSnapshot.getCachedMetadata()
+                .orElseThrow(() -> new TrinoException(DELTA_LAKE_INVALID_SCHEMA, "Metadata not found in transaction log for " + tableSnapshot.getTable()));
     }
 
     public List<AddFileEntry> getActiveFiles(TableSnapshot tableSnapshot, ConnectorSession session)
     {
         try {
-            String tableLocation = tableSnapshot.getTableLocation().toString();
-            DeltaLakeDataFileCacheEntry cachedTable = activeDataFileCache.get(tableLocation, () -> {
+            CacheKey cacheKey = new CacheKey(tableSnapshot.getTable(), tableSnapshot.getTableLocation());
+            DeltaLakeDataFileCacheEntry cachedTable = activeDataFileCache.get(cacheKey, () -> {
                 List<AddFileEntry> activeFiles = loadActiveFiles(tableSnapshot, session);
                 return new DeltaLakeDataFileCacheEntry(tableSnapshot.getVersion(), activeFiles);
             });
@@ -233,7 +243,7 @@ public class TransactionLogAccess
                     updatedCacheEntry = new DeltaLakeDataFileCacheEntry(tableSnapshot.getVersion(), activeFiles);
                 }
 
-                activeDataFileCache.asMap().replace(tableLocation, cachedTable, updatedCacheEntry);
+                activeDataFileCache.asMap().replace(cacheKey, cachedTable, updatedCacheEntry);
                 cachedTable = updatedCacheEntry;
             }
             return cachedTable.getActiveFiles();
@@ -259,7 +269,7 @@ public class TransactionLogAccess
 
     public static List<DeltaLakeColumnMetadata> columnsWithStats(MetadataEntry metadataEntry, TypeManager typeManager)
     {
-        return columnsWithStats(DeltaLakeSchemaSupport.extractSchema(metadataEntry, typeManager), metadataEntry.getCanonicalPartitionColumns());
+        return columnsWithStats(DeltaLakeSchemaSupport.extractSchema(metadataEntry, typeManager), metadataEntry.getOriginalPartitionColumns());
     }
 
     public static ImmutableList<DeltaLakeColumnMetadata> columnsWithStats(List<DeltaLakeColumnMetadata> schema, List<String> partitionColumns)
@@ -311,6 +321,13 @@ public class TransactionLogAccess
                 session,
                 fileSystemFactory.create(session),
                 fileFormatDataSourceStats);
+    }
+
+    public ProtocolEntry getProtocolEntry(ConnectorSession session, TableSnapshot tableSnapshot)
+    {
+        return getProtocolEntries(tableSnapshot, session)
+                .reduce((first, second) -> second)
+                .orElseThrow(() -> new TrinoException(DELTA_LAKE_INVALID_SCHEMA, "Protocol entry not found in transaction log for table " + tableSnapshot.getTable()));
     }
 
     public Stream<ProtocolEntry> getProtocolEntries(TableSnapshot tableSnapshot, ConnectorSession session)
@@ -413,7 +430,7 @@ public class TransactionLogAccess
     {
         ImmutableList.Builder<Long> result = ImmutableList.builder();
         for (long version = lastVersion; version >= 0; version--) {
-            String entryPath = getTransactionLogJsonEntryPath(transactionLogDir, version);
+            Location entryPath = getTransactionLogJsonEntryPath(transactionLogDir, version);
             TrinoInputFile inputFile = fileSystem.newInputFile(entryPath);
             try {
                 if (inputFile.lastModified().isBefore(startAt)) {
@@ -421,11 +438,11 @@ public class TransactionLogAccess
                     break;
                 }
             }
+            catch (FileNotFoundException e) {
+                // no longer exists, break iteration
+                return null;
+            }
             catch (IOException e) {
-                if (isFileNotFoundException(e)) {
-                    // no longer exists, break iteration
-                    return null;
-                }
                 throw new UncheckedIOException(e);
             }
             result.add(version);
@@ -446,7 +463,7 @@ public class TransactionLogAccess
         return TransactionLogTail.loadNewTail(fileSystem, tableSnapshot.getTableLocation(), Optional.of(startVersion), Optional.of(endVersion)).getFileEntries();
     }
 
-    public static <T> String canonicalizeColumnName(String columnName)
+    public static String canonicalizeColumnName(String columnName)
     {
         return columnName.toLowerCase(Locale.ENGLISH);
     }
@@ -477,5 +494,23 @@ public class TransactionLogAccess
                 .collect(toImmutableMap(
                         entry -> entry.getKey().getOriginalName(),
                         Map.Entry::getValue));
+    }
+
+    private record CacheKey(SchemaTableName tableName, String location)
+    {
+        private static final int INSTANCE_SIZE = instanceSize(CacheKey.class);
+
+        CacheKey
+        {
+            requireNonNull(tableName, "tableName is null");
+            requireNonNull(location, "location is null");
+        }
+
+        long getRetainedSizeInBytes()
+        {
+            return INSTANCE_SIZE +
+                    tableName.getRetainedSizeInBytes() +
+                    estimatedSizeOf(location);
+        }
     }
 }

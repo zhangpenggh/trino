@@ -24,6 +24,7 @@ import io.airlift.units.DataSize;
 import io.trino.exchange.ExchangeManagerRegistry;
 import io.trino.execution.buffer.PipelinedOutputBuffers;
 import io.trino.execution.executor.TaskExecutor;
+import io.trino.execution.executor.timesharing.TimeSharingTaskExecutor;
 import io.trino.memory.MemoryPool;
 import io.trino.memory.QueryContext;
 import io.trino.memory.context.LocalMemoryContext;
@@ -50,6 +51,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static io.airlift.concurrent.Threads.threadsNamed;
+import static io.airlift.tracing.Tracing.noopTracer;
 import static io.airlift.units.DataSize.Unit.GIGABYTE;
 import static io.airlift.units.DataSize.Unit.MEGABYTE;
 import static io.trino.execution.SqlTask.createSqlTask;
@@ -84,7 +86,7 @@ public class TestMemoryRevokingScheduler
     {
         memoryPool = new MemoryPool(DataSize.ofBytes(10));
 
-        taskExecutor = new TaskExecutor(8, 16, 3, 4, Ticker.systemTicker());
+        taskExecutor = new TimeSharingTaskExecutor(8, 16, 3, 4, Ticker.systemTicker());
         taskExecutor.start();
 
         // Must be single threaded
@@ -98,6 +100,7 @@ public class TestMemoryRevokingScheduler
                 taskExecutor,
                 planner,
                 createTestSplitMonitor(),
+                noopTracer(),
                 new TaskManagerConfig());
 
         allOperatorContexts = null;
@@ -267,6 +270,7 @@ public class TestMemoryRevokingScheduler
                 location,
                 "fake",
                 queryContext,
+                noopTracer(),
                 sqlTaskExecutionFactory,
                 executor,
                 sqlTask -> {},

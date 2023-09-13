@@ -86,11 +86,6 @@ public class HiveMetastoreClosure
         return delegate.getSupportedColumnStatistics(type);
     }
 
-    public PartitionStatistics getTableStatistics(String databaseName, String tableName)
-    {
-        return getTableStatistics(databaseName, tableName, Optional.empty());
-    }
-
     public PartitionStatistics getTableStatistics(String databaseName, String tableName, Optional<Set<String>> columns)
     {
         Table table = getExistingTable(databaseName, tableName);
@@ -152,14 +147,19 @@ public class HiveMetastoreClosure
         return delegate.getAllTables(databaseName);
     }
 
-    public List<String> getTablesWithParameter(String databaseName, String parameterKey, String parameterValue)
+    public Optional<List<SchemaTableName>> getAllTables()
     {
-        return delegate.getTablesWithParameter(databaseName, parameterKey, parameterValue);
+        return delegate.getAllTables();
     }
 
     public List<String> getAllViews(String databaseName)
     {
         return delegate.getAllViews(databaseName);
+    }
+
+    public Optional<List<SchemaTableName>> getAllViews()
+    {
+        return delegate.getAllViews();
     }
 
     public void createDatabase(Database database)

@@ -17,7 +17,7 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import io.trino.Session;
 import io.trino.sql.planner.assertions.BasePlanTest;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.Optional;
 
@@ -207,11 +207,10 @@ public class TestWindow
                         window(pattern -> pattern
                                         .specification(specification(ImmutableList.of("custkey"), ImmutableList.of(), ImmutableMap.of()))
                                         .addFunction(functionCall("rank", Optional.empty(), ImmutableList.of())),
-                                exchange(LOCAL, GATHER,
-                                        exchange(REMOTE, REPARTITION,
-                                                project(aggregation(singleGroupingSet("shippriority", "custkey"), ImmutableMap.of(), Optional.empty(), FINAL,
-                                                        exchange(LOCAL, GATHER,
-                                                                exchange(REMOTE, REPARTITION,
-                                                                        anyTree(tableScan("orders", ImmutableMap.of("custkey", "custkey", "shippriority", "shippriority"))))))))))));
+                                project(aggregation(singleGroupingSet("shippriority", "custkey"), ImmutableMap.of(), Optional.empty(), FINAL,
+                                        exchange(LOCAL, GATHER,
+                                                project(
+                                                        exchange(REMOTE, REPARTITION,
+                                                                anyTree(tableScan("orders", ImmutableMap.of("custkey", "custkey", "shippriority", "shippriority")))))))))));
     }
 }

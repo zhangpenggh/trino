@@ -14,6 +14,7 @@
 package io.trino.execution;
 
 import com.google.common.collect.ImmutableMap;
+import io.opentelemetry.api.OpenTelemetry;
 import io.trino.Session;
 import io.trino.client.NodeVersion;
 import io.trino.execution.warnings.WarningCollector;
@@ -42,6 +43,7 @@ import java.util.concurrent.ExecutorService;
 
 import static io.airlift.concurrent.Threads.daemonThreadsNamed;
 import static io.trino.SessionTestUtils.TEST_SESSION;
+import static io.trino.execution.querystats.PlanOptimizersStatsCollector.createPlanOptimizersStatsCollector;
 import static io.trino.metadata.MetadataManager.createTestMetadataManager;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.sql.QueryUtil.identifier;
@@ -103,7 +105,7 @@ public class TestPrepareTask
     private Map<String, String> executePrepare(String statementName, Statement statement, String sqlString, Session session)
     {
         TransactionManager transactionManager = createTestTransactionManager();
-        AccessControlManager accessControl = new AccessControlManager(transactionManager, emptyEventListenerManager(), new AccessControlConfig(), DefaultSystemAccessControl.NAME);
+        AccessControlManager accessControl = new AccessControlManager(transactionManager, emptyEventListenerManager(), new AccessControlConfig(), OpenTelemetry.noop(), DefaultSystemAccessControl.NAME);
         accessControl.setSystemAccessControls(List.of(AllowAllSystemAccessControl.INSTANCE));
         QueryStateMachine stateMachine = QueryStateMachine.begin(
                 Optional.empty(),
@@ -118,6 +120,7 @@ public class TestPrepareTask
                 executor,
                 metadata,
                 WarningCollector.NOOP,
+                createPlanOptimizersStatsCollector(),
                 Optional.empty(),
                 true,
                 new NodeVersion("test"));

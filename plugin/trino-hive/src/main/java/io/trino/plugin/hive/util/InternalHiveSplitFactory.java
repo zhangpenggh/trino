@@ -20,6 +20,7 @@ import io.trino.plugin.hive.HiveColumnHandle;
 import io.trino.plugin.hive.HivePartitionKey;
 import io.trino.plugin.hive.HiveSplit;
 import io.trino.plugin.hive.HiveSplit.BucketConversion;
+import io.trino.plugin.hive.HiveStorageFormat;
 import io.trino.plugin.hive.InternalHiveSplit;
 import io.trino.plugin.hive.InternalHiveSplit.InternalHiveBlock;
 import io.trino.plugin.hive.TableToPartitionMapping;
@@ -34,9 +35,7 @@ import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
-import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.mapred.FileSplit;
-import org.apache.hadoop.mapred.InputFormat;
 
 import java.io.IOException;
 import java.util.Collection;
@@ -45,22 +44,19 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.Properties;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.trino.plugin.hive.HiveColumnHandle.isPathColumnHandle;
-import static io.trino.plugin.hive.util.HiveUtil.isSplittable;
 import static java.util.Objects.requireNonNull;
 
 public class InternalHiveSplitFactory
 {
     private final FileSystem fileSystem;
     private final String partitionName;
-    private final InputFormat<?, ?> inputFormat;
+    private final HiveStorageFormat storageFormat;
     private final Properties strippedSchema;
     private final List<HivePartitionKey> partitionKeys;
     private final Optional<Domain> pathDomain;
@@ -72,12 +68,11 @@ public class InternalHiveSplitFactory
     private final Optional<Long> maxSplitFileSize;
     private final boolean forceLocalScheduling;
     private final boolean s3SelectPushdownEnabled;
-    private final Map<Integer, AtomicInteger> bucketStatementCounters = new ConcurrentHashMap<>();
 
     public InternalHiveSplitFactory(
             FileSystem fileSystem,
             String partitionName,
-            InputFormat<?, ?> inputFormat,
+            HiveStorageFormat storageFormat,
             Properties schema,
             List<HivePartitionKey> partitionKeys,
             TupleDomain<HiveColumnHandle> effectivePredicate,
@@ -92,7 +87,7 @@ public class InternalHiveSplitFactory
     {
         this.fileSystem = requireNonNull(fileSystem, "fileSystem is null");
         this.partitionName = requireNonNull(partitionName, "partitionName is null");
-        this.inputFormat = requireNonNull(inputFormat, "inputFormat is null");
+        this.storageFormat = requireNonNull(storageFormat, "storageFormat is null");
         this.strippedSchema = stripUnnecessaryProperties(requireNonNull(schema, "schema is null"));
         this.partitionKeys = requireNonNull(partitionKeys, "partitionKeys is null");
         pathDomain = getPathDomain(requireNonNull(effectivePredicate, "effectivePredicate is null"));
@@ -125,7 +120,7 @@ public class InternalHiveSplitFactory
     {
         splittable = splittable &&
                 status.getLength() > minimumTargetSplitSizeInBytes &&
-                isSplittable(inputFormat, fileSystem, status.getPath());
+                storageFormat.isSplittable(status.getPath());
         return createInternalHiveSplit(
                 status.getPath(),
                 status.getBlockLocations(),
@@ -144,7 +139,7 @@ public class InternalHiveSplitFactory
     {
         FileStatus file = fileSystem.getFileStatus(split.getPath());
         return createInternalHiveSplit(
-                split.getPath(),
+                split.getPath().toString(),
                 BlockLocation.fromHiveBlockLocations(fileSystem.getFileBlockLocations(file, split.getStart(), split.getLength())),
                 split.getStart(),
                 split.getLength(),
@@ -157,7 +152,7 @@ public class InternalHiveSplitFactory
     }
 
     private Optional<InternalHiveSplit> createInternalHiveSplit(
-            Path path,
+            String path,
             List<BlockLocation> blockLocations,
             long start,
             long length,
@@ -169,8 +164,7 @@ public class InternalHiveSplitFactory
             boolean splittable,
             Optional<AcidInfo> acidInfo)
     {
-        String pathString = path.toString();
-        if (!pathMatchesPredicate(pathDomain, pathString)) {
+        if (!pathMatchesPredicate(pathDomain, path)) {
             return Optional.empty();
         }
 
@@ -212,10 +206,9 @@ public class InternalHiveSplitFactory
             blocks = ImmutableList.of(new InternalHiveBlock(start, start + length, blocks.get(0).getAddresses()));
         }
 
-        int bucketNumberIndex = readBucketNumber.orElse(0);
         return Optional.of(new InternalHiveSplit(
                 partitionName,
-                pathString,
+                path,
                 start,
                 start + length,
                 estimatedFileSize,
@@ -225,18 +218,17 @@ public class InternalHiveSplitFactory
                 blocks,
                 readBucketNumber,
                 tableBucketNumber,
-                () -> bucketStatementCounters.computeIfAbsent(bucketNumberIndex, index -> new AtomicInteger()).getAndIncrement(),
                 splittable,
                 forceLocalScheduling && allBlocksHaveAddress(blocks),
                 tableToPartitionMapping,
                 bucketConversion,
                 bucketValidation,
-                s3SelectPushdownEnabled && S3SelectPushdown.isCompressionCodecSupported(inputFormat, path),
+                s3SelectPushdownEnabled && S3SelectPushdown.isCompressionCodecSupported(strippedSchema, path),
                 acidInfo,
                 partitionMatchSupplier));
     }
 
-    private static void checkBlocks(Path path, List<InternalHiveBlock> blocks, long start, long length)
+    private static void checkBlocks(String path, List<InternalHiveBlock> blocks, long start, long length)
     {
         checkArgument(start >= 0, "Split (%s) has negative start (%s)", path, start);
         checkArgument(length >= 0, "Split (%s) has negative length (%s)", path, length);

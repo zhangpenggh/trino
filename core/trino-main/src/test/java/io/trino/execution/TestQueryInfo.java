@@ -22,6 +22,7 @@ import io.trino.operator.RetryPolicy;
 import io.trino.spi.QueryId;
 import io.trino.spi.TrinoWarning;
 import io.trino.spi.WarningCode;
+import io.trino.spi.connector.CatalogHandle.CatalogVersion;
 import io.trino.spi.resourcegroups.QueryType;
 import io.trino.spi.resourcegroups.ResourceGroupId;
 import io.trino.spi.security.SelectedRole;
@@ -35,6 +36,7 @@ import java.util.Optional;
 
 import static io.trino.SessionTestUtils.TEST_SESSION;
 import static io.trino.execution.QueryState.FINISHED;
+import static io.trino.tracing.TracingJsonCodec.tracingJsonCodecFactory;
 import static org.testng.Assert.assertEquals;
 
 public class TestQueryInfo
@@ -42,7 +44,7 @@ public class TestQueryInfo
     @Test
     public void testQueryInfoRoundTrip()
     {
-        JsonCodec<QueryInfo> codec = JsonCodec.jsonCodec(QueryInfo.class);
+        JsonCodec<QueryInfo> codec = tracingJsonCodecFactory().jsonCodec(QueryInfo.class);
         QueryInfo expected = createQueryInfo();
         QueryInfo actual = codec.fromJson(codec.toJsonBytes(expected));
 
@@ -50,6 +52,8 @@ public class TestQueryInfo
         // Note: SessionRepresentation.equals?
         assertEquals(actual.getState(), expected.getState());
         assertEquals(actual.isScheduled(), expected.isScheduled());
+        assertEquals(actual.getProgressPercentage(), expected.getProgressPercentage());
+        assertEquals(actual.getRunningPercentage(), expected.getRunningPercentage());
 
         assertEquals(actual.getSelf(), expected.getSelf());
         assertEquals(actual.getFieldNames(), expected.getFieldNames());
@@ -104,6 +108,8 @@ public class TestQueryInfo
                 Optional.of("set_catalog"),
                 Optional.of("set_schema"),
                 Optional.of("set_path"),
+                Optional.of("set_authorization_user"),
+                false,
                 ImmutableMap.of("set_property", "set_value"),
                 ImmutableSet.of("reset_property"),
                 ImmutableMap.of("set_roles", new SelectedRole(SelectedRole.Type.ROLE, Optional.of("role"))),
@@ -116,7 +122,7 @@ public class TestQueryInfo
                 null,
                 null,
                 ImmutableList.of(new TrinoWarning(new WarningCode(1, "name"), "message")),
-                ImmutableSet.of(new Input("catalog", "schema", "talble", Optional.empty(), ImmutableList.of(new Column("name", "type")), new PlanFragmentId("id"), new PlanNodeId("1"))),
+                ImmutableSet.of(new Input("catalog", new CatalogVersion("default"), "schema", "talble", Optional.empty(), ImmutableList.of(new Column("name", "type")), new PlanFragmentId("id"), new PlanNodeId("1"))),
                 Optional.empty(),
                 ImmutableList.of(),
                 ImmutableList.of(),

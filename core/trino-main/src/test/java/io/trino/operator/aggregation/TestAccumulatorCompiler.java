@@ -23,7 +23,7 @@ import io.trino.server.PluginManager;
 import io.trino.spi.Page;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
-import io.trino.spi.block.Int96ArrayBlock;
+import io.trino.spi.block.Fixed12Block;
 import io.trino.spi.block.LongArrayBlockBuilder;
 import io.trino.spi.function.AccumulatorState;
 import io.trino.spi.function.AccumulatorStateFactory;
@@ -35,7 +35,7 @@ import io.trino.spi.type.LongTimestamp;
 import io.trino.spi.type.RealType;
 import io.trino.spi.type.TimestampType;
 import io.trino.sql.gen.IsolatedClass;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.lang.invoke.MethodHandle;
 import java.lang.reflect.Constructor;
@@ -201,7 +201,7 @@ public class TestAccumulatorCompiler
         @Override
         public Block getRawBlock(int channel, int position)
         {
-            return new Int96ArrayBlock(1, Optional.empty(), new long[] {0}, new int[] {0});
+            return new Fixed12Block(1, Optional.empty(), new int[] {0, 0, 0});
         }
 
         @Override

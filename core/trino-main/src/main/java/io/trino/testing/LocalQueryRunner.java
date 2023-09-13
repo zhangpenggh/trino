@@ -20,6 +20,9 @@ import com.google.common.io.Closer;
 import io.airlift.node.NodeInfo;
 import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
+import io.opentelemetry.api.OpenTelemetry;
+import io.opentelemetry.api.trace.Span;
+import io.opentelemetry.api.trace.Tracer;
 import io.trino.FeaturesConfig;
 import io.trino.Session;
 import io.trino.SystemSessionProperties;
@@ -68,6 +71,7 @@ import io.trino.execution.ScheduledSplit;
 import io.trino.execution.SplitAssignment;
 import io.trino.execution.TableExecuteContextManager;
 import io.trino.execution.TaskManagerConfig;
+import io.trino.execution.querystats.PlanOptimizersStatsCollector;
 import io.trino.execution.resourcegroups.NoOpResourceGroupManager;
 import io.trino.execution.scheduler.NodeScheduler;
 import io.trino.execution.scheduler.NodeSchedulerConfig;
@@ -112,16 +116,15 @@ import io.trino.operator.DriverContext;
 import io.trino.operator.DriverFactory;
 import io.trino.operator.GroupByHashPageIndexerFactory;
 import io.trino.operator.OperatorContext;
-import io.trino.operator.OperatorFactories;
 import io.trino.operator.OutputFactory;
 import io.trino.operator.PagesIndex;
 import io.trino.operator.PagesIndexPageSorter;
 import io.trino.operator.TaskContext;
-import io.trino.operator.TrinoOperatorFactories;
 import io.trino.operator.index.IndexJoinLookupStats;
 import io.trino.operator.scalar.json.JsonExistsFunction;
 import io.trino.operator.scalar.json.JsonQueryFunction;
 import io.trino.operator.scalar.json.JsonValueFunction;
+import io.trino.operator.table.ExcludeColumns.ExcludeColumnsFunction;
 import io.trino.plugin.base.security.AllowAllSystemAccessControl;
 import io.trino.security.GroupProviderManager;
 import io.trino.server.PluginManager;
@@ -179,6 +182,7 @@ import io.trino.sql.planner.RuleStatsRecorder;
 import io.trino.sql.planner.SubPlan;
 import io.trino.sql.planner.TypeAnalyzer;
 import io.trino.sql.planner.optimizations.PlanOptimizer;
+import io.trino.sql.planner.plan.OutputNode;
 import io.trino.sql.planner.plan.PlanNode;
 import io.trino.sql.planner.plan.PlanNodeId;
 import io.trino.sql.planner.plan.TableScanNode;
@@ -225,6 +229,7 @@ import static com.google.common.base.Verify.verify;
 import static com.google.common.util.concurrent.MoreExecutors.directExecutor;
 import static io.airlift.concurrent.MoreFutures.getFutureValue;
 import static io.airlift.concurrent.Threads.daemonThreadsNamed;
+import static io.airlift.tracing.Tracing.noopTracer;
 import static io.trino.connector.CatalogServiceProviderModule.createAccessControlProvider;
 import static io.trino.connector.CatalogServiceProviderModule.createAnalyzePropertyManager;
 import static io.trino.connector.CatalogServiceProviderModule.createColumnPropertyManager;
@@ -241,6 +246,7 @@ import static io.trino.connector.CatalogServiceProviderModule.createTableProcedu
 import static io.trino.connector.CatalogServiceProviderModule.createTableProceduresProvider;
 import static io.trino.connector.CatalogServiceProviderModule.createTablePropertyManager;
 import static io.trino.execution.ParameterExtractor.bindParameters;
+import static io.trino.execution.querystats.PlanOptimizersStatsCollector.createPlanOptimizersStatsCollector;
 import static io.trino.spi.connector.Constraint.alwaysTrue;
 import static io.trino.spi.connector.DynamicFilter.EMPTY;
 import static io.trino.sql.ParsingUtil.createParsingOptions;
@@ -266,6 +272,7 @@ public class LocalQueryRunner
     private final SqlParser sqlParser;
     private final PlanFragmenter planFragmenter;
     private final InternalNodeManager nodeManager;
+    private final TypeOperators typeOperators;
     private final BlockTypeOperators blockTypeOperators;
     private final PlannerContext plannerContext;
     private final TypeRegistry typeRegistry;
@@ -308,7 +315,6 @@ public class LocalQueryRunner
     private final DataSize maxSpillPerNode;
     private final DataSize queryMaxSpillPerNode;
     private final OptimizerConfig optimizerConfig;
-    private final OperatorFactories operatorFactories;
     private final StatementAnalyzerFactory statementAnalyzerFactory;
     private boolean printPlan;
 
@@ -334,25 +340,24 @@ public class LocalQueryRunner
             int nodeCountForStats,
             Map<String, List<PropertyMetadata<?>>> defaultSessionProperties,
             MetadataProvider metadataProvider,
-            OperatorFactories operatorFactories,
             Set<SystemSessionPropertiesProvider> extraSessionProperties)
     {
         requireNonNull(defaultSession, "defaultSession is null");
         requireNonNull(defaultSessionProperties, "defaultSessionProperties is null");
         checkArgument(defaultSession.getTransactionId().isEmpty() || !withInitialTransaction, "Already in transaction");
 
+        Tracer tracer = noopTracer();
         this.taskManagerConfig = new TaskManagerConfig().setTaskConcurrency(4);
         requireNonNull(nodeSpillConfig, "nodeSpillConfig is null");
         this.maxSpillPerNode = nodeSpillConfig.getMaxSpillPerNode();
         this.queryMaxSpillPerNode = nodeSpillConfig.getQueryMaxSpillPerNode();
-        this.operatorFactories = requireNonNull(operatorFactories, "operatorFactories is null");
         this.alwaysRevokeMemory = alwaysRevokeMemory;
         this.notificationExecutor = newCachedThreadPool(daemonThreadsNamed("local-query-runner-executor-%s"));
         this.yieldExecutor = newScheduledThreadPool(2, daemonThreadsNamed("local-query-runner-scheduler-%s"));
         this.finalizerService = new FinalizerService();
         finalizerService.start();
 
-        TypeOperators typeOperators = new TypeOperators();
+        this.typeOperators = new TypeOperators();
         this.blockTypeOperators = new BlockTypeOperators(typeOperators);
         this.sqlParser = new SqlParser();
         this.nodeManager = new InMemoryNodeManager();
@@ -384,7 +389,7 @@ public class LocalQueryRunner
                 typeManager);
         typeRegistry.addType(new JsonPath2016Type(new TypeDeserializer(typeManager), blockEncodingSerde));
         this.joinCompiler = new JoinCompiler(typeOperators);
-        PageIndexerFactory pageIndexerFactory = new GroupByHashPageIndexerFactory(joinCompiler, blockTypeOperators);
+        PageIndexerFactory pageIndexerFactory = new GroupByHashPageIndexerFactory(joinCompiler, typeOperators);
         this.groupProvider = new TestingGroupProviderManager();
         this.accessControl = new TestingAccessControlManager(transactionManager, eventListenerManager);
         accessControl.loadSystemAccessControl(AllowAllSystemAccessControl.NAME, ImmutableMap.of());
@@ -401,16 +406,18 @@ public class LocalQueryRunner
                 pageIndexerFactory,
                 nodeInfo,
                 testingVersionEmbedder(),
+                OpenTelemetry.noop(),
                 transactionManager,
                 typeManager,
-                nodeSchedulerConfig));
-        this.splitManager = new SplitManager(createSplitManagerProvider(catalogManager), new QueryManagerConfig());
+                nodeSchedulerConfig,
+                optimizerConfig));
+        this.splitManager = new SplitManager(createSplitManagerProvider(catalogManager), tracer, new QueryManagerConfig());
         this.pageSourceManager = new PageSourceManager(createPageSourceProvider(catalogManager));
         this.pageSinkManager = new PageSinkManager(createPageSinkProvider(catalogManager));
         this.indexManager = new IndexManager(createIndexProvider(catalogManager));
         NodeScheduler nodeScheduler = new NodeScheduler(new UniformNodeSelectorFactory(nodeManager, nodeSchedulerConfig, new NodeTaskMap(finalizerService)));
         this.sessionPropertyManager = createSessionPropertyManager(catalogManager, extraSessionProperties, taskManagerConfig, featuresConfig, optimizerConfig);
-        this.nodePartitioningManager = new NodePartitioningManager(nodeScheduler, blockTypeOperators, createNodePartitioningProvider(catalogManager));
+        this.nodePartitioningManager = new NodePartitioningManager(nodeScheduler, typeOperators, createNodePartitioningProvider(catalogManager));
         TableProceduresRegistry tableProceduresRegistry = new TableProceduresRegistry(createTableProceduresProvider(catalogManager));
         this.functionManager = new FunctionManager(createFunctionProvider(catalogManager), globalFunctionCatalog);
         TableFunctionRegistry tableFunctionRegistry = new TableFunctionRegistry(createTableFunctionProvider(catalogManager));
@@ -428,7 +435,7 @@ public class LocalQueryRunner
                 new JsonValueFunction(functionManager, metadata, typeManager),
                 new JsonQueryFunction(functionManager, metadata, typeManager)));
 
-        this.plannerContext = new PlannerContext(metadata, typeOperators, blockEncodingSerde, typeManager, functionManager);
+        this.plannerContext = new PlannerContext(metadata, typeOperators, blockEncodingSerde, typeManager, functionManager, tracer);
         this.pageFunctionCompiler = new PageFunctionCompiler(functionManager, 0);
         this.expressionCompiler = new ExpressionCompiler(functionManager, pageFunctionCompiler);
         this.joinFilterFunctionCompiler = new JoinFilterFunctionCompiler(functionManager);
@@ -466,7 +473,8 @@ public class LocalQueryRunner
                 new ColumnPropertiesSystemTable(metadata, accessControl, columnPropertyManager),
                 new AnalyzePropertiesSystemTable(metadata, accessControl, analyzePropertyManager),
                 new TransactionsSystemTable(typeManager, transactionManager)),
-                ImmutableSet.of());
+                ImmutableSet.of(),
+                ImmutableSet.of(new ExcludeColumnsFunction()));
 
         exchangeManagerRegistry = new ExchangeManagerRegistry();
         this.pluginManager = new PluginManager(
@@ -492,9 +500,11 @@ public class LocalQueryRunner
         Optional<TransactionId> transactionId = withInitialTransaction ? Optional.of(transactionManager.beginTransaction(true)) : defaultSession.getTransactionId();
         this.defaultSession = new Session(
                 defaultSession.getQueryId(),
+                Span.getInvalid(),
                 transactionId,
                 defaultSession.isClientTransactionSupport(),
                 defaultSession.getIdentity(),
+                defaultSession.getOriginalIdentity(),
                 defaultSession.getSource(),
                 defaultSession.getCatalog(),
                 defaultSession.getSchema(),
@@ -702,6 +712,11 @@ public class LocalQueryRunner
         return estimatedExchangesCostCalculator;
     }
 
+    public TaskCountEstimator getTaskCountEstimator()
+    {
+        return taskCountEstimator;
+    }
+
     @Override
     public TestingGroupProviderManager getGroupProvider()
     {
@@ -867,7 +882,7 @@ public class LocalQueryRunner
                     .setQueryMaxSpillSize(queryMaxSpillPerNode)
                     .build();
 
-            Plan plan = createPlan(session, sql, WarningCollector.NOOP);
+            Plan plan = createPlan(session, sql, WarningCollector.NOOP, createPlanOptimizersStatsCollector());
             List<Driver> drivers = createDrivers(session, plan, outputFactory, taskContext);
             drivers.forEach(closer::register);
 
@@ -892,6 +907,7 @@ public class LocalQueryRunner
             }
 
             verify(builder.get() != null, "Output operator was not created");
+            builder.get().columnNames(((OutputNode) plan.getRoot()).getColumnNames());
             return new MaterializedResultWithPlan(builder.get().build(), plan);
         }
         catch (IOException e) {
@@ -933,7 +949,7 @@ public class LocalQueryRunner
 
     public List<Driver> createDrivers(Session session, @Language("SQL") String sql, OutputFactory outputFactory, TaskContext taskContext)
     {
-        Plan plan = createPlan(session, sql, WarningCollector.NOOP);
+        Plan plan = createPlan(session, sql, WarningCollector.NOOP, createPlanOptimizersStatsCollector());
         return createDrivers(session, plan, outputFactory, taskContext);
     }
 
@@ -982,10 +998,10 @@ public class LocalQueryRunner
                 partitioningSpillerFactory,
                 new PagesIndex.TestingFactory(false),
                 joinCompiler,
-                operatorFactories,
                 new OrderingCompiler(plannerContext.getTypeOperators()),
                 new DynamicFilterConfig(),
                 blockTypeOperators,
+                typeOperators,
                 tableExecuteContextManager,
                 exchangeManagerRegistry,
                 nodeManager.getCurrentNode().getNodeVersion());
@@ -1007,6 +1023,7 @@ public class LocalQueryRunner
 
             SplitSource splitSource = splitManager.getSplits(
                     session,
+                    Span.getInvalid(),
                     table,
                     EMPTY,
                     alwaysTrue());
@@ -1059,19 +1076,19 @@ public class LocalQueryRunner
     }
 
     @Override
-    public Plan createPlan(Session session, @Language("SQL") String sql, WarningCollector warningCollector)
+    public Plan createPlan(Session session, @Language("SQL") String sql, WarningCollector warningCollector, PlanOptimizersStatsCollector planOptimizersStatsCollector)
     {
-        return createPlan(session, sql, OPTIMIZED_AND_VALIDATED, warningCollector);
+        return createPlan(session, sql, OPTIMIZED_AND_VALIDATED, warningCollector, planOptimizersStatsCollector);
     }
 
-    public Plan createPlan(Session session, @Language("SQL") String sql, LogicalPlanner.Stage stage, WarningCollector warningCollector)
+    public Plan createPlan(Session session, @Language("SQL") String sql, LogicalPlanner.Stage stage, WarningCollector warningCollector, PlanOptimizersStatsCollector planOptimizersStatsCollector)
     {
-        return createPlan(session, sql, stage, true, warningCollector);
+        return createPlan(session, sql, stage, true, warningCollector, planOptimizersStatsCollector);
     }
 
-    public Plan createPlan(Session session, @Language("SQL") String sql, LogicalPlanner.Stage stage, boolean forceSingleNode, WarningCollector warningCollector)
+    public Plan createPlan(Session session, @Language("SQL") String sql, LogicalPlanner.Stage stage, boolean forceSingleNode, WarningCollector warningCollector, PlanOptimizersStatsCollector planOptimizersStatsCollector)
     {
-        return createPlan(session, sql, getPlanOptimizers(forceSingleNode), stage, warningCollector);
+        return createPlan(session, sql, getPlanOptimizers(forceSingleNode), stage, warningCollector, planOptimizersStatsCollector);
     }
 
     public List<PlanOptimizer> getPlanOptimizers(boolean forceSingleNode)
@@ -1093,12 +1110,12 @@ public class LocalQueryRunner
                 new RuleStatsRecorder()).get();
     }
 
-    public Plan createPlan(Session session, @Language("SQL") String sql, List<PlanOptimizer> optimizers, WarningCollector warningCollector)
+    public Plan createPlan(Session session, @Language("SQL") String sql, List<PlanOptimizer> optimizers, WarningCollector warningCollector, PlanOptimizersStatsCollector planOptimizersStatsCollector)
     {
-        return createPlan(session, sql, optimizers, OPTIMIZED_AND_VALIDATED, warningCollector);
+        return createPlan(session, sql, optimizers, OPTIMIZED_AND_VALIDATED, warningCollector, planOptimizersStatsCollector);
     }
 
-    public Plan createPlan(Session session, @Language("SQL") String sql, List<PlanOptimizer> optimizers, LogicalPlanner.Stage stage, WarningCollector warningCollector)
+    public Plan createPlan(Session session, @Language("SQL") String sql, List<PlanOptimizer> optimizers, LogicalPlanner.Stage stage, WarningCollector warningCollector, PlanOptimizersStatsCollector planOptimizersStatsCollector)
     {
         PreparedQuery preparedQuery = new QueryPreparer(sqlParser).prepareQuery(session, sql);
 
@@ -1111,7 +1128,8 @@ public class LocalQueryRunner
                 session,
                 preparedQuery.getParameters(),
                 bindParameters(preparedQuery.getStatement(), preparedQuery.getParameters()),
-                warningCollector);
+                warningCollector,
+                planOptimizersStatsCollector);
 
         LogicalPlanner logicalPlanner = new LogicalPlanner(
                 session,
@@ -1122,7 +1140,8 @@ public class LocalQueryRunner
                 new TypeAnalyzer(plannerContext, statementAnalyzerFactory),
                 statsCalculator,
                 costCalculator,
-                warningCollector);
+                warningCollector,
+                planOptimizersStatsCollector);
 
         Analysis analysis = analyzer.analyze(preparedQuery.getStatement());
         // make LocalQueryRunner always compute plan statistics for test purposes
@@ -1158,7 +1177,8 @@ public class LocalQueryRunner
                                 tablePropertyManager,
                                 materializedViewPropertyManager),
                         new ShowStatsRewrite(plannerContext.getMetadata(), queryExplainerFactory, statsCalculator),
-                        new ExplainRewrite(queryExplainerFactory, new QueryPreparer(sqlParser)))));
+                        new ExplainRewrite(queryExplainerFactory, new QueryPreparer(sqlParser)))),
+                plannerContext.getTracer());
     }
 
     private static List<Split> getNextBatch(SplitSource splitSource)
@@ -1193,7 +1213,6 @@ public class LocalQueryRunner
         private Set<SystemSessionPropertiesProvider> extraSessionProperties = ImmutableSet.of();
         private int nodeCountForStats;
         private MetadataProvider metadataProvider = MetadataManager::new;
-        private OperatorFactories operatorFactories = new TrinoOperatorFactories();
 
         private Builder(Session defaultSession)
         {
@@ -1242,12 +1261,6 @@ public class LocalQueryRunner
             return this;
         }
 
-        public Builder withOperatorFactories(OperatorFactories operatorFactories)
-        {
-            this.operatorFactories = requireNonNull(operatorFactories, "operatorFactories is null");
-            return this;
-        }
-
         /**
          * This method is required to pass in system session properties and their
          * metadata for Trino extension modules (separate from the default system
@@ -1270,7 +1283,6 @@ public class LocalQueryRunner
                     nodeCountForStats,
                     defaultSessionProperties,
                     metadataProvider,
-                    operatorFactories,
                     extraSessionProperties);
         }
     }

@@ -18,6 +18,7 @@ import com.google.common.collect.ImmutableSet;
 import io.airlift.slice.Slice;
 import io.airlift.stats.Distribution;
 import io.airlift.units.DataSize;
+import io.trino.filesystem.Location;
 import io.trino.hive.orc.NullMemoryManager;
 import io.trino.hive.orc.impl.WriterImpl;
 import io.trino.metadata.FunctionManager;
@@ -367,7 +368,7 @@ public class TestOrcPageSourceMemoryTracking
                 if (positionCount > MAX_BATCH_SIZE) {
                     // either the block is bounded by maxReadBytes or we just load one single large block
                     // an error margin MAX_BATCH_SIZE / step is needed given the block sizes are increasing
-                    assertTrue(page.getSizeInBytes() < maxReadBytes * (MAX_BATCH_SIZE / step) || 1 == page.getPositionCount());
+                    assertTrue(page.getSizeInBytes() < (long) maxReadBytes * (MAX_BATCH_SIZE / step) || 1 == page.getPositionCount());
                 }
             }
 
@@ -560,17 +561,17 @@ public class TestOrcPageSourceMemoryTracking
                     columns,
                     ImmutableList.of(),
                     TableToPartitionMapping.empty(),
-                    fileSplit.getPath(),
+                    fileSplit.getPath().toString(),
                     OptionalInt.empty(),
                     fileSplit.getLength(),
                     Instant.now().toEpochMilli());
 
-            return HivePageSourceProvider.createHivePageSource(
+            ConnectorPageSource connectorPageSource = HivePageSourceProvider.createHivePageSource(
                     ImmutableSet.of(orcPageSourceFactory),
                     ImmutableSet.of(),
                     newEmptyConfiguration(),
                     session,
-                    fileSplit.getPath(),
+                    Location.of(fileSplit.getPath().toString()),
                     OptionalInt.empty(),
                     fileSplit.getStart(),
                     fileSplit.getLength(),
@@ -586,6 +587,7 @@ public class TestOrcPageSourceMemoryTracking
                     false,
                     NO_ACID_TRANSACTION,
                     columnMappings).orElseThrow();
+            return connectorPageSource;
         }
 
         public SourceOperator newTableScanOperator(DriverContext driverContext)

@@ -132,7 +132,7 @@ public class TestSequenceFileReaderWriter
     {
         LineBuffer lineBuffer = createLineBuffer(values);
         try (SequenceFileReader reader = createSequenceFileReader(inputFile)) {
-            assertEquals(reader.getFileLocation(), inputFile.getAbsolutePath());
+            assertEquals(reader.getFileLocation().toString(), inputFile.toURI().toString());
 
             assertSyncPoint(reader, inputFile);
             assertEquals(reader.getKeyClassName(), BytesWritable.class.getName());
@@ -244,8 +244,7 @@ public class TestSequenceFileReaderWriter
         JobConf jobConf = new JobConf(false);
         configureCompressionCodecs(jobConf);
         Path path = new Path(inputFile.toURI());
-        //noinspection deprecation
-        try (SequenceFile.Reader reader = new SequenceFile.Reader(path.getFileSystem(jobConf), path, jobConf)) {
+        try (SequenceFile.Reader reader = new SequenceFile.Reader(jobConf, SequenceFile.Reader.file(path))) {
             assertEquals(reader.getKeyClassName(), BytesWritable.class.getName());
             assertEquals(reader.getValueClassName(), Text.class.getName());
 
