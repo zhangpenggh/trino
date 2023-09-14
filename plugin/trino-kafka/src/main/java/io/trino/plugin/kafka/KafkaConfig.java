@@ -199,7 +199,7 @@ public class KafkaConfig
         this.internalFieldPrefix = internalFieldPrefix;
         return this;
     }
-    
+
     public String getCompressionType()
     {
         return compressionType;

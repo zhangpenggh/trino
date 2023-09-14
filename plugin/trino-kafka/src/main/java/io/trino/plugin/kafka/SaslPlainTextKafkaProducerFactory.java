@@ -13,13 +13,12 @@
  */
 package io.trino.plugin.kafka;
 
+import com.google.inject.Inject;
 import io.trino.spi.HostAddress;
 import io.trino.spi.connector.ConnectorSession;
 import org.apache.kafka.common.config.SaslConfigs;
 import org.apache.kafka.common.security.auth.SecurityProtocol;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
-
-import javax.inject.Inject;
 
 import java.util.Properties;
 import java.util.Set;
@@ -51,7 +50,7 @@ public class SaslPlainTextKafkaProducerFactory
         requireNonNull(securityConfig, "securityConfig is null");
 
         nodes = kafkaConfig.getNodes();
-        securityProtocol = securityConfig.getSecurityProtocol();
+        securityProtocol = securityConfig.getSecurityProtocol().get();
         mechanism = securityConfig.getSaslMechanism();
         saslJaasConfig = securityConfig.getSaslJaasConfig();
         acks = kafkaConfig.getAcks();
