@@ -21,11 +21,14 @@ import org.apache.kafka.common.security.auth.SecurityProtocol;
 import java.util.Optional;
 
 import static org.apache.kafka.common.security.auth.SecurityProtocol.PLAINTEXT;
+import static org.apache.kafka.common.security.auth.SecurityProtocol.SASL_PLAINTEXT;
 import static org.apache.kafka.common.security.auth.SecurityProtocol.SSL;
 
 public class KafkaSecurityConfig
 {
-    private SecurityProtocol securityProtocol;
+    private SecurityProtocol securityProtocol = PLAINTEXT;
+    private String saslMechanism;
+    private String saslJaasConfig;
 
     public Optional<SecurityProtocol> getSecurityProtocol()
     {
@@ -40,9 +43,43 @@ public class KafkaSecurityConfig
         return this;
     }
 
+    @Config("kafka.sasl-mechanism")
+    @ConfigDescription("Kafka communication sasl mechanism")
+    public KafkaSecurityConfig setSaslMechanism(String saslMechanism)
+    {
+        this.saslMechanism = saslMechanism;
+        return this;
+    }
+
+    @Config("kafka.sasl-jaas-config")
+    @ConfigDescription("Kafka communication sasl jaas config")
+    public KafkaSecurityConfig setSaslJaasConfig(String saslJaasConfig)
+    {
+        this.saslJaasConfig = saslJaasConfig;
+        return this;
+    }
+
+    @PostConstruct
+    public void validate()
+    {
+        checkState(
+                securityProtocol.equals(PLAINTEXT) || securityProtocol.equals(SSL) || securityProtocol.equals(SASL_PLAINTEXT),
+                format("Only %s and %s and %s security protocols are supported", PLAINTEXT, SSL, SASL_PLAINTEXT));
+    }
+
+    public String getSaslMechanism()
+    {
+        return saslMechanism;
+    }
+
+    public String getSaslJaasConfig()
+    {
+        return saslJaasConfig;
+    }
+  
     @AssertTrue(message = "Only PLAINTEXT and SSL security protocols are supported. See 'kafka.config.resources' if other security protocols are needed")
     public boolean isValidSecurityProtocol()
     {
-        return securityProtocol == null || securityProtocol.equals(PLAINTEXT) || securityProtocol.equals(SSL);
+        return securityProtocol == null || securityProtocol.equals(PLAINTEXT) || securityProtocol.equals(SSL) || securityProtocol.equals(SASL_PLAINTEXT);
     }
 }

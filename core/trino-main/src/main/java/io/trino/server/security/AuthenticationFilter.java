@@ -84,7 +84,8 @@ public class AuthenticationFilter
         for (Authenticator authenticator : authenticators) {
             Identity authenticatedIdentity;
             try {
-                authenticatedIdentity = authenticator.authenticate(request);
+                Identity authenticate = authenticator.authenticate(request);
+                authenticatedIdentity = authenticate;
             }
             catch (AuthenticationException e) {
                 // Some authenticators (e.g. password) nest multiple internal authenticators.
