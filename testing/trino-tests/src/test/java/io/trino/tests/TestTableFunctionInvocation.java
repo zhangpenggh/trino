@@ -14,36 +14,11 @@
 package io.trino.tests;
 
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import io.trino.connector.MockConnectorFactory;
 import io.trino.connector.MockConnectorPlugin;
-import io.trino.connector.TestingTableFunctions.ConstantFunction;
-import io.trino.connector.TestingTableFunctions.ConstantFunction.ConstantFunctionHandle;
-import io.trino.connector.TestingTableFunctions.ConstantFunction.ConstantFunctionProcessorProvider;
-import io.trino.connector.TestingTableFunctions.EmptyOutputFunction;
-import io.trino.connector.TestingTableFunctions.EmptyOutputFunction.EmptyOutputProcessorProvider;
-import io.trino.connector.TestingTableFunctions.EmptyOutputWithPassThroughFunction;
-import io.trino.connector.TestingTableFunctions.EmptyOutputWithPassThroughFunction.EmptyOutputWithPassThroughProcessorProvider;
-import io.trino.connector.TestingTableFunctions.EmptySourceFunction;
-import io.trino.connector.TestingTableFunctions.EmptySourceFunction.EmptySourceFunctionProcessorProvider;
-import io.trino.connector.TestingTableFunctions.IdentityFunction;
-import io.trino.connector.TestingTableFunctions.IdentityFunction.IdentityFunctionProcessorProvider;
-import io.trino.connector.TestingTableFunctions.IdentityPassThroughFunction;
-import io.trino.connector.TestingTableFunctions.IdentityPassThroughFunction.IdentityPassThroughFunctionProcessorProvider;
-import io.trino.connector.TestingTableFunctions.PassThroughInputFunction;
-import io.trino.connector.TestingTableFunctions.PassThroughInputFunction.PassThroughInputProcessorProvider;
-import io.trino.connector.TestingTableFunctions.RepeatFunction;
-import io.trino.connector.TestingTableFunctions.RepeatFunction.RepeatFunctionHandle;
-import io.trino.connector.TestingTableFunctions.RepeatFunction.RepeatFunctionProcessorProvider;
-import io.trino.connector.TestingTableFunctions.SimpleTableFunction.SimpleTableFunctionHandle;
-import io.trino.connector.TestingTableFunctions.SimpleTableFunctionWithAccessControl;
-import io.trino.connector.TestingTableFunctions.TestInputFunction;
-import io.trino.connector.TestingTableFunctions.TestInputFunction.TestInputProcessorProvider;
-import io.trino.connector.TestingTableFunctions.TestInputsFunction;
-import io.trino.connector.TestingTableFunctions.TestInputsFunction.TestInputsFunctionProcessorProvider;
-import io.trino.connector.TestingTableFunctions.TestSingleInputRowSemanticsFunction;
-import io.trino.connector.TestingTableFunctions.TestSingleInputRowSemanticsFunction.TestSingleInputFunctionProcessorProvider;
-import io.trino.connector.TestingTableFunctions.TestingTableFunctionHandle;
+import io.trino.connector.TestingTableFunctions;
 import io.trino.plugin.tpch.TpchPlugin;
 import io.trino.spi.connector.FixedSplitSource;
 import io.trino.spi.connector.TableFunctionApplicationResult;
@@ -54,8 +29,7 @@ import io.trino.spi.function.table.TableFunctionProcessorProvider;
 import io.trino.testing.AbstractTestQueryFramework;
 import io.trino.testing.DistributedQueryRunner;
 import io.trino.testing.QueryRunner;
-import org.testng.annotations.BeforeClass;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.Optional;
 
@@ -65,7 +39,6 @@ import static io.trino.testing.TestingAccessControlManager.TestingPrivilegeType.
 import static io.trino.testing.TestingAccessControlManager.privilege;
 import static io.trino.testing.TestingSession.testSessionBuilder;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class TestTableFunctionInvocation
         extends AbstractTestQueryFramework
@@ -81,78 +54,76 @@ public class TestTableFunctionInvocation
                         .setCatalog(TESTING_CATALOG)
                         .setSchema(TABLE_FUNCTION_SCHEMA)
                         .build())
+                .setAdditionalSetup(queryRunner -> {
+                    queryRunner.installPlugin(new MockConnectorPlugin(MockConnectorFactory.builder()
+                            .withTableFunctions(ImmutableSet.of(
+                                    new TestingTableFunctions.SimpleTableFunctionWithAccessControl(),
+                                    new TestingTableFunctions.IdentityFunction(),
+                                    new TestingTableFunctions.IdentityPassThroughFunction(),
+                                    new TestingTableFunctions.RepeatFunction(),
+                                    new TestingTableFunctions.EmptyOutputFunction(),
+                                    new TestingTableFunctions.EmptyOutputWithPassThroughFunction(),
+                                    new TestingTableFunctions.TestInputsFunction(),
+                                    new TestingTableFunctions.PassThroughInputFunction(),
+                                    new TestingTableFunctions.TestInputFunction(),
+                                    new TestingTableFunctions.TestSingleInputRowSemanticsFunction(),
+                                    new TestingTableFunctions.ConstantFunction(),
+                                    new TestingTableFunctions.EmptySourceFunction()))
+                            .withApplyTableFunction((session, handle) -> {
+                                if (handle instanceof TestingTableFunctions.SimpleTableFunction.SimpleTableFunctionHandle functionHandle) {
+                                    return Optional.of(new TableFunctionApplicationResult<>(functionHandle.getTableHandle(), functionHandle.getTableHandle().getColumns().orElseThrow()));
+                                }
+                                return Optional.empty();
+                            })
+                            .withFunctionProvider(Optional.of(new FunctionProvider()
+                            {
+                                @Override
+                                public TableFunctionProcessorProvider getTableFunctionProcessorProvider(ConnectorTableFunctionHandle functionHandle)
+                                {
+                                    if (functionHandle instanceof TestingTableFunctions.TestingTableFunctionHandle handle) {
+                                        return switch (handle.name().getFunctionName()) {
+                                            case "identity_function" -> new TestingTableFunctions.IdentityFunction.IdentityFunctionProcessorProvider();
+                                            case "identity_pass_through_function" ->
+                                                    new TestingTableFunctions.IdentityPassThroughFunction.IdentityPassThroughFunctionProcessorProvider();
+                                            case "empty_output" -> new TestingTableFunctions.EmptyOutputFunction.EmptyOutputProcessorProvider();
+                                            case "empty_output_with_pass_through" ->
+                                                    new TestingTableFunctions.EmptyOutputWithPassThroughFunction.EmptyOutputWithPassThroughProcessorProvider();
+                                            case "test_inputs_function" -> new TestingTableFunctions.TestInputsFunction.TestInputsFunctionProcessorProvider();
+                                            case "pass_through" -> new TestingTableFunctions.PassThroughInputFunction.PassThroughInputProcessorProvider();
+                                            case "test_input" -> new TestingTableFunctions.TestInputFunction.TestInputProcessorProvider();
+                                            case "test_single_input_function" ->
+                                                    new TestingTableFunctions.TestSingleInputRowSemanticsFunction.TestSingleInputFunctionProcessorProvider();
+                                            case "empty_source" -> new TestingTableFunctions.EmptySourceFunction.EmptySourceFunctionProcessorProvider();
+                                            default -> throw new IllegalArgumentException("unexpected table function: " + handle.name());
+                                        };
+                                    }
+                                    if (functionHandle instanceof TestingTableFunctions.RepeatFunction.RepeatFunctionHandle) {
+                                        return new TestingTableFunctions.RepeatFunction.RepeatFunctionProcessorProvider();
+                                    }
+                                    if (functionHandle instanceof TestingTableFunctions.ConstantFunction.ConstantFunctionHandle) {
+                                        return new TestingTableFunctions.ConstantFunction.ConstantFunctionProcessorProvider();
+                                    }
+
+                                    return null;
+                                }
+                            }))
+                            .withTableFunctionSplitSources(functionHandle -> {
+                                if (functionHandle instanceof TestingTableFunctions.ConstantFunction.ConstantFunctionHandle handle) {
+                                    return getConstantFunctionSplitSource(handle);
+                                }
+                                if (functionHandle instanceof TestingTableFunctions.TestingTableFunctionHandle handle && handle.name().equals(new SchemaFunctionName("system", "empty_source"))) {
+                                    return new FixedSplitSource(ImmutableList.of(MOCK_CONNECTOR_SPLIT));
+                                }
+
+                                return null;
+                            })
+                            .build()));
+                    queryRunner.createCatalog(TESTING_CATALOG, "mock", ImmutableMap.of());
+
+                    queryRunner.installPlugin(new TpchPlugin());
+                    queryRunner.createCatalog("tpch", "tpch", ImmutableMap.of());
+                })
                 .build();
-    }
-
-    @BeforeClass
-    public void setUp()
-    {
-        DistributedQueryRunner queryRunner = getDistributedQueryRunner();
-
-        queryRunner.installPlugin(new MockConnectorPlugin(MockConnectorFactory.builder()
-                .withTableFunctions(ImmutableSet.of(
-                        new SimpleTableFunctionWithAccessControl(),
-                        new IdentityFunction(),
-                        new IdentityPassThroughFunction(),
-                        new RepeatFunction(),
-                        new EmptyOutputFunction(),
-                        new EmptyOutputWithPassThroughFunction(),
-                        new TestInputsFunction(),
-                        new PassThroughInputFunction(),
-                        new TestInputFunction(),
-                        new TestSingleInputRowSemanticsFunction(),
-                        new ConstantFunction(),
-                        new EmptySourceFunction()))
-                .withApplyTableFunction((session, handle) -> {
-                    if (handle instanceof SimpleTableFunctionHandle functionHandle) {
-                        return Optional.of(new TableFunctionApplicationResult<>(functionHandle.getTableHandle(), functionHandle.getTableHandle().getColumns().orElseThrow()));
-                    }
-                    return Optional.empty();
-                })
-                .withFunctionProvider(Optional.of(new FunctionProvider()
-                {
-                    @Override
-                    public TableFunctionProcessorProvider getTableFunctionProcessorProvider(ConnectorTableFunctionHandle functionHandle)
-                    {
-                        if (functionHandle instanceof TestingTableFunctionHandle handle) {
-                            return switch (handle.name().getFunctionName()) {
-                                case "identity_function" -> new IdentityFunctionProcessorProvider();
-                                case "identity_pass_through_function" -> new IdentityPassThroughFunctionProcessorProvider();
-                                case "empty_output" -> new EmptyOutputProcessorProvider();
-                                case "empty_output_with_pass_through" -> new EmptyOutputWithPassThroughProcessorProvider();
-                                case "test_inputs_function" -> new TestInputsFunctionProcessorProvider();
-                                case "pass_through" -> new PassThroughInputProcessorProvider();
-                                case "test_input" -> new TestInputProcessorProvider();
-                                case "test_single_input_function" -> new TestSingleInputFunctionProcessorProvider();
-                                case "empty_source" -> new EmptySourceFunctionProcessorProvider();
-                                default -> throw new IllegalArgumentException("unexpected table function: " + handle.name());
-                            };
-                        }
-                        if (functionHandle instanceof RepeatFunctionHandle) {
-                            return new RepeatFunctionProcessorProvider();
-                        }
-                        if (functionHandle instanceof ConstantFunctionHandle) {
-                            return new ConstantFunctionProcessorProvider();
-                        }
-
-                        return null;
-                    }
-                }))
-                .withTableFunctionSplitSources(functionHandle -> {
-                    if (functionHandle instanceof ConstantFunctionHandle handle) {
-                        return getConstantFunctionSplitSource(handle);
-                    }
-                    if (functionHandle instanceof TestingTableFunctionHandle handle && handle.name().equals(new SchemaFunctionName("system", "empty_source"))) {
-                        return new FixedSplitSource(ImmutableList.of(MOCK_CONNECTOR_SPLIT));
-                    }
-
-                    return null;
-                })
-                .build()));
-        queryRunner.createCatalog(TESTING_CATALOG, "mock");
-
-        queryRunner.installPlugin(new TpchPlugin());
-        queryRunner.createCatalog("tpch", "tpch");
     }
 
     @Test
@@ -218,13 +189,15 @@ public class TestTableFunctionInvocation
     @Test
     public void testRepeatFunction()
     {
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT *
                 FROM TABLE(system.repeat(TABLE(VALUES (1, 2), (3, 4), (5, 6))))
                 """))
                 .matches("VALUES (1, 2), (1, 2), (3, 4), (3, 4), (5, 6), (5, 6)");
 
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT *
                 FROM TABLE(system.repeat(
                                         TABLE(VALUES ('a', true), ('b', false)),
@@ -232,7 +205,8 @@ public class TestTableFunctionInvocation
                 """))
                 .matches("VALUES ('a', true), ('b', false), ('a', true), ('b', false), ('a', true), ('b', false), ('a', true), ('b', false)");
 
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT *
                 FROM TABLE(system.repeat(
                                         TABLE(VALUES ('a', true), ('b', false)) t(x, y) PARTITION BY x,
@@ -240,7 +214,8 @@ public class TestTableFunctionInvocation
                 """))
                 .matches("VALUES ('a', true), ('b', false), ('a', true), ('b', false), ('a', true), ('b', false), ('a', true), ('b', false)");
 
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT *
                 FROM TABLE(system.repeat(
                                         TABLE(VALUES ('a', true), ('b', false)) t(x, y) ORDER BY y,
@@ -248,7 +223,8 @@ public class TestTableFunctionInvocation
                 """))
                 .matches("VALUES ('a', true), ('b', false), ('a', true), ('b', false), ('a', true), ('b', false), ('a', true), ('b', false)");
 
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT *
                 FROM TABLE(system.repeat(
                                         TABLE(VALUES ('a', true), ('b', false)) t(x, y) PARTITION BY x ORDER BY y,
@@ -256,25 +232,29 @@ public class TestTableFunctionInvocation
                 """))
                 .matches("VALUES ('a', true), ('b', false), ('a', true), ('b', false), ('a', true), ('b', false), ('a', true), ('b', false)");
 
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT *
                 FROM TABLE(system.repeat(TABLE(tpch.tiny.part), 3))
                 """))
                 .matches("SELECT * FROM tpch.tiny.part UNION ALL TABLE tpch.tiny.part UNION ALL TABLE tpch.tiny.part");
 
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT *
                 FROM TABLE(system.repeat(TABLE(tpch.tiny.part) PARTITION BY type, 3))
                 """))
                 .matches("SELECT * FROM tpch.tiny.part UNION ALL TABLE tpch.tiny.part UNION ALL TABLE tpch.tiny.part");
 
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT *
                 FROM TABLE(system.repeat(TABLE(tpch.tiny.part) ORDER BY size, 3))
                 """))
                 .matches("SELECT * FROM tpch.tiny.part UNION ALL TABLE tpch.tiny.part UNION ALL TABLE tpch.tiny.part");
 
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT *
                 FROM TABLE(system.repeat(TABLE(tpch.tiny.part) PARTITION BY type ORDER BY size, 3))
                 """))
@@ -287,63 +267,72 @@ public class TestTableFunctionInvocation
         // the functions empty_output and empty_output_with_pass_through return an empty Page for each processed input Page. the argument has KEEP WHEN EMPTY property
 
         // non-empty input, no pass-trough columns
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT *
                 FROM TABLE(system.empty_output(TABLE(tpch.tiny.orders)))
                 """))
                 .matches("SELECT true WHERE false");
 
         // non-empty input, pass-through partitioning column
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT *
                 FROM TABLE(system.empty_output(TABLE(tpch.tiny.orders) PARTITION BY orderstatus))
                 """))
                 .matches("SELECT true, 'X' WHERE false");
 
         // non-empty input, argument has pass-trough columns
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT *
                 FROM TABLE(system.empty_output_with_pass_through(TABLE(tpch.tiny.orders)))
                 """))
                 .matches("SELECT true, * FROM tpch.tiny.orders WHERE false");
 
         // non-empty input, argument has pass-trough columns, partitioning column present
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT *
                 FROM TABLE(system.empty_output_with_pass_through(TABLE(tpch.tiny.orders) PARTITION BY orderstatus))
                 """))
                 .matches("SELECT true, * FROM tpch.tiny.orders WHERE false");
 
         // empty input, no pass-trough columns
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT *
                 FROM TABLE(system.empty_output(TABLE(SELECT * FROM tpch.tiny.orders WHERE false)))
                 """))
                 .matches("SELECT true WHERE false");
 
         // empty input, pass-through partitioning column
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT *
                 FROM TABLE(system.empty_output(TABLE(SELECT * FROM tpch.tiny.orders WHERE false) PARTITION BY orderstatus))
                 """))
                 .matches("SELECT true, 'X' WHERE false");
 
         // empty input, argument has pass-trough columns
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT *
                 FROM TABLE(system.empty_output_with_pass_through(TABLE(SELECT * FROM tpch.tiny.orders WHERE false)))
                 """))
                 .matches("SELECT true, * FROM tpch.tiny.orders WHERE false");
 
         // empty input, argument has pass-trough columns, partitioning column present
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT *
                 FROM TABLE(system.empty_output_with_pass_through(TABLE(SELECT * FROM tpch.tiny.orders WHERE false) PARTITION BY orderstatus))
                 """))
                 .matches("SELECT true, * FROM tpch.tiny.orders WHERE false");
 
         // function empty_source returns an empty Page for each Split it processes
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT *
                 FROM TABLE(system.empty_source())
                 """))
@@ -355,7 +344,8 @@ public class TestTableFunctionInvocation
     {
         // table function test_inputs_function has four table arguments. input_1 has row semantics. input_2, input_3 and input_4 have set semantics.
         // the function outputs one row per each tuple of partition it processes. The row includes a true value, and partitioning values.
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT *
                 FROM TABLE(system.test_inputs_function(
                                input_1 => TABLE(VALUES 1, 2, 3),
@@ -365,7 +355,8 @@ public class TestTableFunctionInvocation
                 """))
                 .matches("VALUES (true, 4, 6), (true, 4, 7), (true, 5, 6), (true, 5, 7)");
 
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT *
                 FROM TABLE(system.test_inputs_function(
                                input_1 => TABLE(VALUES 1, 2, 3),
@@ -375,7 +366,8 @@ public class TestTableFunctionInvocation
                 """))
                 .matches("VALUES (true, 4, 6, 8), (true, 4, 6, 9), (true, 4, 7, 8), (true, 4, 7, 9), (true, 5, 6, 8), (true, 5, 6, 9), (true, 5, 7, 8), (true, 5, 7, 9)");
 
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT *
                 FROM TABLE(system.test_inputs_function(
                                input_1 => TABLE(VALUES 1, 2, 3),
@@ -386,7 +378,8 @@ public class TestTableFunctionInvocation
                 .matches("VALUES (true, 4, 6, 8), (true, 4, 7, 8), (true, 5, 6, 8), (true, 5, 7, 8)");
 
         // null partitioning values
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT *
                 FROM TABLE(system.test_inputs_function(
                                input_1 => TABLE(VALUES 1, null),
@@ -396,7 +389,8 @@ public class TestTableFunctionInvocation
                 """))
                 .matches("VALUES (true, 2, 3, null), (true, 2, null, null), (true, null, 3, null), (true, null, null, null)");
 
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT *
                 FROM TABLE(system.test_inputs_function(
                                input_1 => TABLE(VALUES 1, 2, 3),
@@ -406,7 +400,8 @@ public class TestTableFunctionInvocation
                 """))
                 .matches("VALUES true");
 
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT DISTINCT regionkey, nationkey
                 FROM TABLE(system.test_inputs_function(
                                input_1 => TABLE(tpch.tiny.nation),
@@ -421,7 +416,8 @@ public class TestTableFunctionInvocation
     public void testEmptyPartitions()
     {
         // input_1 has row semantics, so it is prune when empty. input_2, input_3 and input_4 have set semantics, and are keep when empty by default
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT *
                 FROM TABLE(system.test_inputs_function(
                                input_1 => TABLE(VALUES 1, 2, 3),
@@ -431,7 +427,8 @@ public class TestTableFunctionInvocation
                 """))
                 .matches("VALUES true");
 
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT *
                 FROM TABLE(system.test_inputs_function(
                                input_1 => TABLE(SELECT 1 WHERE false),
@@ -441,7 +438,8 @@ public class TestTableFunctionInvocation
                 """))
                 .returnsEmptyResult();
 
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT *
                 FROM TABLE(system.test_inputs_function(
                                input_1 => TABLE(VALUES 1, 2, 3),
@@ -451,7 +449,8 @@ public class TestTableFunctionInvocation
                 """))
                 .matches("VALUES (true, CAST(null AS integer), CAST(null AS integer), CAST(null AS integer))");
 
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT *
                 FROM TABLE(system.test_inputs_function(
                                input_1 => TABLE(VALUES 1, 2, 3),
@@ -461,7 +460,8 @@ public class TestTableFunctionInvocation
                 """))
                 .matches("VALUES (true, CAST(null AS integer), 3, 4), (true, null, 4, 4), (true, null, 4, 5), (true, null, 3, 5)");
 
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT *
                 FROM TABLE(system.test_inputs_function(
                                input_1 => TABLE(VALUES 1, 2, 3),
@@ -471,7 +471,8 @@ public class TestTableFunctionInvocation
                 """))
                 .matches("VALUES (true, CAST(null AS integer), CAST(null AS integer), 4), (true, null, null, 5)");
 
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT *
                 FROM TABLE(system.test_inputs_function(
                                input_1 => TABLE(VALUES 1, 2, 3),
@@ -486,7 +487,8 @@ public class TestTableFunctionInvocation
     public void testCopartitioning()
     {
         // all tanbles are by default KEEP WHEN EMPTY. If there is no matching partition, it is null-completed
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT *
                 FROM TABLE(system.test_inputs_function(
                                input_1 => TABLE(VALUES 1, 2, 3),
@@ -498,7 +500,8 @@ public class TestTableFunctionInvocation
                 .matches("VALUES (true, 1, null), (true, 2, 2), (true, null, 3)");
 
         // partition `3` from input_4 is pruned because there is no matching partition in input_2
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT *
                 FROM TABLE(system.test_inputs_function(
                                input_1 => TABLE(VALUES 1, 2, 3),
@@ -510,7 +513,8 @@ public class TestTableFunctionInvocation
                 .matches("VALUES (true, 1, null), (true, 2, 2)");
 
         // partition `1` from input_2 is pruned because there is no matching partition in input_4
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT *
                 FROM TABLE(system.test_inputs_function(
                                input_1 => TABLE(VALUES 1, 2, 3),
@@ -521,7 +525,8 @@ public class TestTableFunctionInvocation
                 """))
                 .matches("VALUES (true, 2, 2), (true, null, 3)");
 
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT *
                 FROM TABLE(system.test_inputs_function(
                                input_1 => TABLE(VALUES 1, 2, 3),
@@ -533,7 +538,8 @@ public class TestTableFunctionInvocation
                 .matches("VALUES (true, 2, 2)");
 
         // null partitioning values
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT *
                 FROM TABLE(system.test_inputs_function(
                                input_1 => TABLE(VALUES 1, 2, 3),
@@ -544,7 +550,8 @@ public class TestTableFunctionInvocation
                 """))
                 .matches("VALUES (true, 1, null), (true, 2, 2), (true, null, null), (true, null, 3)");
 
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT *
                 FROM TABLE(system.test_inputs_function(
                                input_1 => TABLE(VALUES 1, 2, 3),
@@ -555,7 +562,8 @@ public class TestTableFunctionInvocation
                 """))
                 .matches("VALUES (true, 2, 2), (true, null, null)");
 
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT *
                 FROM TABLE(system.test_inputs_function(
                                input_1 => TABLE(VALUES 1, 2, 3),
@@ -566,7 +574,8 @@ public class TestTableFunctionInvocation
                 """))
                 .matches("VALUES (true, 1, null, null), (true, null, null, null), (true, null, 2, 2), (true, null, null, 3)");
 
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT *
                 FROM TABLE(system.test_inputs_function(
                                input_1 => TABLE(VALUES 1, 2, 3),
@@ -577,7 +586,8 @@ public class TestTableFunctionInvocation
                 """))
                 .matches("VALUES (true, CAST(null AS integer), null, null), (true, null, 2, 2)");
 
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT *
                 FROM TABLE(system.test_inputs_function(
                                input_1 => TABLE(VALUES 1, 2, 3),
@@ -588,7 +598,8 @@ public class TestTableFunctionInvocation
                 """))
                 .matches("VALUES (true, 1, CAST(null AS integer), CAST(null AS integer)), (true, null, null, null)");
 
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT *
                 FROM TABLE(system.test_inputs_function(
                                input_1 => TABLE(VALUES 1, 2, 3),
@@ -603,7 +614,8 @@ public class TestTableFunctionInvocation
     @Test
     public void testPassThroughWithEmptyPartitions()
     {
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT *
                 FROM TABLE(system.pass_through(
                                             TABLE(VALUES (1, 'a'), (2, 'b')) t1(a1, b1) PARTITION BY a1,
@@ -612,7 +624,8 @@ public class TestTableFunctionInvocation
                 """))
                 .matches("VALUES (true, false, 1, 'a', null, null), (true, true, 2, 'b', 2, 'x'), (false, true, null, null, 3, 'y')");
 
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT *
                 FROM TABLE(system.pass_through(
                                             TABLE(VALUES (1, 'a'), (2, 'b')) t1(a1, b1) PARTITION BY a1,
@@ -621,7 +634,8 @@ public class TestTableFunctionInvocation
                 """))
                 .matches("VALUES (true, false, 1, 'a', CAST(null AS integer), CAST(null AS VARCHAR(1))), (true, false, 2, 'b', null, null)");
 
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT *
                 FROM TABLE(system.pass_through(
                                             TABLE(VALUES (1, 'a'), (2, 'b')) t1(a1, b1) PARTITION BY a1,
@@ -633,7 +647,8 @@ public class TestTableFunctionInvocation
     @Test
     public void testPassThroughWithEmptyInput()
     {
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT *
                 FROM TABLE(system.pass_through(
                                             TABLE(SELECT 1, 'x' WHERE false) t1(a1, b1) PARTITION BY a1,
@@ -642,7 +657,8 @@ public class TestTableFunctionInvocation
                 """))
                 .matches("VALUES (false, false, CAST(null AS integer), CAST(null AS VARCHAR(1)), CAST(null AS integer), CAST(null AS VARCHAR(1)))");
 
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT *
                 FROM TABLE(system.pass_through(
                                             TABLE(SELECT 1, 'x' WHERE false) t1(a1, b1) PARTITION BY a1,
@@ -654,37 +670,43 @@ public class TestTableFunctionInvocation
     @Test
     public void testInput()
     {
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT got_input
                 FROM TABLE(system.test_input(TABLE(VALUES 1)))
                 """))
                 .matches("VALUES true");
 
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT got_input
                 FROM TABLE(system.test_input(TABLE(VALUES 1, 2, 3) t(a) PARTITION BY a))
                 """))
                 .matches("VALUES true, true, true");
 
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT got_input
                 FROM TABLE(system.test_input(TABLE(SELECT 1 WHERE false)))
                 """))
                 .matches("VALUES false");
 
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT got_input
                 FROM TABLE(system.test_input(TABLE(SELECT 1 WHERE false) t(a) PARTITION BY a))
                 """))
                 .matches("VALUES false");
 
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT got_input
                 FROM TABLE(system.test_input(TABLE(SELECT * FROM tpch.tiny.orders WHERE false)))
                 """))
                 .matches("VALUES false");
 
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT got_input
                 FROM TABLE(system.test_input(TABLE(SELECT * FROM tpch.tiny.orders WHERE false) PARTITION BY orderstatus ORDER BY orderkey))
                 """))
@@ -694,7 +716,8 @@ public class TestTableFunctionInvocation
     @Test
     public void testSingleSourceWithRowSemantics()
     {
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT *
                 FROM TABLE(system.test_single_input_function(TABLE(VALUES (true), (false), (true))))
                 """))
@@ -704,45 +727,52 @@ public class TestTableFunctionInvocation
     @Test
     public void testConstantFunction()
     {
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT *
                 FROM TABLE(system.constant(5))
                 """))
                 .matches("VALUES 5");
 
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT *
                 FROM TABLE(system.constant(2, 10))
                 """))
                 .matches("VALUES (2), (2), (2), (2), (2), (2), (2), (2), (2), (2)");
 
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT *
                 FROM TABLE(system.constant(null, 3))
                 """))
                 .matches("VALUES (CAST(null AS integer)), (null), (null)");
 
         // value as constant expression
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT *
                 FROM TABLE(system.constant(5 * 4, 3))
                 """))
                 .matches("VALUES (20), (20), (20)");
 
         // value out of range for INTEGER type: Integer.MAX_VALUE + 1
-        assertThatThrownBy(() -> query("""
+        assertThat(query(
+                """
                 SELECT *
                 FROM TABLE(system.constant(2147483648, 3))
                 """))
-                .hasMessage("line 2:28: Cannot cast type bigint to integer");
+                .failure().hasMessage("line 2:28: Cannot cast type bigint to integer");
 
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT count(*), count(DISTINCT constant_column), min(constant_column)
                 FROM TABLE(system.constant(2, 1000000))
                 """))
                 .matches("VALUES (BIGINT '1000000', BIGINT '1', 2)");
 
-        assertQueryReturnsEmptyResult("""
+        assertQueryReturnsEmptyResult(
+                """
                 SELECT *
                 FROM TABLE(system.constant(5, 0))
                 """);
@@ -770,7 +800,8 @@ public class TestTableFunctionInvocation
     {
         // function pass_through has 2 proper columns, and it outputs all columns from both inputs using the pass-through mechanism.
         // all columns are referenced
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT p1, p2, x1, x2, y1, y2
                 FROM TABLE(system.pass_through(
                                             TABLE(VALUES (1, 'a'), (2, 'b'), (3, 'c')) t1(x1, x2),
@@ -779,7 +810,8 @@ public class TestTableFunctionInvocation
                 .matches("VALUES (true, true, 3, 'c', 5, 'e')");
 
         // all pass-through columns are referenced. Proper columns are not referenced, but they are not pruned.
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT x1, x2, y1, y2
                 FROM TABLE(system.pass_through(
                                             TABLE(VALUES (1, 'a'), (2, 'b'), (3, 'c')) t1(x1, x2),
@@ -788,7 +820,8 @@ public class TestTableFunctionInvocation
                 .matches("VALUES (3, 'c', 5, 'e')");
 
         // some pass-through columns are referenced. Unreferenced pass-through columns are pruned.
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT x2, y2
                 FROM TABLE(system.pass_through(
                                             TABLE(VALUES (1, 'a'), (2, 'b'), (3, 'c')) t1(x1, x2),
@@ -796,7 +829,8 @@ public class TestTableFunctionInvocation
                 """))
                 .matches("VALUES ('c', 'e')");
 
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT y1, y2
                 FROM TABLE(system.pass_through(
                                             TABLE(VALUES (1, 'a'), (2, 'b'), (3, 'c')) t1(x1, x2),
@@ -805,7 +839,8 @@ public class TestTableFunctionInvocation
                 .matches("VALUES (5, 'e')");
 
         // no pass-through columns are referenced. Unreferenced pass-through columns are pruned.
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT 'x'
                 FROM TABLE(system.pass_through(
                                             TABLE(VALUES (1, 'a'), (2, 'b'), (3, 'c')) t1(x1, x2),
@@ -819,7 +854,8 @@ public class TestTableFunctionInvocation
     {
         // function pass_through has 2 proper columns, and it outputs all columns from both inputs using the pass-through mechanism.
         // all columns are referenced
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT p1, p2, x1, x2, y1, y2
                 FROM TABLE(system.pass_through(
                                             TABLE(SELECT 1, 'a' WHERE FALSE) t1(x1, x2),
@@ -828,7 +864,8 @@ public class TestTableFunctionInvocation
                 .matches("VALUES (false, false, CAST(null AS integer), CAST(null AS varchar(1)), CAST(null AS integer), CAST(null AS varchar(1)))");
 
         // all pass-through columns are referenced. Proper columns are not referenced, but they are not pruned.
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT x1, x2, y1, y2
                 FROM TABLE(system.pass_through(
                                             TABLE(SELECT 1, 'a' WHERE FALSE) t1(x1, x2),
@@ -837,7 +874,8 @@ public class TestTableFunctionInvocation
                 .matches("VALUES (CAST(null AS integer), CAST(null AS varchar(1)), CAST(null AS integer), CAST(null AS varchar(1)))");
 
         // some pass-through columns are referenced. Unreferenced pass-through columns are pruned.
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT x2, y2
                 FROM TABLE(system.pass_through(
                                             TABLE(SELECT 1, 'a' WHERE FALSE) t1(x1, x2),
@@ -845,7 +883,8 @@ public class TestTableFunctionInvocation
                 """))
                 .matches("VALUES (CAST(null AS varchar(1)), CAST(null AS varchar(1)))");
 
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT y1, y2
                 FROM TABLE(system.pass_through(
                                             TABLE(SELECT 1, 'a' WHERE FALSE) t1(x1, x2),
@@ -854,7 +893,8 @@ public class TestTableFunctionInvocation
                 .matches("VALUES (CAST(null AS integer), CAST(null AS varchar(1)))");
 
         // no pass-through columns are referenced. Unreferenced pass-through columns are pruned.
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT 'x'
                 FROM TABLE(system.pass_through(
                                             TABLE(SELECT 1, 'a' WHERE FALSE) t1(x1, x2),

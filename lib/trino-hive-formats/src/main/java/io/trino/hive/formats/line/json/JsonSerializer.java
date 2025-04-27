@@ -18,10 +18,14 @@ import com.fasterxml.jackson.core.JsonGenerator;
 import com.fasterxml.jackson.core.io.SerializedString;
 import io.airlift.slice.SliceOutput;
 import io.trino.hive.formats.HiveFormatUtils;
+import io.trino.hive.formats.HiveFormatsErrorCode;
 import io.trino.hive.formats.line.Column;
 import io.trino.hive.formats.line.LineSerializer;
 import io.trino.spi.Page;
+import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
+import io.trino.spi.block.SqlMap;
+import io.trino.spi.block.SqlRow;
 import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.CharType;
 import io.trino.spi.type.Chars;
@@ -118,10 +122,26 @@ public class JsonSerializer
             };
         }
         else if (REAL.equals(type)) {
-            return (generator, block, position) -> generator.writeNumber(REAL.getFloat(block, position));
+            return (generator, block, position) -> {
+                float value = REAL.getFloat(block, position);
+                if (Float.isFinite(value)) {
+                    generator.writeNumber(value);
+                }
+                else {
+                    throw new TrinoException(HiveFormatsErrorCode.HIVE_UNSERIALIZABLE_JSON_VALUE, "Invalid value to Insert Real: " + value);
+                }
+            };
         }
         else if (DOUBLE.equals(type)) {
-            return (generator, block, position) -> generator.writeNumber(DOUBLE.getDouble(block, position));
+            return (generator, block, position) -> {
+                Double value = DOUBLE.getDouble(block, position);
+                if (Double.isFinite(value)) {
+                    generator.writeNumber(value);
+                }
+                else {
+                    throw new TrinoException(HiveFormatsErrorCode.HIVE_UNSERIALIZABLE_JSON_VALUE, "Invalid value to Insert: " + value);
+                }
+            };
         }
         else if (DATE.equals(type)) {
             return (generator, block, position) -> generator.writeString(HiveFormatUtils.formatHiveDate(block, position));
@@ -274,12 +294,16 @@ public class JsonSerializer
         public void writeNonNull(JsonGenerator generator, Block block, int position)
                 throws IOException
         {
-            Block mapBlock = requireNonNull(mapType.getObject(block, position));
+            SqlMap sqlMap = requireNonNull(mapType.getObject(block, position));
+            int rawOffset = sqlMap.getRawOffset();
+            Block rawKeyBlock = sqlMap.getRawKeyBlock();
+            Block rawValueBlock = sqlMap.getRawValueBlock();
+
             generator.writeStartObject();
-            for (int mapIndex = 0; mapIndex < mapBlock.getPositionCount(); mapIndex += 2) {
-                checkArgument(!mapBlock.isNull(mapIndex), "map key is null");
-                generator.writeFieldName(toMapKey.apply(mapBlock, mapIndex));
-                valueWriter.writeValue(generator, mapBlock, mapIndex + 1);
+            for (int i = 0; i < sqlMap.getSize(); i++) {
+                checkArgument(!rawKeyBlock.isNull(rawOffset + i), "map key is null");
+                generator.writeFieldName(toMapKey.apply(rawKeyBlock, rawOffset + i));
+                valueWriter.writeValue(generator, rawValueBlock, rawOffset + i);
             }
             generator.writeEndObject();
         }
@@ -292,11 +316,14 @@ public class JsonSerializer
         public void writeNonNull(JsonGenerator generator, Block block, int position)
                 throws IOException
         {
-            Block rowBlock = requireNonNull(rowType.getObject(block, position));
+            SqlRow sqlRow = rowType.getObject(block, position);
+            int rawIndex = sqlRow.getRawIndex();
+
             generator.writeStartObject();
             for (int field = 0; field < fieldWriters.length; field++) {
                 FieldWriter writer = fieldWriters[field];
-                writer.writeField(generator, rowBlock, field);
+                Block fieldBlock = sqlRow.getRawFieldBlock(field);
+                writer.writeField(generator, fieldBlock, rawIndex);
             }
             generator.writeEndObject();
         }

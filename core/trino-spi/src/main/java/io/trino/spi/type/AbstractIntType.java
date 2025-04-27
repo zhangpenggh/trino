@@ -13,16 +13,19 @@
  */
 package io.trino.spi.type;
 
-import io.airlift.slice.Slice;
 import io.airlift.slice.XxHash64;
 import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.block.BlockBuilderStatus;
+import io.trino.spi.block.IntArrayBlock;
 import io.trino.spi.block.IntArrayBlockBuilder;
 import io.trino.spi.block.PageBuilderStatus;
+import io.trino.spi.function.BlockIndex;
+import io.trino.spi.function.BlockPosition;
 import io.trino.spi.function.FlatFixed;
 import io.trino.spi.function.FlatFixedOffset;
+import io.trino.spi.function.FlatVariableOffset;
 import io.trino.spi.function.FlatVariableWidth;
 import io.trino.spi.function.ScalarOperator;
 
@@ -51,7 +54,7 @@ public abstract class AbstractIntType
 
     protected AbstractIntType(TypeSignature signature)
     {
-        super(signature, long.class);
+        super(signature, long.class, IntArrayBlock.class);
     }
 
     @Override
@@ -86,13 +89,7 @@ public abstract class AbstractIntType
 
     public final int getInt(Block block, int position)
     {
-        return block.getInt(position, 0);
-    }
-
-    @Override
-    public final Slice getSlice(Block block, int position)
-    {
-        return block.getSlice(position, 0, getFixedSize());
+        return readInt((IntArrayBlock) block.getUnderlyingValueBlock(), block.getUnderlyingValuePosition(position));
     }
 
     @Override
@@ -110,10 +107,10 @@ public abstract class AbstractIntType
     protected void checkValueValid(long value)
     {
         if (value > Integer.MAX_VALUE) {
-            throw new TrinoException(GENERIC_INTERNAL_ERROR, format("Value %d exceeds MAX_INT", value));
+            throw new TrinoException(GENERIC_INTERNAL_ERROR, format("Value %d exceeds MAX_INT for type %s", value, getTypeSignature()));
         }
         if (value < Integer.MIN_VALUE) {
-            throw new TrinoException(GENERIC_INTERNAL_ERROR, format("Value %d is less than MIN_INT", value));
+            throw new TrinoException(GENERIC_INTERNAL_ERROR, format("Value %d is less than MIN_INT for type %s", value, getTypeSignature()));
         }
     }
 
@@ -124,7 +121,7 @@ public abstract class AbstractIntType
             blockBuilder.appendNull();
         }
         else {
-            writeInt(blockBuilder, block.getInt(position, 0));
+            writeInt(blockBuilder, getInt(block, position));
         }
     }
 
@@ -135,7 +132,7 @@ public abstract class AbstractIntType
     }
 
     @Override
-    public final BlockBuilder createBlockBuilder(BlockBuilderStatus blockBuilderStatus, int expectedEntries, int expectedBytesPerEntry)
+    public final BlockBuilder createBlockBuilder(BlockBuilderStatus blockBuilderStatus, int expectedEntries)
     {
         int maxBlockSizeInBytes;
         if (blockBuilderStatus == null) {
@@ -150,22 +147,28 @@ public abstract class AbstractIntType
     }
 
     @Override
-    public final BlockBuilder createBlockBuilder(BlockBuilderStatus blockBuilderStatus, int expectedEntries)
-    {
-        return createBlockBuilder(blockBuilderStatus, expectedEntries, Integer.BYTES);
-    }
-
-    @Override
     public final BlockBuilder createFixedSizeBlockBuilder(int positionCount)
     {
         return new IntArrayBlockBuilder(null, positionCount);
     }
 
     @ScalarOperator(READ_VALUE)
+    private static long read(@BlockPosition IntArrayBlock block, @BlockIndex int position)
+    {
+        return readInt(block, position);
+    }
+
+    private static int readInt(IntArrayBlock block, int position)
+    {
+        return block.getInt(position);
+    }
+
+    @ScalarOperator(READ_VALUE)
     private static long readFlat(
             @FlatFixed byte[] fixedSizeSlice,
             @FlatFixedOffset int fixedSizeOffset,
-            @FlatVariableWidth byte[] unusedVariableSizeSlice)
+            @FlatVariableWidth byte[] unusedVariableSizeSlice,
+            @FlatVariableOffset int unusedVariableSizeOffset)
     {
         return (int) INT_HANDLE.get(fixedSizeSlice, fixedSizeOffset);
     }
@@ -187,12 +190,14 @@ public abstract class AbstractIntType
         return left == right;
     }
 
+    @SuppressWarnings("UnnecessaryLongToIntConversion")
     @ScalarOperator(HASH_CODE)
     private static long hashCodeOperator(long value)
     {
         return AbstractLongType.hash((int) value);
     }
 
+    @SuppressWarnings("UnnecessaryLongToIntConversion")
     @ScalarOperator(XX_HASH_64)
     private static long xxHash64Operator(long value)
     {

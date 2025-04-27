@@ -28,9 +28,10 @@ import io.trino.testing.datatype.SqlDataTypeTest;
 import io.trino.testing.sql.SqlExecutor;
 import io.trino.testing.sql.TestTable;
 import io.trino.testing.sql.TrinoSqlExecutor;
-import org.testng.annotations.BeforeClass;
-import org.testng.annotations.DataProvider;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.parallel.Execution;
 
 import java.math.RoundingMode;
 import java.time.LocalDate;
@@ -66,7 +67,11 @@ import static java.math.RoundingMode.HALF_EVEN;
 import static java.math.RoundingMode.HALF_UP;
 import static java.math.RoundingMode.UNNECESSARY;
 import static java.time.ZoneOffset.UTC;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
+import static org.junit.jupiter.api.parallel.ExecutionMode.CONCURRENT;
 
+@TestInstance(PER_CLASS)
+@Execution(CONCURRENT)
 public abstract class AbstractTestOracleTypeMapping
         extends AbstractTestQueryFramework
 {
@@ -82,7 +87,7 @@ public abstract class AbstractTestOracleTypeMapping
     private static final String NO_SUPPORTED_COLUMNS = "Table '.*' has no supported columns \\(all \\d+ columns are not supported\\)";
 
     private final ZoneId jvmZone = ZoneId.systemDefault();
-    private final LocalDateTime timeGapInJvmZone1 = LocalDateTime.of(1970, 1, 1, 0, 13, 42);
+    private final LocalDateTime timeGapInJvmZone1 = LocalDateTime.of(1932, 4, 1, 0, 13, 42);
     private final LocalDateTime timeGapInJvmZone2 = LocalDateTime.of(2018, 4, 1, 2, 13, 55, 123_000_000);
     private final LocalDateTime timeDoubledInJvmZone = LocalDateTime.of(2018, 10, 28, 1, 33, 17, 456_000_000);
 
@@ -95,11 +100,11 @@ public abstract class AbstractTestOracleTypeMapping
     private final ZoneId kathmandu = ZoneId.of("Asia/Kathmandu");
     private final LocalDateTime timeGapInKathmandu = LocalDateTime.of(1986, 1, 1, 0, 13, 7);
 
-    @BeforeClass
+    @BeforeAll
     public void setUp()
     {
         checkState(jvmZone.getId().equals("America/Bahia_Banderas"), "This test assumes certain JVM time zone");
-        LocalDate dateOfLocalTimeChangeForwardAtMidnightInJvmZone = LocalDate.of(1970, 1, 1);
+        LocalDate dateOfLocalTimeChangeForwardAtMidnightInJvmZone = LocalDate.of(1932, 4, 1);
         checkIsGap(jvmZone, dateOfLocalTimeChangeForwardAtMidnightInJvmZone.atStartOfDay());
         checkIsGap(jvmZone, timeGapInJvmZone1);
         checkIsGap(jvmZone, timeGapInJvmZone2);
@@ -636,8 +641,18 @@ public abstract class AbstractTestOracleTypeMapping
                 .execute(getQueryRunner(), oracleCreateAndInsert("test_blob"));
     }
 
-    @Test(dataProvider = "sessionZonesDataProvider")
-    public void testDate(ZoneId sessionZone)
+    @Test
+    public void testDate()
+    {
+        testDate(UTC);
+        testDate(jvmZone);
+        // using two non-JVM zones so that we don't need to worry what Oracle system zone is
+        testDate(vilnius);
+        testDate(kathmandu);
+        testDate(TestingSession.DEFAULT_TIME_ZONE_KEY.getZoneId());
+    }
+
+    private void testDate(ZoneId sessionZone)
     {
         // Note: these test cases are duplicates of those for PostgreSQL and MySQL.
 
@@ -677,7 +692,7 @@ public abstract class AbstractTestOracleTypeMapping
     public void testJulianGregorianDate()
     {
         // Oracle TO_DATE function returns +10 days during julian and gregorian calendar switch
-        try (TestTable table = new TestTable(getQueryRunner()::execute, "test_julian_dt", "(ts date)")) {
+        try (TestTable table = newTrinoTable("test_julian_dt", "(ts date)")) {
             assertUpdate(format("INSERT INTO %s VALUES (DATE '1582-10-05')", table.getName()), 1);
             assertQuery("SELECT * FROM " + table.getName(), "VALUES TIMESTAMP '1582-10-15 00:00:00'");
         }
@@ -686,22 +701,44 @@ public abstract class AbstractTestOracleTypeMapping
     @Test
     public void testUnsupportedDate()
     {
-        try (TestTable table = new TestTable(getQueryRunner()::execute, "test_unsupported_dt", "(ts date)")) {
+        try (TestTable table = newTrinoTable("test_unsupported_dt", "(ts date)")) {
             assertQueryFails(
                     format("INSERT INTO %s VALUES (DATE '-4713-12-31')", table.getName()),
-                    "\\QFailed to insert data: ORA-01841: (full) year must be between -4713 and +9999, and not be 0\n");
+                    """
+                    \\QFailed to insert data: ORA-01841: (full) year must be between -4713 and +9999, and not be 0
+
+                    https://docs.oracle.com/error-help/db/ora-01841/\\E\
+                    """);
             assertQueryFails(
                     format("INSERT INTO %s VALUES (DATE '0000-01-01')", table.getName()),
-                    "\\QFailed to insert data: ORA-01841: (full) year must be between -4713 and +9999, and not be 0\n");
+                    """
+                    \\QFailed to insert data: ORA-01841: (full) year must be between -4713 and +9999, and not be 0
+
+                    https://docs.oracle.com/error-help/db/ora-01841/\\E\
+                    """);
             // The error message sounds invalid date format in the connector, but it's no problem as the max year is 9999 in Oracle
             assertQueryFails(
                     format("INSERT INTO %s VALUES (DATE '10000-01-01')", table.getName()),
-                    "\\QFailed to insert data: ORA-01861: literal does not match format string\n");
+                    """
+                    \\QFailed to insert data: ORA-01861: literal does not match format string
+
+                    https://docs.oracle.com/error-help/db/ora-01861/\\E\
+                    """);
         }
     }
 
-    @Test(dataProvider = "sessionZonesDataProvider")
-    public void testTimestamp(ZoneId sessionZone)
+    @Test
+    public void testTimestamp()
+    {
+        testTimestamp(UTC);
+        testTimestamp(jvmZone);
+        // using two non-JVM zones so that we don't need to worry what Oracle system zone is
+        testTimestamp(vilnius);
+        testTimestamp(kathmandu);
+        testTimestamp(TestingSession.DEFAULT_TIME_ZONE_KEY.getZoneId());
+    }
+
+    private void testTimestamp(ZoneId sessionZone)
     {
         Session session = Session.builder(getSession())
                 .setTimeZoneKey(getTimeZoneKey(sessionZone.getId()))
@@ -734,8 +771,18 @@ public abstract class AbstractTestOracleTypeMapping
                 .execute(getQueryRunner(), session, trinoCreateAndInsert(session, "test_timestamp"));
     }
 
-    @Test(dataProvider = "sessionZonesDataProvider")
-    public void testTimestampNanos(ZoneId sessionZone)
+    @Test
+    public void testTimestampNanos()
+    {
+        testTimestampNanos(UTC);
+        testTimestampNanos(jvmZone);
+        // using two non-JVM zones so that we don't need to worry what Oracle system zone is
+        testTimestampNanos(vilnius);
+        testTimestampNanos(kathmandu);
+        testTimestampNanos(TestingSession.DEFAULT_TIME_ZONE_KEY.getZoneId());
+    }
+
+    private void testTimestampNanos(ZoneId sessionZone)
     {
         Session session = Session.builder(getSession())
                 .setTimeZoneKey(getTimeZoneKey(sessionZone.getId()))
@@ -769,8 +816,18 @@ public abstract class AbstractTestOracleTypeMapping
                 .execute(getQueryRunner(), session, trinoCreateAndInsert(session, "test_timestamp_nano"));
     }
 
-    @Test(dataProvider = "sessionZonesDataProvider")
-    public void testTimestampAllPrecisions(ZoneId sessionZone)
+    @Test
+    public void testTimestampAllPrecisions()
+    {
+        testTimestampAllPrecisions(UTC);
+        testTimestampAllPrecisions(jvmZone);
+        // using two non-JVM zones so that we don't need to worry what Oracle system zone is
+        testTimestampAllPrecisions(vilnius);
+        testTimestampAllPrecisions(kathmandu);
+        testTimestampAllPrecisions(TestingSession.DEFAULT_TIME_ZONE_KEY.getZoneId());
+    }
+
+    private void testTimestampAllPrecisions(ZoneId sessionZone)
     {
         SqlDataTypeTest tests = SqlDataTypeTest.create()
                 // before epoch
@@ -903,7 +960,7 @@ public abstract class AbstractTestOracleTypeMapping
     public void testJulianGregorianTimestamp()
     {
         // Oracle TO_DATE function returns +10 days during julian and gregorian calendar switch
-        try (TestTable table = new TestTable(getQueryRunner()::execute, "test_julian_ts", "(ts date)")) {
+        try (TestTable table = newTrinoTable("test_julian_ts", "(ts date)")) {
             assertUpdate(format("INSERT INTO %s VALUES (timestamp '1582-10-05')", table.getName()), 1);
             assertQuery("SELECT * FROM " + table.getName(), "VALUES TIMESTAMP '1582-10-15 00:00:00'");
         }
@@ -912,30 +969,29 @@ public abstract class AbstractTestOracleTypeMapping
     @Test
     public void testUnsupportedTimestamp()
     {
-        try (TestTable table = new TestTable(getQueryRunner()::execute, "test_unsupported_ts", "(ts timestamp)")) {
+        try (TestTable table = newTrinoTable("test_unsupported_ts", "(ts timestamp)")) {
             assertQueryFails(
                     format("INSERT INTO %s VALUES (TIMESTAMP '-4713-12-31 00:00:00.000')", table.getName()),
-                    "\\QFailed to insert data: ORA-01841: (full) year must be between -4713 and +9999, and not be 0\n");
+                    """
+                    \\QFailed to insert data: ORA-01841: (full) year must be between -4713 and +9999, and not be 0
+
+                    https://docs.oracle.com/error-help/db/ora-01841/\\E\
+                    """);
             assertQueryFails(
                     format("INSERT INTO %s VALUES (TIMESTAMP '0000-01-01 00:00:00.000')", table.getName()),
-                    "\\QFailed to insert data: ORA-01841: (full) year must be between -4713 and +9999, and not be 0\n");
+                    """
+                    \\QFailed to insert data: ORA-01841: (full) year must be between -4713 and +9999, and not be 0
+
+                    https://docs.oracle.com/error-help/db/ora-01841/\\E\
+                    """);
             assertQueryFails(
                     format("INSERT INTO %s VALUES (TIMESTAMP '10000-01-01 00:00:00.000')", table.getName()),
-                    "\\QFailed to insert data: ORA-01862: the numeric value does not match the length of the format item\n");
-        }
-    }
+                    """
+                    \\QFailed to insert data: ORA-01862: the numeric value does not match the length of the format item
 
-    @DataProvider
-    public Object[][] sessionZonesDataProvider()
-    {
-        return new Object[][] {
-                {UTC},
-                {jvmZone},
-                // using two non-JVM zones so that we don't need to worry what Oracle system zone is
-                {vilnius},
-                {kathmandu},
-                {TestingSession.DEFAULT_TIME_ZONE_KEY.getZoneId()},
-        };
+                    https://docs.oracle.com/error-help/db/ora-01862/\\E\
+                    """);
+        }
     }
 
     @Test

@@ -14,7 +14,6 @@
 package io.trino;
 
 import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Splitter;
 import com.google.common.collect.ImmutableList;
 import io.airlift.configuration.Config;
 import io.airlift.configuration.ConfigDescription;
@@ -22,6 +21,8 @@ import io.airlift.configuration.DefunctConfig;
 import io.airlift.configuration.LegacyConfig;
 import io.airlift.units.DataSize;
 import io.airlift.units.MaxDataSize;
+import io.trino.execution.ThreadCountParser;
+import io.trino.execution.buffer.CompressionCodec;
 import io.trino.sql.analyzer.RegexLibrary;
 import jakarta.validation.constraints.DecimalMax;
 import jakarta.validation.constraints.DecimalMin;
@@ -35,6 +36,8 @@ import java.util.List;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.airlift.units.DataSize.Unit.KILOBYTE;
 import static io.airlift.units.DataSize.succinctBytes;
+import static io.trino.execution.buffer.CompressionCodec.LZ4;
+import static io.trino.execution.buffer.CompressionCodec.NONE;
 import static io.trino.sql.analyzer.RegexLibrary.JONI;
 
 @DefunctConfig({
@@ -52,18 +55,30 @@ import static io.trino.sql.analyzer.RegexLibrary.JONI;
         "deprecated.legacy-unnest-array-rows",
         "deprecated.legacy-update-delete-implementation",
         "experimental-syntax-enabled",
+        "experimental.aggregation-operator-unspill-memory-limit",
+        "experimental.filter-and-project-min-output-page-row-count",
+        "experimental.filter-and-project-min-output-page-size",
+        "experimental.late-materialization.enabled",
+        "experimental.memory-revoking-target",
+        "experimental.memory-revoking-threshold",
         "experimental.resource-groups-enabled",
+        "experimental.spill-enabled",
+        "experimental.spill-order-by",
+        "experimental.spill-window-operator",
+        "experimental.spiller-max-used-space-threshold",
+        "experimental.spiller-spill-path",
+        "experimental.spiller-threads",
         "fast-inequality-joins",
         "histogram.implementation",
+        "legacy.allow-set-view-authorization",
+        "legacy.materialized-view-grace-period",
         "multimapagg.implementation",
         "optimizer.iterative-rule-based-column-pruning",
         "optimizer.processing-optimization",
+        "parse-decimal-literals-as-double",
         "resource-group-manager",
         "spill-order-by",
-        "experimental.spill-order-by",
         "spill-window-operator",
-        "experimental.spill-window-operator",
-        "legacy.allow-set-view-authorization",
 })
 public class FeaturesConfig
 {
@@ -73,11 +88,12 @@ public class FeaturesConfig
     private boolean redistributeWrites = true;
     private boolean scaleWriters = true;
     private DataSize writerScalingMinDataProcessed = DataSize.of(120, DataSize.Unit.MEGABYTE);
+    private DataSize maxMemoryPerPartitionWriter = DataSize.of(256, DataSize.Unit.MEGABYTE);
     private DataIntegrityVerification exchangeDataIntegrityVerification = DataIntegrityVerification.ABORT;
     /**
      * default value is overwritten for fault tolerant execution in {@link #applyFaultTolerantExecutionDefaults()}}
      */
-    private boolean exchangeCompressionEnabled;
+    private CompressionCodec exchangeCompressionCodec = NONE;
     private boolean pagesIndexEagerCompactionEnabled;
     private boolean omitDateTimeTypePrecision;
     private int maxRecursionDepth = 10;
@@ -92,8 +108,6 @@ public class FeaturesConfig
     private double spillMaxUsedSpaceThreshold = 0.9;
     private double memoryRevokingTarget = 0.5;
     private double memoryRevokingThreshold = 0.9;
-    private boolean parseDecimalLiteralsAsDouble;
-    private boolean lateMaterializationEnabled;
 
     private DataSize filterAndProjectMinOutputPageSize = DataSize.of(500, KILOBYTE);
     private int filterAndProjectMinOutputPageRowCount = 256;
@@ -102,13 +116,12 @@ public class FeaturesConfig
     private boolean legacyCatalogRoles;
     private boolean incrementalHashArrayLoadFactorEnabled = true;
 
-    private boolean legacyMaterializedViewGracePeriod;
     private boolean hideInaccessibleColumns;
     private boolean forceSpillingJoin;
 
-    private boolean faultTolerantExecutionExchangeEncryptionEnabled = true;
+    private boolean columnarFilterEvaluationEnabled = true;
 
-    private boolean flatGroupByHash = true;
+    private boolean faultTolerantExecutionExchangeEncryptionEnabled = true;
 
     public enum DataIntegrityVerification
     {
@@ -178,6 +191,20 @@ public class FeaturesConfig
         return this;
     }
 
+    @NotNull
+    public DataSize getMaxMemoryPerPartitionWriter()
+    {
+        return maxMemoryPerPartitionWriter;
+    }
+
+    @Config("max-memory-per-partition-writer")
+    @ConfigDescription("Estimated maximum memory required per partition writer in a single thread")
+    public FeaturesConfig setMaxMemoryPerPartitionWriter(DataSize maxMemoryPerPartitionWriter)
+    {
+        this.maxMemoryPerPartitionWriter = maxMemoryPerPartitionWriter;
+        return this;
+    }
+
     @Min(2)
     public int getRe2JDfaStatesLimit()
     {
@@ -204,12 +231,15 @@ public class FeaturesConfig
         return this;
     }
 
+    @Deprecated
     public RegexLibrary getRegexLibrary()
     {
         return regexLibrary;
     }
 
-    @Config("regex-library")
+    @Deprecated
+    @Config("deprecated.regex-library")
+    @LegacyConfig("regex-library")
     public FeaturesConfig setRegexLibrary(RegexLibrary regexLibrary)
     {
         this.regexLibrary = regexLibrary;
@@ -222,7 +252,6 @@ public class FeaturesConfig
     }
 
     @Config("spill-enabled")
-    @LegacyConfig("experimental.spill-enabled")
     public FeaturesConfig setSpillEnabled(boolean spillEnabled)
     {
         this.spillEnabled = spillEnabled;
@@ -235,7 +264,6 @@ public class FeaturesConfig
     }
 
     @Config("aggregation-operator-unspill-memory-limit")
-    @LegacyConfig("experimental.aggregation-operator-unspill-memory-limit")
     public FeaturesConfig setAggregationOperatorUnspillMemoryLimit(DataSize aggregationOperatorUnspillMemoryLimit)
     {
         this.aggregationOperatorUnspillMemoryLimit = aggregationOperatorUnspillMemoryLimit;
@@ -248,11 +276,11 @@ public class FeaturesConfig
     }
 
     @Config("spiller-spill-path")
-    @LegacyConfig("experimental.spiller-spill-path")
-    public FeaturesConfig setSpillerSpillPaths(String spillPaths)
+    public FeaturesConfig setSpillerSpillPaths(List<String> spillPaths)
     {
-        List<String> spillPathsSplit = ImmutableList.copyOf(Splitter.on(",").trimResults().omitEmptyStrings().split(spillPaths));
-        this.spillerSpillPaths = spillPathsSplit.stream().map(Paths::get).collect(toImmutableList());
+        this.spillerSpillPaths = spillPaths.stream()
+                .map(Paths::get)
+                .collect(toImmutableList());
         return this;
     }
 
@@ -263,10 +291,9 @@ public class FeaturesConfig
     }
 
     @Config("spiller-threads")
-    @LegacyConfig("experimental.spiller-threads")
-    public FeaturesConfig setSpillerThreads(int spillerThreads)
+    public FeaturesConfig setSpillerThreads(String spillerThreads)
     {
-        this.spillerThreads = spillerThreads;
+        this.spillerThreads = ThreadCountParser.DEFAULT.parse(spillerThreads);
         return this;
     }
 
@@ -278,7 +305,6 @@ public class FeaturesConfig
     }
 
     @Config("memory-revoking-threshold")
-    @LegacyConfig("experimental.memory-revoking-threshold")
     @ConfigDescription("Revoke memory when memory pool is filled over threshold")
     public FeaturesConfig setMemoryRevokingThreshold(double memoryRevokingThreshold)
     {
@@ -294,7 +320,6 @@ public class FeaturesConfig
     }
 
     @Config("memory-revoking-target")
-    @LegacyConfig("experimental.memory-revoking-target")
     @ConfigDescription("When revoking memory, try to revoke so much that pool is filled below target at the end")
     public FeaturesConfig setMemoryRevokingTarget(double memoryRevokingTarget)
     {
@@ -308,22 +333,30 @@ public class FeaturesConfig
     }
 
     @Config("spiller-max-used-space-threshold")
-    @LegacyConfig("experimental.spiller-max-used-space-threshold")
     public FeaturesConfig setSpillMaxUsedSpaceThreshold(double spillMaxUsedSpaceThreshold)
     {
         this.spillMaxUsedSpaceThreshold = spillMaxUsedSpaceThreshold;
         return this;
     }
 
-    public boolean isExchangeCompressionEnabled()
-    {
-        return exchangeCompressionEnabled;
-    }
-
-    @Config("exchange.compression-enabled")
+    @Deprecated
+    @LegacyConfig(value = "exchange.compression-enabled", replacedBy = "exchange.compression-codec")
     public FeaturesConfig setExchangeCompressionEnabled(boolean exchangeCompressionEnabled)
     {
-        this.exchangeCompressionEnabled = exchangeCompressionEnabled;
+        this.exchangeCompressionCodec = exchangeCompressionEnabled ? LZ4 : NONE;
+        return this;
+    }
+
+    public CompressionCodec getExchangeCompressionCodec()
+    {
+        return exchangeCompressionCodec;
+    }
+
+    @Config("exchange.compression-codec")
+    @ConfigDescription("Compression codec used for data in exchanges")
+    public FeaturesConfig setExchangeCompressionCodec(CompressionCodec exchangeCompressionCodec)
+    {
+        this.exchangeCompressionCodec = exchangeCompressionCodec;
         return this;
     }
 
@@ -336,18 +369,6 @@ public class FeaturesConfig
     public FeaturesConfig setExchangeDataIntegrityVerification(DataIntegrityVerification exchangeDataIntegrityVerification)
     {
         this.exchangeDataIntegrityVerification = exchangeDataIntegrityVerification;
-        return this;
-    }
-
-    public boolean isParseDecimalLiteralsAsDouble()
-    {
-        return parseDecimalLiteralsAsDouble;
-    }
-
-    @Config("parse-decimal-literals-as-double")
-    public FeaturesConfig setParseDecimalLiteralsAsDouble(boolean parseDecimalLiteralsAsDouble)
-    {
-        this.parseDecimalLiteralsAsDouble = parseDecimalLiteralsAsDouble;
         return this;
     }
 
@@ -370,7 +391,6 @@ public class FeaturesConfig
     }
 
     @Config("filter-and-project-min-output-page-size")
-    @LegacyConfig("experimental.filter-and-project-min-output-page-size")
     public FeaturesConfig setFilterAndProjectMinOutputPageSize(DataSize filterAndProjectMinOutputPageSize)
     {
         this.filterAndProjectMinOutputPageSize = filterAndProjectMinOutputPageSize;
@@ -384,7 +404,6 @@ public class FeaturesConfig
     }
 
     @Config("filter-and-project-min-output-page-row-count")
-    @LegacyConfig("experimental.filter-and-project-min-output-page-row-count")
     public FeaturesConfig setFilterAndProjectMinOutputPageRowCount(int filterAndProjectMinOutputPageRowCount)
     {
         this.filterAndProjectMinOutputPageRowCount = filterAndProjectMinOutputPageRowCount;
@@ -416,19 +435,6 @@ public class FeaturesConfig
         return this;
     }
 
-    public boolean isLateMaterializationEnabled()
-    {
-        return lateMaterializationEnabled;
-    }
-
-    @Config("experimental.late-materialization.enabled")
-    @LegacyConfig("experimental.work-processor-pipelines")
-    public FeaturesConfig setLateMaterializationEnabled(boolean lateMaterializationEnabled)
-    {
-        this.lateMaterializationEnabled = lateMaterializationEnabled;
-        return this;
-    }
-
     public boolean isLegacyCatalogRoles()
     {
         return legacyCatalogRoles;
@@ -454,21 +460,6 @@ public class FeaturesConfig
     public FeaturesConfig setIncrementalHashArrayLoadFactorEnabled(boolean incrementalHashArrayLoadFactorEnabled)
     {
         this.incrementalHashArrayLoadFactorEnabled = incrementalHashArrayLoadFactorEnabled;
-        return this;
-    }
-
-    @Deprecated
-    public boolean isLegacyMaterializedViewGracePeriod()
-    {
-        return legacyMaterializedViewGracePeriod;
-    }
-
-    @Deprecated
-    @Config("legacy.materialized-view-grace-period")
-    @ConfigDescription("Enable legacy handling of stale materialized views")
-    public FeaturesConfig setLegacyMaterializedViewGracePeriod(boolean legacyMaterializedViewGracePeriod)
-    {
-        this.legacyMaterializedViewGracePeriod = legacyMaterializedViewGracePeriod;
         return this;
     }
 
@@ -498,12 +489,26 @@ public class FeaturesConfig
         return this;
     }
 
+    public boolean isColumnarFilterEvaluationEnabled()
+    {
+        return columnarFilterEvaluationEnabled;
+    }
+
+    @Config("experimental.columnar-filter-evaluation.enabled")
+    @ConfigDescription("Enables columnar evaluation of filters")
+    public FeaturesConfig setColumnarFilterEvaluationEnabled(boolean columnarFilterEvaluationEnabled)
+    {
+        this.columnarFilterEvaluationEnabled = columnarFilterEvaluationEnabled;
+        return this;
+    }
+
     public boolean isFaultTolerantExecutionExchangeEncryptionEnabled()
     {
         return faultTolerantExecutionExchangeEncryptionEnabled;
     }
 
-    @Config("fault-tolerant-execution.exchange-encryption-enabled")
+    @Config("fault-tolerant-execution-exchange-encryption-enabled")
+    @LegacyConfig("fault-tolerant-execution.exchange-encryption-enabled")
     public FeaturesConfig setFaultTolerantExecutionExchangeEncryptionEnabled(boolean faultTolerantExecutionExchangeEncryptionEnabled)
     {
         this.faultTolerantExecutionExchangeEncryptionEnabled = faultTolerantExecutionExchangeEncryptionEnabled;
@@ -512,20 +517,6 @@ public class FeaturesConfig
 
     public void applyFaultTolerantExecutionDefaults()
     {
-        exchangeCompressionEnabled = true;
-    }
-
-    @Deprecated
-    public boolean isFlatGroupByHash()
-    {
-        return flatGroupByHash;
-    }
-
-    @Deprecated
-    @Config("legacy.flat-group-by-hash")
-    public FeaturesConfig setFlatGroupByHash(boolean flatGroupByHash)
-    {
-        this.flatGroupByHash = flatGroupByHash;
-        return this;
+        exchangeCompressionCodec = LZ4;
     }
 }

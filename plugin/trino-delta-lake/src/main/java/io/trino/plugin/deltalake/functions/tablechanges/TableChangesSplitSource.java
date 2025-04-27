@@ -39,6 +39,7 @@ import java.util.stream.Stream;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.Iterables.getOnlyElement;
+import static io.trino.plugin.deltalake.DeltaLakeConfig.DEFAULT_TRANSACTION_LOG_MAX_CACHED_SIZE;
 import static io.trino.plugin.deltalake.DeltaLakeErrorCode.DELTA_LAKE_BAD_DATA;
 import static io.trino.plugin.deltalake.DeltaLakeErrorCode.DELTA_LAKE_FILESYSTEM_ERROR;
 import static io.trino.plugin.deltalake.functions.tablechanges.TableChangesFileType.CDF_FILE;
@@ -74,11 +75,9 @@ public class TableChangesSplitSource
                 .boxed()
                 .flatMap(version -> {
                     try {
-                        List<DeltaLakeTransactionLogEntry> entries = getEntriesFromJson(version, transactionLogDir, fileSystem)
-                                .orElseThrow(() -> new TrinoException(DELTA_LAKE_BAD_DATA, "Delta Lake log entries are missing for version " + version));
-                        if (entries.isEmpty()) {
-                            return ImmutableList.<ConnectorSplit>of().stream();
-                        }
+                        List<DeltaLakeTransactionLogEntry> entries = getEntriesFromJson(version, transactionLogDir, fileSystem, DEFAULT_TRANSACTION_LOG_MAX_CACHED_SIZE)
+                                .orElseThrow(() -> new TrinoException(DELTA_LAKE_BAD_DATA, "Delta Lake log entries are missing for version " + version))
+                                .getEntriesList(fileSystem);
                         List<CommitInfoEntry> commitInfoEntries = entries.stream()
                                 .map(DeltaLakeTransactionLogEntry::getCommitInfo)
                                 .filter(Objects::nonNull)
@@ -102,7 +101,7 @@ public class TableChangesSplitSource
                                         cdcEntry.getPath(),
                                         cdcEntry.getCanonicalPartitionValues()));
                             }
-                            if (entry.getRemove() != null && entry.getRemove().isDataChange()) {
+                            if (entry.getRemove() != null && entry.getRemove().dataChange()) {
                                 containsRemoveEntry = true;
                             }
                         }
@@ -112,6 +111,7 @@ public class TableChangesSplitSource
                         if (!containsRemoveEntry) {
                             for (DeltaLakeTransactionLogEntry entry : entries) {
                                 if (entry.getAdd() != null && entry.getAdd().isDataChange()) {
+                                    // paths can be absolute as well in case of shallow-cloned tables
                                     AddFileEntry addEntry = entry.getAdd();
                                     splits.add(mapToDeltaLakeTableChangesSplit(
                                             commitInfo,
@@ -154,9 +154,9 @@ public class TableChangesSplitSource
                 path,
                 length,
                 canonicalPartitionValues,
-                commitInfoEntry.getTimestamp(),
+                commitInfoEntry.timestamp(),
                 source,
-                commitInfoEntry.getVersion());
+                commitInfoEntry.version());
     }
 
     @Override

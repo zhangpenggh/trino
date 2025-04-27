@@ -16,53 +16,39 @@ package io.trino.plugin.deltalake;
 import com.google.inject.Binder;
 import com.google.inject.Module;
 import io.airlift.configuration.AbstractConfigurationAwareModule;
+import io.trino.plugin.base.security.AllowAllSecurityModule;
 import io.trino.plugin.base.security.FileBasedAccessControlModule;
 import io.trino.plugin.base.security.ReadOnlySecurityModule;
-import io.trino.plugin.hive.security.AllowAllSecurityModule;
+import io.trino.plugin.hive.security.UsingSystemSecurity;
 
-import static com.google.inject.multibindings.OptionalBinder.newOptionalBinder;
-import static io.airlift.configuration.ConditionalModule.conditionalModule;
 import static io.airlift.configuration.ConfigurationAwareModule.combine;
-import static io.trino.plugin.deltalake.DeltaLakeAccessControlMetadataFactory.DEFAULT;
 
 public class DeltaLakeSecurityModule
         extends AbstractConfigurationAwareModule
 {
-    public static final String FILE = "file";
-    public static final String READ_ONLY = "read_only";
-    public static final String ALLOW_ALL = "allow_all";
+    public enum DeltaLakeSecurity
+    {
+        ALLOW_ALL,
+        READ_ONLY,
+        FILE,
+        SYSTEM,
+        /**/
+    }
 
     @Override
     protected void setup(Binder binder)
     {
-        bindSecurityModule(ALLOW_ALL, combine(
-                new AllowAllSecurityModule(),
-                new StaticAccessControlMetadataModule()));
-        bindSecurityModule(READ_ONLY, combine(
-                new ReadOnlySecurityModule(),
-                new StaticAccessControlMetadataModule()));
-        bindSecurityModule(FILE, combine(
-                new FileBasedAccessControlModule(),
-                new StaticAccessControlMetadataModule()));
-        // SYSTEM: do not bind an ConnectorAccessControl so the engine will use system security with system roles
+        install(switch (buildConfigObject(DeltaLakeSecurityConfig.class).getSecuritySystem()) {
+            case ALLOW_ALL -> combine(new AllowAllSecurityModule(), usingSystemSecurity(false));
+            case READ_ONLY -> combine(new ReadOnlySecurityModule(), usingSystemSecurity(false));
+            case FILE -> combine(new FileBasedAccessControlModule(), usingSystemSecurity(false));
+            // do not bind a ConnectorAccessControl so the engine will use system security with system roles
+            case SYSTEM -> usingSystemSecurity(true);
+        });
     }
 
-    protected void bindSecurityModule(String name, Module module)
+    private static Module usingSystemSecurity(boolean system)
     {
-        install(conditionalModule(
-                DeltaLakeSecurityConfig.class,
-                // imitate Airlift's enum matching
-                security -> name.equalsIgnoreCase(security.getSecuritySystem().replace("-", "_")),
-                module));
-    }
-
-    private static class StaticAccessControlMetadataModule
-            implements Module
-    {
-        @Override
-        public void configure(Binder binder)
-        {
-            newOptionalBinder(binder, DeltaLakeAccessControlMetadataFactory.class).setBinding().toInstance(DEFAULT);
-        }
+        return binder -> binder.bind(boolean.class).annotatedWith(UsingSystemSecurity.class).toInstance(system);
     }
 }

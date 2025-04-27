@@ -65,6 +65,7 @@ import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.trino.SystemSessionProperties.isOmitDateTimeTypePrecision;
+import static io.trino.connector.system.jdbc.FilterUtil.isImpossibleObjectName;
 import static io.trino.connector.system.jdbc.FilterUtil.tablePrefix;
 import static io.trino.connector.system.jdbc.FilterUtil.tryGetSingleVarcharValue;
 import static io.trino.metadata.MetadataListing.listCatalogNames;
@@ -81,10 +82,9 @@ import static io.trino.spi.type.RealType.REAL;
 import static io.trino.spi.type.SmallintType.SMALLINT;
 import static io.trino.spi.type.TinyintType.TINYINT;
 import static io.trino.spi.type.VarbinaryType.VARBINARY;
-import static io.trino.spi.type.VarcharType.createUnboundedVarcharType;
+import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.type.TypeUtils.getDisplayLabel;
 import static java.lang.Math.min;
-import static java.util.Locale.ENGLISH;
 import static java.util.Objects.requireNonNull;
 
 public class ColumnJdbcTable
@@ -103,30 +103,30 @@ public class ColumnJdbcTable
     private static final ColumnHandle TABLE_NAME_COLUMN = new SystemColumnHandle("table_name");
 
     public static final ConnectorTableMetadata METADATA = tableMetadataBuilder(NAME)
-            .column("table_cat", createUnboundedVarcharType())
-            .column("table_schem", createUnboundedVarcharType())
-            .column("table_name", createUnboundedVarcharType())
-            .column("column_name", createUnboundedVarcharType())
+            .column("table_cat", VARCHAR)
+            .column("table_schem", VARCHAR)
+            .column("table_name", VARCHAR)
+            .column("column_name", VARCHAR)
             .column("data_type", BIGINT)
-            .column("type_name", createUnboundedVarcharType())
+            .column("type_name", VARCHAR)
             .column("column_size", BIGINT)
             .column("buffer_length", BIGINT)
             .column("decimal_digits", BIGINT)
             .column("num_prec_radix", BIGINT)
             .column("nullable", BIGINT)
-            .column("remarks", createUnboundedVarcharType())
-            .column("column_def", createUnboundedVarcharType())
+            .column("remarks", VARCHAR)
+            .column("column_def", VARCHAR)
             .column("sql_data_type", BIGINT)
             .column("sql_datetime_sub", BIGINT)
             .column("char_octet_length", BIGINT)
             .column("ordinal_position", BIGINT)
-            .column("is_nullable", createUnboundedVarcharType())
-            .column("scope_catalog", createUnboundedVarcharType())
-            .column("scope_schema", createUnboundedVarcharType())
-            .column("scope_table", createUnboundedVarcharType())
+            .column("is_nullable", VARCHAR)
+            .column("scope_catalog", VARCHAR)
+            .column("scope_schema", VARCHAR)
+            .column("scope_table", VARCHAR)
             .column("source_data_type", BIGINT)
-            .column("is_autoincrement", createUnboundedVarcharType())
-            .column("is_generatedcolumn", createUnboundedVarcharType())
+            .column("is_autoincrement", VARCHAR)
+            .column("is_generatedcolumn", VARCHAR)
             .build();
 
     private final Metadata metadata;
@@ -164,16 +164,23 @@ public class ColumnJdbcTable
 
         Session session = ((FullConnectorSession) connectorSession).getSession();
 
-        Optional<String> catalogFilter = tryGetSingleVarcharValue(tupleDomain, TABLE_CATALOG_COLUMN);
-        Optional<String> schemaFilter = tryGetSingleVarcharValue(tupleDomain, TABLE_SCHEMA_COLUMN);
-        Optional<String> tableFilter = tryGetSingleVarcharValue(tupleDomain, TABLE_NAME_COLUMN);
+        Domain catalogDomain = tupleDomain.getDomain(TABLE_CATALOG_COLUMN, VARCHAR);
+        Domain schemaDomain = tupleDomain.getDomain(TABLE_SCHEMA_COLUMN, VARCHAR);
+        Domain tableDomain = tupleDomain.getDomain(TABLE_NAME_COLUMN, VARCHAR);
+
+        if (isImpossibleObjectName(catalogDomain) || isImpossibleObjectName(schemaDomain) || isImpossibleObjectName(tableDomain)) {
+            return TupleDomain.none();
+        }
+
+        Optional<String> schemaFilter = tryGetSingleVarcharValue(schemaDomain);
+        Optional<String> tableFilter = tryGetSingleVarcharValue(tableDomain);
 
         if (schemaFilter.isPresent() && tableFilter.isPresent()) {
             // No need to narrow down the domain.
             return tupleDomain;
         }
 
-        List<String> catalogs = listCatalogNames(session, metadata, accessControl, catalogFilter).stream()
+        List<String> catalogs = listCatalogNames(session, metadata, accessControl, catalogDomain).stream()
                 .filter(catalogName -> predicate.test(ImmutableMap.of(TABLE_CATALOG_COLUMN, toNullableValue(catalogName))))
                 .collect(toImmutableList());
 
@@ -239,20 +246,19 @@ public class ColumnJdbcTable
 
         Session session = ((FullConnectorSession) connectorSession).getSession();
         boolean omitDateTimeTypePrecision = isOmitDateTimeTypePrecision(session);
-        Optional<String> catalogFilter = tryGetSingleVarcharValue(constraint, 0);
-        Optional<String> schemaFilter = tryGetSingleVarcharValue(constraint, 1);
-        Optional<String> tableFilter = tryGetSingleVarcharValue(constraint, 2);
 
-        Domain catalogDomain = constraint.getDomains().get().getOrDefault(0, Domain.all(createUnboundedVarcharType()));
-        Domain schemaDomain = constraint.getDomains().get().getOrDefault(1, Domain.all(createUnboundedVarcharType()));
-        Domain tableDomain = constraint.getDomains().get().getOrDefault(2, Domain.all(createUnboundedVarcharType()));
+        Domain catalogDomain = constraint.getDomain(0, VARCHAR);
+        Domain schemaDomain = constraint.getDomain(1, VARCHAR);
+        Domain tableDomain = constraint.getDomain(2, VARCHAR);
 
-        if (isNonLowercase(schemaFilter) || isNonLowercase(tableFilter)) {
-            // Non-lowercase predicate will never match a lowercase name (until TODO https://github.com/trinodb/trino/issues/17)
+        if (isImpossibleObjectName(catalogDomain) || isImpossibleObjectName(schemaDomain) || isImpossibleObjectName(tableDomain)) {
             return table.build().cursor();
         }
 
-        for (String catalog : listCatalogNames(session, metadata, accessControl, catalogFilter)) {
+        Optional<String> schemaFilter = tryGetSingleVarcharValue(schemaDomain);
+        Optional<String> tableFilter = tryGetSingleVarcharValue(tableDomain);
+
+        for (String catalog : listCatalogNames(session, metadata, accessControl, catalogDomain)) {
             if (!catalogDomain.includesNullableValue(utf8Slice(catalog))) {
                 continue;
             }
@@ -286,11 +292,6 @@ public class ColumnJdbcTable
             }
         }
         return table.build().cursor();
-    }
-
-    private static boolean isNonLowercase(Optional<String> filter)
-    {
-        return filter.filter(value -> !value.equals(value.toLowerCase(ENGLISH))).isPresent();
     }
 
     private static void addColumnsRow(Builder builder, String catalog, Map<SchemaTableName, List<ColumnMetadata>> columns, boolean isOmitTimestampPrecision)
@@ -430,8 +431,8 @@ public class ColumnJdbcTable
         if (type.equals(TINYINT)) {
             return 3;   // 2**7-1
         }
-        if (type instanceof DecimalType) {
-            return ((DecimalType) type).getPrecision();
+        if (type instanceof DecimalType decimalType) {
+            return decimalType.getPrecision();
         }
         if (type.equals(REAL)) {
             return 24; // IEEE 754
@@ -439,43 +440,43 @@ public class ColumnJdbcTable
         if (type.equals(DOUBLE)) {
             return 53; // IEEE 754
         }
-        if (type instanceof VarcharType) {
-            return ((VarcharType) type).getLength().orElse(VarcharType.UNBOUNDED_LENGTH);
+        if (type instanceof VarcharType varcharType) {
+            return varcharType.getLength().orElse(VarcharType.UNBOUNDED_LENGTH);
         }
-        if (type instanceof CharType) {
-            return ((CharType) type).getLength();
+        if (type instanceof CharType charType) {
+            return charType.getLength();
         }
         if (type.equals(VARBINARY)) {
             return Integer.MAX_VALUE;
         }
-        if (type instanceof TimeType) {
+        if (type instanceof TimeType timeType) {
             // 8 characters for "HH:MM:SS"
             // min(p, 1) for the fractional second period (i.e., no period if p == 0)
             // p for the fractional digits
-            int precision = ((TimeType) type).getPrecision();
+            int precision = timeType.getPrecision();
             return 8 + min(precision, 1) + precision;
         }
-        if (type instanceof TimeWithTimeZoneType) {
+        if (type instanceof TimeWithTimeZoneType timeWithTimeZoneType) {
             // 8 characters for "HH:MM:SS"
             // min(p, 1) for the fractional second period (i.e., no period if p == 0)
             // p for the fractional digits
             // 6 for timezone offset
-            int precision = ((TimeWithTimeZoneType) type).getPrecision();
+            int precision = timeWithTimeZoneType.getPrecision();
             return 8 + min(precision, 1) + precision + 6;
         }
         if (type.equals(DATE)) {
             return 14; // +5881580-07-11 (2**31-1 days)
         }
-        if (type instanceof TimestampType) {
+        if (type instanceof TimestampType timestampType) {
             // 1 digit for year sign
             // 5 digits for year
             // 15 characters for "-MM-DD HH:MM:SS"
             // min(p, 1) for the fractional second period (i.e., no period if p == 0)
             // p for the fractional digits
-            int precision = ((TimestampType) type).getPrecision();
+            int precision = timestampType.getPrecision();
             return 1 + 5 + 15 + min(precision, 1) + precision;
         }
-        if (type instanceof TimestampWithTimeZoneType) {
+        if (type instanceof TimestampWithTimeZoneType timestampWithTimeZoneType) {
             // 1 digit for year sign
             // 6 digits for year
             // 15 characters for "-MM-DD HH:MM:SS"
@@ -483,7 +484,7 @@ public class ColumnJdbcTable
             // p for the fractional digits
             // 1 for space after timestamp
             // MAX_TIMEZONE_LENGTH for timezone
-            int precision = ((TimestampWithTimeZoneType) type).getPrecision();
+            int precision = timestampWithTimeZoneType.getPrecision();
             return 1 + 6 + 15 + min(precision, 1) + precision + 1 + MAX_TIMEZONE_LENGTH;
         }
         return null;
@@ -492,31 +493,31 @@ public class ColumnJdbcTable
     // DECIMAL_DIGITS is the number of fractional digits
     private static Integer decimalDigits(Type type)
     {
-        if (type instanceof DecimalType) {
-            return ((DecimalType) type).getScale();
+        if (type instanceof DecimalType decimalType) {
+            return decimalType.getScale();
         }
-        if (type instanceof TimeType) {
-            return ((TimeType) type).getPrecision();
+        if (type instanceof TimeType timeType) {
+            return timeType.getPrecision();
         }
-        if (type instanceof TimeWithTimeZoneType) {
-            return ((TimeWithTimeZoneType) type).getPrecision();
+        if (type instanceof TimeWithTimeZoneType timeWithTimeZoneType) {
+            return timeWithTimeZoneType.getPrecision();
         }
-        if (type instanceof TimestampType) {
-            return ((TimestampType) type).getPrecision();
+        if (type instanceof TimestampType timestampType) {
+            return timestampType.getPrecision();
         }
-        if (type instanceof TimestampWithTimeZoneType) {
-            return ((TimestampWithTimeZoneType) type).getPrecision();
+        if (type instanceof TimestampWithTimeZoneType timestampWithTimeZoneType) {
+            return timestampWithTimeZoneType.getPrecision();
         }
         return null;
     }
 
     private static Integer charOctetLength(Type type)
     {
-        if (type instanceof VarcharType) {
-            return ((VarcharType) type).getLength().orElse(VarcharType.UNBOUNDED_LENGTH);
+        if (type instanceof VarcharType varcharType) {
+            return varcharType.getLength().orElse(VarcharType.UNBOUNDED_LENGTH);
         }
-        if (type instanceof CharType) {
-            return ((CharType) type).getLength();
+        if (type instanceof CharType charType) {
+            return charType.getLength();
         }
         if (type.equals(VARBINARY)) {
             return Integer.MAX_VALUE;
@@ -541,16 +542,16 @@ public class ColumnJdbcTable
 
     private static NullableValue toNullableValue(String varcharValue)
     {
-        return NullableValue.of(createUnboundedVarcharType(), utf8Slice(varcharValue));
+        return NullableValue.of(VARCHAR, utf8Slice(varcharValue));
     }
 
     private static Collector<String, ?, Domain> toVarcharDomain()
     {
         return Collectors.collectingAndThen(toImmutableSet(), set -> {
             if (set.isEmpty()) {
-                return Domain.none(createUnboundedVarcharType());
+                return Domain.none(VARCHAR);
             }
-            return Domain.multipleValues(createUnboundedVarcharType(), set.stream()
+            return Domain.multipleValues(VARCHAR, set.stream()
                     .map(Slices::utf8Slice)
                     .collect(toImmutableList()));
         });

@@ -21,8 +21,14 @@ import com.google.inject.Module;
 import com.google.inject.Scopes;
 import io.airlift.log.Logging;
 import io.trino.client.ClientSelectedRole;
+import io.trino.client.QueryData;
+import io.trino.client.QueryStatusInfo;
+import io.trino.client.ResultRows;
+import io.trino.client.StatementClient;
+import io.trino.client.StatementStats;
 import io.trino.plugin.blackhole.BlackHolePlugin;
 import io.trino.plugin.hive.HivePlugin;
+import io.trino.server.security.PasswordAuthenticatorManager;
 import io.trino.server.testing.TestingTrinoServer;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorTableMetadata;
@@ -32,58 +38,114 @@ import io.trino.spi.connector.RecordCursor;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.connector.SystemTable;
 import io.trino.spi.predicate.TupleDomain;
-import io.trino.testing.DataProviders;
-import org.testng.annotations.AfterClass;
-import org.testng.annotations.BeforeClass;
-import org.testng.annotations.Test;
+import io.trino.spi.security.AccessDeniedException;
+import io.trino.spi.security.BasicPrincipal;
+import org.jetbrains.annotations.Nullable;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Disabled;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.parallel.Execution;
 
+import java.io.File;
+import java.net.URL;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.security.Key;
+import java.security.Principal;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.SQLFeatureNotSupportedException;
 import java.sql.Statement;
+import java.time.ZoneId;
+import java.util.Date;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
+import static com.google.common.io.Files.asCharSource;
+import static com.google.common.io.Resources.getResource;
 import static com.google.inject.multibindings.Multibinder.newSetBinder;
 import static io.airlift.concurrent.Threads.daemonThreadsNamed;
 import static io.airlift.testing.Closeables.closeAll;
+import static io.jsonwebtoken.security.Keys.hmacShaKeyFor;
+import static io.trino.client.ClientSelectedRole.Type.ROLE;
 import static io.trino.metadata.MetadataUtil.TableMetadataBuilder.tableMetadataBuilder;
+import static io.trino.server.security.jwt.JwtUtil.newJwtBuilder;
 import static io.trino.spi.connector.SystemTable.Distribution.ALL_NODES;
 import static io.trino.spi.type.VarcharType.createUnboundedVarcharType;
 import static io.trino.testing.assertions.Assert.assertEventually;
 import static java.lang.String.format;
+import static java.lang.System.currentTimeMillis;
+import static java.nio.charset.StandardCharsets.US_ASCII;
 import static java.sql.Types.VARCHAR;
+import static java.util.Base64.getMimeDecoder;
 import static java.util.UUID.randomUUID;
 import static java.util.concurrent.Executors.newCachedThreadPool;
 import static java.util.stream.IntStream.range;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.testng.Assert.assertEquals;
-import static org.testng.Assert.assertFalse;
-import static org.testng.Assert.assertTrue;
-import static org.testng.Assert.fail;
+import static org.assertj.core.api.Assertions.catchThrowableOfType;
+import static org.assertj.core.api.Fail.fail;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
+import static org.junit.jupiter.api.parallel.ExecutionMode.CONCURRENT;
 
+@TestInstance(PER_CLASS)
+@Execution(CONCURRENT)
 public class TestJdbcConnection
 {
+    private static final String TEST_USER = "admin";
+    private static final String TEST_PASSWORD = "password";
+
     private final ExecutorService executor = newCachedThreadPool(daemonThreadsNamed(getClass().getName()));
 
     private TestingTrinoServer server;
+    private Key defaultKey;
+    private String sslTrustStorePath;
 
-    @BeforeClass
+    @BeforeAll
     public void setupServer()
             throws Exception
     {
         Logging.initialize();
+
+        Path passwordConfigDummy = Files.createTempFile("passwordConfigDummy", "");
+        passwordConfigDummy.toFile().deleteOnExit();
+
+        URL resource = getClass().getClassLoader().getResource("33.privateKey");
+        assertThat(resource)
+                .describedAs("key directory not found")
+                .isNotNull();
+        File keyDir = new File(resource.toURI()).getAbsoluteFile().getParentFile();
+
+        defaultKey = hmacShaKeyFor(getMimeDecoder().decode(asCharSource(new File(keyDir, "default-key.key"), US_ASCII).read().getBytes(US_ASCII)));
+        sslTrustStorePath = new File(getResource("localhost.truststore").toURI()).getPath();
+
         Module systemTables = binder -> newSetBinder(binder, SystemTable.class)
                 .addBinding().to(ExtraCredentialsSystemTable.class).in(Scopes.SINGLETON);
+
         server = TestingTrinoServer.builder()
+                .setProperties(ImmutableMap.<String, String>builder()
+                        .put("http-server.authentication.type", "PASSWORD,JWT")
+                        .put("password-authenticator.config-files", passwordConfigDummy.toString())
+                        .put("http-server.authentication.allow-insecure-over-http", "false")
+                        .put("http-server.process-forwarded", "true")
+                        .put("http-server.authentication.jwt.key-file", new File(keyDir, "${KID}.key").getPath())
+                        .put("http-server.https.enabled", "true")
+                        .put("http-server.https.keystore.path", new File(getResource("localhost.keystore").toURI()).getPath())
+                        .put("http-server.https.keystore.key", "changeit")
+                        .buildOrThrow())
                 .setAdditionalModule(systemTables)
                 .build();
         server.installPlugin(new HivePlugin());
@@ -91,7 +153,9 @@ public class TestJdbcConnection
                 .put("hive.metastore", "file")
                 .put("hive.metastore.catalog.dir", server.getBaseDataDir().resolve("hive").toAbsolutePath().toString())
                 .put("hive.security", "sql-standard")
+                .put("fs.hadoop.enabled", "true")
                 .buildOrThrow());
+        server.getInstance(com.google.inject.Key.get(PasswordAuthenticatorManager.class)).setAuthenticators(TestJdbcConnection::authenticate);
         server.installPlugin(new BlackHolePlugin());
         server.createCatalog("blackhole", "blackhole", ImmutableMap.of());
 
@@ -109,7 +173,15 @@ public class TestJdbcConnection
         }
     }
 
-    @AfterClass(alwaysRun = true)
+    private static Principal authenticate(String user, String password)
+    {
+        if ((TEST_USER.equals(user) && TEST_PASSWORD.equals(password))) {
+            return new BasicPrincipal(user);
+        }
+        throw new AccessDeniedException("Invalid credentials");
+    }
+
+    @AfterAll
     public void tearDown()
             throws Exception
     {
@@ -124,11 +196,11 @@ public class TestJdbcConnection
             throws SQLException
     {
         try (Connection connection = createConnection()) {
-            assertTrue(connection.getAutoCommit());
+            assertThat(connection.getAutoCommit()).isTrue();
             connection.setAutoCommit(false);
-            assertFalse(connection.getAutoCommit());
+            assertThat(connection.getAutoCommit()).isFalse();
             connection.setAutoCommit(true);
-            assertTrue(connection.getAutoCommit());
+            assertThat(connection.getAutoCommit()).isTrue();
         }
     }
 
@@ -223,7 +295,7 @@ public class TestJdbcConnection
             // invalid catalog
             try (Statement statement = connection.createStatement()) {
                 assertThatThrownBy(() -> statement.execute("USE abc.xyz"))
-                        .hasMessageEndingWith("Catalog does not exist: abc");
+                        .hasMessageEndingWith("Catalog 'abc' not found");
             }
 
             // invalid schema
@@ -250,7 +322,7 @@ public class TestJdbcConnection
         try (Connection connection = createConnection()) {
             assertThat(listSession(connection))
                     .contains("join_distribution_type|AUTOMATIC|AUTOMATIC")
-                    .contains("exchange_compression|false|false");
+                    .contains("exchange_compression_codec|NONE|NONE");
 
             try (Statement statement = connection.createStatement()) {
                 statement.execute("SET SESSION join_distribution_type = 'BROADCAST'");
@@ -258,15 +330,15 @@ public class TestJdbcConnection
 
             assertThat(listSession(connection))
                     .contains("join_distribution_type|BROADCAST|AUTOMATIC")
-                    .contains("exchange_compression|false|false");
+                    .contains("exchange_compression_codec|NONE|NONE");
 
             try (Statement statement = connection.createStatement()) {
-                statement.execute("SET SESSION exchange_compression = true");
+                statement.execute("SET SESSION exchange_compression_codec = 'LZ4'");
             }
 
             assertThat(listSession(connection))
                     .contains("join_distribution_type|BROADCAST|AUTOMATIC")
-                    .contains("exchange_compression|true|false");
+                    .contains("exchange_compression_codec|LZ4|NONE");
 
             try (Statement statement = connection.createStatement()) {
                 // setting Hive session properties requires the admin role
@@ -282,7 +354,7 @@ public class TestJdbcConnection
 
                     assertThat(listSession(connection))
                             .contains("join_distribution_type|BROADCAST|AUTOMATIC")
-                            .contains("exchange_compression|true|false")
+                            .contains("exchange_compression_codec|LZ4|NONE")
                             .contains(format("spatial_partitioning_table_name|%s|", value));
                 }
                 catch (Exception e) {
@@ -343,6 +415,19 @@ public class TestJdbcConnection
     }
 
     @Test
+    public void testRoleIsPropagatedEvenWhenAuthorizationIsReset()
+            throws SQLException
+    {
+        try (Connection connection = createConnection("source=testing")) {
+            TrinoConnection trinoConnection = (TrinoConnection) connection;
+            assertThat(trinoConnection.getRoles()).isEmpty();
+            StatementClient statementClient = new ResettingAuthorizationStatementClientWithRoles();
+            trinoConnection.updateSession(statementClient);
+            assertThat(trinoConnection.getRoles()).hasSize(1);
+        }
+    }
+
+    @Test
     public void testExtraCredentials()
             throws SQLException
     {
@@ -353,8 +438,8 @@ public class TestJdbcConnection
                     .put("colon", "-::-")
                     .buildOrThrow();
             TrinoConnection trinoConnection = connection.unwrap(TrinoConnection.class);
-            assertEquals(trinoConnection.getExtraCredentials(), expectedCredentials);
-            assertEquals(listExtraCredentials(connection), expectedCredentials);
+            assertThat(trinoConnection.getExtraCredentials()).isEqualTo(expectedCredentials);
+            assertThat(listExtraCredentials(connection)).isEqualTo(expectedCredentials);
         }
     }
 
@@ -363,7 +448,7 @@ public class TestJdbcConnection
             throws SQLException
     {
         try (Connection connection = createConnection("clientInfo=hello%20world")) {
-            assertEquals(connection.getClientInfo("ClientInfo"), "hello world");
+            assertThat(connection.getClientInfo("ClientInfo")).isEqualTo("hello world");
         }
     }
 
@@ -372,7 +457,7 @@ public class TestJdbcConnection
             throws SQLException
     {
         try (Connection connection = createConnection("clientTags=c2,c3")) {
-            assertEquals(connection.getClientInfo("ClientTags"), "c2,c3");
+            assertThat(connection.getClientInfo("ClientTags")).isEqualTo("c2,c3");
         }
     }
 
@@ -381,7 +466,7 @@ public class TestJdbcConnection
             throws SQLException
     {
         try (Connection connection = createConnection("traceToken=trace%20me")) {
-            assertEquals(connection.getClientInfo("TraceToken"), "trace me");
+            assertThat(connection.getClientInfo("TraceToken")).isEqualTo("trace me");
         }
     }
 
@@ -389,7 +474,7 @@ public class TestJdbcConnection
     public void testRole()
             throws SQLException
     {
-        testRole("admin", new ClientSelectedRole(ClientSelectedRole.Type.ROLE, Optional.of("admin")), ImmutableSet.of("public", "admin"));
+        testRole("admin", new ClientSelectedRole(ROLE, Optional.of("admin")), ImmutableSet.of("public", "admin"));
     }
 
     @Test
@@ -411,8 +496,8 @@ public class TestJdbcConnection
     {
         try (Connection connection = createConnection("roles=hive:" + roleParameterValue)) {
             TrinoConnection trinoConnection = connection.unwrap(TrinoConnection.class);
-            assertEquals(trinoConnection.getRoles(), ImmutableMap.of("hive", clientSelectedRole));
-            assertEquals(listCurrentRoles(connection), currentRoles);
+            assertThat(trinoConnection.getRoles()).isEqualTo(ImmutableMap.of("hive", clientSelectedRole));
+            assertThat(listCurrentRoles(connection)).isEqualTo(currentRoles);
         }
     }
 
@@ -446,13 +531,127 @@ public class TestJdbcConnection
         }
     }
 
+    @Test
+    public void testPreparedStatementCreationOption()
+            throws SQLException
+    {
+        String sql = "SELECT 123";
+        try (Connection connection = createConnection()) {
+            try (PreparedStatement statement = connection.prepareStatement(sql, Statement.NO_GENERATED_KEYS)) {
+                assertThat(statement).isNotNull();
+            }
+            assertThatThrownBy(() -> connection.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS))
+                    .isInstanceOf(SQLFeatureNotSupportedException.class)
+                    .hasMessage("Auto generated keys must be NO_GENERATED_KEYS");
+        }
+    }
+
     /**
      * @see TestJdbcStatement#testCancellationOnStatementClose()
      * @see TestJdbcStatement#testConcurrentCancellationOnStatementClose()
      */
     // TODO https://github.com/trinodb/trino/issues/10096 - enable test once concurrent jdbc statements are supported
-    @Test(timeOut = 60_000, dataProviderClass = DataProviders.class, dataProvider = "trueFalse", enabled = false)
-    public void testConcurrentCancellationOnConnectionClose(boolean autoCommit)
+    @Test
+    @Timeout(60)
+    @Disabled
+    public void testConcurrentCancellationOnConnectionClose()
+            throws Exception
+    {
+        testConcurrentCancellationOnConnectionClose(true);
+        testConcurrentCancellationOnConnectionClose(false);
+    }
+
+    @Test
+    public void testConnectionValidation()
+            throws Exception
+    {
+        String validAccessToken = newJwtBuilder()
+                .subject("test")
+                .signWith(defaultKey)
+                .compact();
+
+        try (Connection conn = createConnectionUsingAccessToken(validAccessToken, "validateConnection=true")) {
+            assertThat(conn.isValid(10)).isTrue();
+        }
+
+        long delay = 50;
+        long expirationTime = 0;
+        long timeout = currentTimeMillis() + 60 * 1000;
+
+        Connection acquiredConnection = null;
+        while (currentTimeMillis() < timeout) {
+            expirationTime = currentTimeMillis() + delay;
+            String expiringAccessToken = newJwtBuilder()
+                    .subject("test")
+                    .expiration(new Date(expirationTime))
+                    .signWith(defaultKey)
+                    .compact();
+
+            try (Connection newConnection = createConnectionUsingAccessToken(expiringAccessToken, "validateConnection=true")) {
+                acquiredConnection = newConnection;
+                break;
+            }
+            catch (SQLException e) {
+                // Connection failure because the token is about to expire
+            }
+
+            delay *= 2;
+        }
+
+        assertThat(acquiredConnection).isNotNull();
+
+        try {
+            while (currentTimeMillis() < expirationTime) {
+                try {
+                    Thread.sleep(100);
+                }
+                catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+            assertThat(acquiredConnection.isValid(10)).isFalse();
+        }
+        finally {
+            acquiredConnection.close();
+        }
+
+        try (Connection conn = createConnectionUsingAccessToken(validAccessToken, "")) {
+            assertThat(conn.isValid(10)).isTrue();
+        }
+
+        // With an expired token, isValid returns true if validateConnection is not enabled
+        try (Connection conn = createConnectionUsingAccessToken(validAccessToken, "validateConnection=false");) {
+            assertThat(conn.isValid(10)).isTrue();
+        }
+    }
+
+    @Test
+    public void testValidateConnection()
+    {
+        // Invalid host
+        assertThatCode(() -> createConnectionUsingInvalidHost(""))
+                .doesNotThrowAnyException();
+
+        SQLException e = catchThrowableOfType(() -> createConnectionUsingInvalidHost("validateConnection=true"),
+                SQLException.class);
+        assertThat(e.getSQLState().equals("08001")).isTrue();
+
+        assertThatCode(() -> createConnectionUsingInvalidHost("validateConnection=false"))
+                .doesNotThrowAnyException();
+
+        // Invalid password
+        assertThatCode(() -> createConnectionUsingInvalidPassword(""))
+                .doesNotThrowAnyException();
+
+        e = catchThrowableOfType(() -> createConnectionUsingInvalidPassword("validateConnection=true"),
+                SQLException.class);
+        assertThat(e.getSQLState().equals("28000")).isTrue();
+
+        assertThatCode(() -> createConnectionUsingInvalidPassword("validateConnection=false"))
+                .doesNotThrowAnyException();
+    }
+
+    private void testConcurrentCancellationOnConnectionClose(boolean autoCommit)
             throws Exception
     {
         String sql = "SELECT * FROM blackhole.default.delay -- test cancellation " + randomUUID();
@@ -498,8 +697,52 @@ public class TestJdbcConnection
     private Connection createConnection(String extra)
             throws SQLException
     {
-        String url = format("jdbc:trino://%s/hive/default?%s", server.getAddress(), extra);
-        return DriverManager.getConnection(url, "admin", null);
+        String url = format("jdbc:trino://localhost:%s/hive/default?%s", server.getHttpsAddress().getPort(), extra);
+        Properties properties = new Properties();
+        properties.put("user", TEST_USER);
+        properties.put("password", TEST_PASSWORD);
+        properties.setProperty("SSL", "true");
+        properties.setProperty("SSLTrustStorePath", sslTrustStorePath);
+        properties.setProperty("SSLTrustStorePassword", "changeit");
+        return DriverManager.getConnection(url, properties);
+    }
+
+    private Connection createConnectionUsingInvalidHost(String extra)
+            throws SQLException
+    {
+        String url = format("jdbc:trino://invalidhost:%s/hive/default?%s", server.getHttpsAddress().getPort(), extra);
+        Properties properties = new Properties();
+        properties.put("user", TEST_USER);
+        properties.put("password", TEST_PASSWORD);
+        properties.setProperty("SSL", "true");
+        properties.setProperty("SSLTrustStorePath", sslTrustStorePath);
+        properties.setProperty("SSLTrustStorePassword", "changeit");
+        return DriverManager.getConnection(url, properties);
+    }
+
+    private Connection createConnectionUsingInvalidPassword(String extra)
+            throws SQLException
+    {
+        String url = format("jdbc:trino://localhost:%s/hive/default?%s", server.getHttpsAddress().getPort(), extra);
+        Properties properties = new Properties();
+        properties.put("user", TEST_USER);
+        properties.put("password", "invalid_" + TEST_PASSWORD);
+        properties.setProperty("SSL", "true");
+        properties.setProperty("SSLTrustStorePath", sslTrustStorePath);
+        properties.setProperty("SSLTrustStorePassword", "changeit");
+        return DriverManager.getConnection(url, properties);
+    }
+
+    private Connection createConnectionUsingAccessToken(String accessToken, String extra)
+            throws SQLException
+    {
+        String url = format("jdbc:trino://localhost:%s/hive/default?%s", server.getHttpsAddress().getPort(), extra);
+        Properties properties = new Properties();
+        properties.put("accessToken", accessToken);
+        properties.setProperty("SSL", "true");
+        properties.setProperty("SSLTrustStorePath", sslTrustStorePath);
+        properties.setProperty("SSLTrustStorePassword", "changeit");
+        return DriverManager.getConnection(url, properties);
     }
 
     private static Set<String> listTables(Connection connection)
@@ -610,9 +853,9 @@ public class TestJdbcConnection
                 "SELECT source FROM system.runtime.queries WHERE query_id = ?")) {
             statement.setString(1, queryId);
             try (ResultSet rs = statement.executeQuery()) {
-                assertTrue(rs.next());
+                assertThat(rs.next()).isTrue();
                 assertThat(rs.getString("source")).isEqualTo(expectedSource);
-                assertFalse(rs.next());
+                assertThat(rs.next()).isFalse();
             }
         }
     }
@@ -661,5 +904,165 @@ public class TestJdbcConnection
             throw new RuntimeException(e);
         }
         fail("Expecting future to be blocked");
+    }
+
+    private static class ResettingAuthorizationStatementClientWithRoles
+            implements StatementClient
+    {
+        @Override
+        public String getQuery()
+        {
+            return "";
+        }
+
+        @Override
+        public ZoneId getTimeZone()
+        {
+            return null;
+        }
+
+        @Override
+        public boolean isRunning()
+        {
+            return false;
+        }
+
+        @Override
+        public boolean isClientAborted()
+        {
+            return false;
+        }
+
+        @Override
+        public boolean isClientError()
+        {
+            return false;
+        }
+
+        @Override
+        public boolean isFinished()
+        {
+            return false;
+        }
+
+        @Override
+        public StatementStats getStats()
+        {
+            return null;
+        }
+
+        @Override
+        public QueryStatusInfo currentStatusInfo()
+        {
+            return null;
+        }
+
+        @Override
+        public QueryData currentData()
+        {
+            return null;
+        }
+
+        @Override
+        public ResultRows currentRows()
+        {
+            return null;
+        }
+
+        @Override
+        public QueryStatusInfo finalStatusInfo()
+        {
+            return null;
+        }
+
+        @Override
+        public Optional<String> getSetCatalog()
+        {
+            return Optional.empty();
+        }
+
+        @Override
+        public Optional<String> getSetSchema()
+        {
+            return Optional.empty();
+        }
+
+        @Override
+        public Optional<List<String>> getSetPath()
+        {
+            return Optional.empty();
+        }
+
+        @Override
+        public Optional<String> getSetAuthorizationUser()
+        {
+            return Optional.empty();
+        }
+
+        @Override
+        public boolean isResetAuthorizationUser()
+        {
+            return true;
+        }
+
+        @Override
+        public Set<ClientSelectedRole> getSetOriginalRoles()
+        {
+            return Set.of();
+        }
+
+        @Override
+        public Map<String, String> getSetSessionProperties()
+        {
+            return Map.of();
+        }
+
+        @Override
+        public Set<String> getResetSessionProperties()
+        {
+            return Set.of();
+        }
+
+        @Override
+        public Map<String, ClientSelectedRole> getSetRoles()
+        {
+            return Map.of("unimportant", new ClientSelectedRole(ROLE, Optional.of("test_role")));
+        }
+
+        @Override
+        public Map<String, String> getAddedPreparedStatements()
+        {
+            return Map.of();
+        }
+
+        @Override
+        public Set<String> getDeallocatedPreparedStatements()
+        {
+            return Set.of();
+        }
+
+        @Override
+        public @Nullable String getStartedTransactionId()
+        {
+            return null;
+        }
+
+        @Override
+        public boolean isClearTransactionId()
+        {
+            return false;
+        }
+
+        @Override
+        public boolean advance()
+        {
+            return false;
+        }
+
+        @Override
+        public void cancelLeafStage() {}
+
+        @Override
+        public void close() {}
     }
 }

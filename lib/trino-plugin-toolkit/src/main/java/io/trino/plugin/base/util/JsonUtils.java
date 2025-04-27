@@ -18,6 +18,9 @@ import com.fasterxml.jackson.core.JsonFactoryBuilder;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.StreamReadConstraints;
+import com.fasterxml.jackson.core.StreamReadFeature;
+import com.fasterxml.jackson.core.StreamWriteFeature;
+import com.fasterxml.jackson.core.util.JsonRecyclerPools;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.MapperFeature;
@@ -158,12 +161,17 @@ public final class JsonUtils
     // due to the limits introduced by Jackson 2.15
     public static JsonFactoryBuilder jsonFactoryBuilder()
     {
+        // https://github.com/FasterXML/jackson-core/issues/1256
         return new JsonFactoryBuilder()
                 .streamReadConstraints(StreamReadConstraints.builder()
                         .maxStringLength(Integer.MAX_VALUE)
                         .maxNestingDepth(Integer.MAX_VALUE)
                         .maxNumberLength(Integer.MAX_VALUE)
-                        .build());
+                        .build())
+                .enable(StreamReadFeature.USE_FAST_BIG_NUMBER_PARSER)
+                .enable(StreamReadFeature.USE_FAST_DOUBLE_PARSER)
+                .enable(StreamWriteFeature.USE_FAST_DOUBLE_WRITER)
+                .recyclerPool(JsonRecyclerPools.threadLocalPool());
     }
 
     private interface ParserConstructor<I>

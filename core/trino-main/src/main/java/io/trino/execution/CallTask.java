@@ -23,7 +23,7 @@ import io.trino.metadata.QualifiedObjectName;
 import io.trino.security.AccessControl;
 import io.trino.security.InjectedConnectorAccessControl;
 import io.trino.spi.TrinoException;
-import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.block.Block;
 import io.trino.spi.connector.CatalogHandle;
 import io.trino.spi.connector.ConnectorAccessControl;
 import io.trino.spi.connector.ConnectorSession;
@@ -62,8 +62,8 @@ import static io.trino.spi.StandardErrorCode.INVALID_PROCEDURE_ARGUMENT;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.StandardErrorCode.PROCEDURE_CALL_FAILED;
 import static io.trino.spi.type.TypeUtils.writeNativeValue;
+import static io.trino.sql.analyzer.ConstantEvaluator.evaluateConstant;
 import static io.trino.sql.analyzer.SemanticExceptions.semanticException;
-import static io.trino.sql.planner.ExpressionInterpreter.evaluateConstantExpression;
 import static java.util.Arrays.asList;
 import static java.util.Objects.requireNonNull;
 
@@ -103,7 +103,7 @@ public class CallTask
 
         Session session = stateMachine.getSession();
         QualifiedObjectName procedureName = createQualifiedObjectName(session, call, call.getName());
-        CatalogHandle catalogHandle = getRequiredCatalogHandle(plannerContext.getMetadata(), stateMachine.getSession(), call, procedureName.getCatalogName());
+        CatalogHandle catalogHandle = getRequiredCatalogHandle(plannerContext.getMetadata(), stateMachine.getSession(), call, procedureName.catalogName());
         Procedure procedure = procedureRegistry.resolve(catalogHandle, procedureName.asSchemaTableName());
 
         // map declared argument names to positions
@@ -164,7 +164,7 @@ public class CallTask
             Expression expression = ExpressionTreeRewriter.rewriteWith(new ParameterRewriter(parameterLookup), callArgument.getValue());
 
             Type type = argument.getType();
-            Object value = evaluateConstantExpression(expression, type, plannerContext, session, accessControl, parameterLookup);
+            Object value = evaluateConstant(expression, type, plannerContext, session, accessControl);
 
             values[index] = toTypeObjectValue(session, type, value);
         }
@@ -196,7 +196,7 @@ public class CallTask
                 arguments.add(session.toConnectorSession(catalogHandle));
             }
             else if (ConnectorAccessControl.class.equals(type)) {
-                arguments.add(new InjectedConnectorAccessControl(accessControl, session.toSecurityContext(), procedureName.getCatalogName()));
+                arguments.add(new InjectedConnectorAccessControl(accessControl, session.toSecurityContext(), procedureName.catalogName()));
             }
             else {
                 arguments.add(valuesIterator.next());
@@ -204,7 +204,7 @@ public class CallTask
         }
 
         accessControl.checkCanExecuteProcedure(session.toSecurityContext(), procedureName);
-        stateMachine.setRoutines(ImmutableList.of(new RoutineInfo(procedureName.getObjectName(), session.getUser())));
+        stateMachine.setRoutines(ImmutableList.of(new RoutineInfo(procedureName.objectName(), session.getUser())));
 
         try {
             procedure.getMethodHandle().invokeWithArguments(arguments);
@@ -222,8 +222,7 @@ public class CallTask
 
     private static Object toTypeObjectValue(Session session, Type type, Object value)
     {
-        BlockBuilder blockBuilder = type.createBlockBuilder(null, 1);
-        writeNativeValue(type, blockBuilder, value);
-        return type.getObjectValue(session.toConnectorSession(), blockBuilder, 0);
+        Block block = writeNativeValue(type, value);
+        return type.getObjectValue(session.toConnectorSession(), block, 0);
     }
 }

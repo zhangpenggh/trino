@@ -17,9 +17,7 @@ import com.google.common.collect.ImmutableList;
 import io.trino.spi.Page;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeOperators;
-import io.trino.sql.gen.JoinCompiler;
-import org.testng.annotations.DataProvider;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -30,26 +28,11 @@ import static io.trino.operator.UpdateMemory.NOOP;
 import static io.trino.spi.connector.SortOrder.ASC_NULLS_LAST;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.DoubleType.DOUBLE;
-import static org.testng.Assert.assertEquals;
-import static org.testng.Assert.assertFalse;
-import static org.testng.Assert.assertTrue;
+import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestGroupedTopNRowNumberBuilder
 {
     private static final TypeOperators TYPE_OPERATORS_CACHE = new TypeOperators();
-
-    @DataProvider
-    public static Object[][] produceRowNumbers()
-    {
-        return new Object[][] {{true}, {false}};
-    }
-
-    @DataProvider
-    public static Object[][] pageRowCounts()
-    {
-        // make either page or row count > 1024 to expand the big arrays
-        return new Object[][] {{10000, 20}, {20, 10000}};
-    }
 
     @Test
     public void testEmptyInput()
@@ -63,11 +46,17 @@ public class TestGroupedTopNRowNumberBuilder
                 false,
                 new int[0],
                 new NoChannelGroupByHash());
-        assertFalse(groupedTopNBuilder.buildResult().hasNext());
+        assertThat(groupedTopNBuilder.buildResult().hasNext()).isFalse();
     }
 
-    @Test(dataProvider = "produceRowNumbers")
-    public void testMultiGroupTopN(boolean produceRowNumbers)
+    @Test
+    public void testMultiGroupTopN()
+    {
+        testMultiGroupTopN(true);
+        testMultiGroupTopN(false);
+    }
+
+    private void testMultiGroupTopN(boolean produceRowNumbers)
     {
         List<Type> types = ImmutableList.of(BIGINT, DOUBLE);
         List<Page> input = rowPagesBuilder(types)
@@ -94,26 +83,26 @@ public class TestGroupedTopNRowNumberBuilder
         GroupByHash groupByHash = createGroupByHash(ImmutableList.of(types.get(0)), NOOP);
         GroupedTopNBuilder groupedTopNBuilder = new GroupedTopNRowNumberBuilder(
                 types,
-                new SimplePageWithPositionComparator(types, ImmutableList.of(1), ImmutableList.of(ASC_NULLS_LAST), TYPE_OPERATORS_CACHE),
+                new SimplePageWithPositionComparator(ImmutableList.of(types.get(1)), ImmutableList.of(1), ImmutableList.of(ASC_NULLS_LAST), TYPE_OPERATORS_CACHE),
                 2,
                 produceRowNumbers,
                 new int[] {0},
                 groupByHash);
 
         // add 4 rows for the first page and created three heaps with 1, 1, 2 rows respectively
-        assertTrue(groupedTopNBuilder.processPage(input.get(0)).process());
+        assertThat(groupedTopNBuilder.processPage(input.get(0)).process()).isTrue();
 
         // add 1 row for the second page and the three heaps become 2, 1, 2 rows respectively
-        assertTrue(groupedTopNBuilder.processPage(input.get(1)).process());
+        assertThat(groupedTopNBuilder.processPage(input.get(1)).process()).isTrue();
 
         // add 2 new rows for the third page (which will be compacted into two rows only) and we have four heaps with 2, 2, 2, 1 rows respectively
-        assertTrue(groupedTopNBuilder.processPage(input.get(2)).process());
+        assertThat(groupedTopNBuilder.processPage(input.get(2)).process()).isTrue();
 
         // the last page will be discarded
-        assertTrue(groupedTopNBuilder.processPage(input.get(3)).process());
+        assertThat(groupedTopNBuilder.processPage(input.get(3)).process()).isTrue();
 
         List<Page> output = ImmutableList.copyOf(groupedTopNBuilder.buildResult());
-        assertEquals(output.size(), 1);
+        assertThat(output).hasSize(1);
 
         Page expected = rowPagesBuilder(BIGINT, DOUBLE, BIGINT)
                 .row(1L, 0.3, 1)
@@ -133,8 +122,14 @@ public class TestGroupedTopNRowNumberBuilder
         }
     }
 
-    @Test(dataProvider = "produceRowNumbers")
-    public void testSingleGroupTopN(boolean produceRowNumbers)
+    @Test
+    public void testSingleGroupTopN()
+    {
+        testSingleGroupTopN(true);
+        testSingleGroupTopN(false);
+    }
+
+    private void testSingleGroupTopN(boolean produceRowNumbers)
     {
         List<Type> types = ImmutableList.of(BIGINT, DOUBLE);
         List<Page> input = rowPagesBuilder(types)
@@ -160,26 +155,26 @@ public class TestGroupedTopNRowNumberBuilder
 
         GroupedTopNBuilder groupedTopNBuilder = new GroupedTopNRowNumberBuilder(
                 types,
-                new SimplePageWithPositionComparator(types, ImmutableList.of(1), ImmutableList.of(ASC_NULLS_LAST), TYPE_OPERATORS_CACHE),
+                new SimplePageWithPositionComparator(ImmutableList.of(types.get(1)), ImmutableList.of(1), ImmutableList.of(ASC_NULLS_LAST), TYPE_OPERATORS_CACHE),
                 5,
                 produceRowNumbers,
                 new int[0],
                 new NoChannelGroupByHash());
 
         // add 4 rows for the first page and created a single heap with 4 rows
-        assertTrue(groupedTopNBuilder.processPage(input.get(0)).process());
+        assertThat(groupedTopNBuilder.processPage(input.get(0)).process()).isTrue();
 
         // add 1 row for the second page and the heap is with 5 rows
-        assertTrue(groupedTopNBuilder.processPage(input.get(1)).process());
+        assertThat(groupedTopNBuilder.processPage(input.get(1)).process()).isTrue();
 
         // update 1 new row from the third page (which will be compacted into a single row only)
-        assertTrue(groupedTopNBuilder.processPage(input.get(2)).process());
+        assertThat(groupedTopNBuilder.processPage(input.get(2)).process()).isTrue();
 
         // the last page will be discarded
-        assertTrue(groupedTopNBuilder.processPage(input.get(3)).process());
+        assertThat(groupedTopNBuilder.processPage(input.get(3)).process()).isTrue();
 
         List<Page> output = ImmutableList.copyOf(groupedTopNBuilder.buildResult());
-        assertEquals(output.size(), 1);
+        assertThat(output).hasSize(1);
 
         Page expected = rowPagesBuilder(BIGINT, DOUBLE, BIGINT)
                 .row(3L, 0.1, 1)
@@ -214,19 +209,19 @@ public class TestGroupedTopNRowNumberBuilder
         GroupByHash groupByHash = createGroupByHash(ImmutableList.of(types.get(0)), unblock::get);
         GroupedTopNBuilder groupedTopNBuilder = new GroupedTopNRowNumberBuilder(
                 types,
-                new SimplePageWithPositionComparator(types, ImmutableList.of(1), ImmutableList.of(ASC_NULLS_LAST), TYPE_OPERATORS_CACHE),
+                new SimplePageWithPositionComparator(ImmutableList.of(types.get(1)), ImmutableList.of(1), ImmutableList.of(ASC_NULLS_LAST), TYPE_OPERATORS_CACHE),
                 5,
                 false,
                 new int[] {0},
                 groupByHash);
 
         Work<?> work = groupedTopNBuilder.processPage(input);
-        assertFalse(work.process());
-        assertFalse(work.process());
+        assertThat(work.process()).isFalse();
+        assertThat(work.process()).isFalse();
         unblock.set(true);
-        assertTrue(work.process());
+        assertThat(work.process()).isTrue();
         List<Page> output = ImmutableList.copyOf(groupedTopNBuilder.buildResult());
-        assertEquals(output.size(), 1);
+        assertThat(output).hasSize(1);
 
         Page expected = rowPagesBuilder(types)
                 .row(1L, 0.1)
@@ -240,15 +235,12 @@ public class TestGroupedTopNRowNumberBuilder
 
     private static GroupByHash createGroupByHash(List<Type> partitionTypes, UpdateMemory updateMemory)
     {
-        TypeOperators typeOperators = new TypeOperators();
         return GroupByHash.createGroupByHash(
-                true,
                 partitionTypes,
-                false,
+                GroupByHash.selectGroupByHashMode(false, false, partitionTypes),
                 1,
                 false,
-                new JoinCompiler(typeOperators),
-                typeOperators,
+                new FlatHashStrategyCompiler(new TypeOperators()),
                 updateMemory);
     }
 }

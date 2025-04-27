@@ -14,7 +14,6 @@
 package io.trino.hive.formats.line.json;
 
 import com.fasterxml.jackson.core.JsonFactory;
-import com.fasterxml.jackson.core.JsonLocation;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonToken;
 import com.google.common.collect.ImmutableMap;
@@ -28,10 +27,10 @@ import io.trino.hive.formats.line.LineDeserializer;
 import io.trino.plugin.base.type.DecodedTimestamp;
 import io.trino.spi.PageBuilder;
 import io.trino.spi.block.ArrayBlockBuilder;
-import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.block.MapBlockBuilder;
 import io.trino.spi.block.RowBlockBuilder;
+import io.trino.spi.block.ValueBlock;
 import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.CharType;
 import io.trino.spi.type.DecimalType;
@@ -52,6 +51,7 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.function.Function;
 import java.util.function.IntFunction;
 import java.util.function.IntUnaryOperator;
@@ -64,6 +64,7 @@ import static com.fasterxml.jackson.core.JsonToken.FIELD_NAME;
 import static com.fasterxml.jackson.core.JsonToken.START_ARRAY;
 import static com.fasterxml.jackson.core.JsonToken.START_OBJECT;
 import static com.fasterxml.jackson.core.JsonToken.VALUE_NULL;
+import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.trino.hive.formats.HiveFormatUtils.createTimestampParser;
 import static io.trino.hive.formats.HiveFormatUtils.parseHiveDate;
@@ -87,6 +88,7 @@ import static java.lang.Float.floatToRawIntBits;
 import static java.lang.StrictMath.toIntExact;
 import static java.lang.String.format;
 import static java.nio.charset.StandardCharsets.UTF_8;
+import static java.util.Objects.requireNonNull;
 import static org.joda.time.DateTimeZone.UTC;
 
 /**
@@ -137,7 +139,7 @@ public class JsonDeserializer
                 columns.stream()
                         .map(Column::type)
                         .map(fieldType -> createDecoder(fieldType, timestampParser))
-                        .collect(toImmutableList()),
+                        .toArray(Decoder[]::new),
                 topLevelOrdinalMap::get);
     }
 
@@ -154,9 +156,9 @@ public class JsonDeserializer
         JsonParser parser = JSON_FACTORY.createParser(lineBuffer.getBuffer(), 0, lineBuffer.getLength());
         parser.nextToken();
 
-        rowDecoder.decode(lineBuffer, parser, builder);
+        rowDecoder.decode(parser, builder);
 
-        // Calling close on the parser even though there is no real InputStream backing it is necessary so that
+        // Calling close on the parser even though there is no real InputStream backing, it is necessary so that
         // entries in this parser instance's canonical field name cache can be reused on the next invocation
         parser.close();
     }
@@ -214,7 +216,7 @@ public class JsonDeserializer
                     rowType.getFields().stream()
                             .map(Field::getType)
                             .map(fieldType -> createDecoder(fieldType, timestampParser))
-                            .collect(toImmutableList()),
+                            .toArray(Decoder[]::new),
                     IntUnaryOperator.identity());
         }
         throw new UnsupportedOperationException("Unsupported column type: " + type);
@@ -223,27 +225,30 @@ public class JsonDeserializer
     private abstract static class Decoder
     {
         private final Type type;
+        private final boolean isScalarType;
 
         public Decoder(Type type)
         {
-            this.type = type;
+            this.type = requireNonNull(type, "type is null");
+            this.isScalarType = isScalarType(type);
         }
 
-        public final void decode(LineBuffer lineBuffer, JsonParser parser, BlockBuilder builder)
+        public final void decode(JsonParser parser, BlockBuilder builder)
                 throws IOException
         {
-            if (parser.currentToken() == VALUE_NULL) {
+            JsonToken currentToken = parser.currentToken();
+            if (currentToken == VALUE_NULL) {
                 builder.appendNull();
                 return;
             }
 
-            if (isScalarType(type) && !parser.currentToken().isScalarValue()) {
+            if (isScalarType && !currentToken.isScalarValue()) {
                 throw invalidJson(type + " value must be a scalar json value");
             }
-            decodeValue(lineBuffer, parser, builder);
+            decodeValue(parser, builder);
         }
 
-        abstract void decodeValue(LineBuffer lineBuffer, JsonParser parser, BlockBuilder builder)
+        abstract void decodeValue(JsonParser parser, BlockBuilder builder)
                 throws IOException;
 
         private static boolean isScalarType(Type type)
@@ -261,7 +266,7 @@ public class JsonDeserializer
         }
 
         @Override
-        void decodeValue(LineBuffer lineBuffer, JsonParser parser, BlockBuilder builder)
+        void decodeValue(JsonParser parser, BlockBuilder builder)
                 throws IOException
         {
             // this does not use parser.getBoolean, because it only works with JSON boolean
@@ -279,7 +284,7 @@ public class JsonDeserializer
         }
 
         @Override
-        void decodeValue(LineBuffer lineBuffer, JsonParser parser, BlockBuilder builder)
+        void decodeValue(JsonParser parser, BlockBuilder builder)
                 throws IOException
         {
             BIGINT.writeLong(builder, parser.getLongValue());
@@ -295,7 +300,7 @@ public class JsonDeserializer
         }
 
         @Override
-        void decodeValue(LineBuffer lineBuffer, JsonParser parser, BlockBuilder builder)
+        void decodeValue(JsonParser parser, BlockBuilder builder)
                 throws IOException
         {
             INTEGER.writeLong(builder, parser.getIntValue());
@@ -311,7 +316,7 @@ public class JsonDeserializer
         }
 
         @Override
-        void decodeValue(LineBuffer lineBuffer, JsonParser parser, BlockBuilder builder)
+        void decodeValue(JsonParser parser, BlockBuilder builder)
                 throws IOException
         {
             SMALLINT.writeLong(builder, parser.getShortValue());
@@ -327,7 +332,7 @@ public class JsonDeserializer
         }
 
         @Override
-        void decodeValue(LineBuffer lineBuffer, JsonParser parser, BlockBuilder builder)
+        void decodeValue(JsonParser parser, BlockBuilder builder)
                 throws IOException
         {
             TINYINT.writeLong(builder, parser.getByteValue());
@@ -342,11 +347,11 @@ public class JsonDeserializer
         public DecimalDecoder(DecimalType decimalType)
         {
             super(decimalType);
-            this.decimalType = decimalType;
+            this.decimalType = requireNonNull(decimalType, "decimalType is null");
         }
 
         @Override
-        void decodeValue(LineBuffer lineBuffer, JsonParser parser, BlockBuilder builder)
+        void decodeValue(JsonParser parser, BlockBuilder builder)
                 throws IOException
         {
             String value = parser.getText();
@@ -354,7 +359,7 @@ public class JsonDeserializer
             try {
                 bigDecimal = HiveFormatUtils.parseDecimal(value, decimalType);
             }
-            catch (NumberFormatException ignored) {
+            catch (NumberFormatException _) {
                 // parsing errors are simply ignored and the field is null
                 builder.appendNull();
                 return;
@@ -381,7 +386,7 @@ public class JsonDeserializer
         }
 
         @Override
-        void decodeValue(LineBuffer lineBuffer, JsonParser parser, BlockBuilder builder)
+        void decodeValue(JsonParser parser, BlockBuilder builder)
                 throws IOException
         {
             REAL.writeLong(builder, floatToRawIntBits(parser.getFloatValue()));
@@ -397,7 +402,7 @@ public class JsonDeserializer
         }
 
         @Override
-        void decodeValue(LineBuffer lineBuffer, JsonParser parser, BlockBuilder builder)
+        void decodeValue(JsonParser parser, BlockBuilder builder)
                 throws IOException
         {
             DOUBLE.writeDouble(builder, parser.getDoubleValue());
@@ -413,7 +418,7 @@ public class JsonDeserializer
         }
 
         @Override
-        void decodeValue(LineBuffer lineBuffer, JsonParser parser, BlockBuilder builder)
+        void decodeValue(JsonParser parser, BlockBuilder builder)
                 throws IOException
         {
             DATE.writeLong(builder, toIntExact(parseHiveDate(parser.getText()).toEpochDay()));
@@ -429,12 +434,12 @@ public class JsonDeserializer
         public TimestampDecoder(TimestampType timestampType, Function<String, DecodedTimestamp> timestampParser)
         {
             super(timestampType);
-            this.timestampType = timestampType;
-            this.timestampParser = timestampParser;
+            this.timestampType = requireNonNull(timestampType, "timestampType is null");
+            this.timestampParser = requireNonNull(timestampParser, "timestampParser is null");
         }
 
         @Override
-        void decodeValue(LineBuffer lineBuffer, JsonParser parser, BlockBuilder builder)
+        void decodeValue(JsonParser parser, BlockBuilder builder)
                 throws IOException
         {
             DecodedTimestamp timestamp = timestampParser.apply(parser.getText());
@@ -454,7 +459,7 @@ public class JsonDeserializer
         }
 
         @Override
-        void decodeValue(LineBuffer lineBuffer, JsonParser parser, BlockBuilder builder)
+        void decodeValue(JsonParser parser, BlockBuilder builder)
                 throws IOException
         {
             VARBINARY.writeSlice(builder, parseBinary(parser.getText(), charsetDecoder));
@@ -485,11 +490,11 @@ public class JsonDeserializer
         public VarcharDecoder(VarcharType varcharType)
         {
             super(varcharType);
-            this.varcharType = varcharType;
+            this.varcharType = requireNonNull(varcharType, "varcharType is null");
         }
 
         @Override
-        void decodeValue(LineBuffer lineBuffer, JsonParser parser, BlockBuilder builder)
+        void decodeValue(JsonParser parser, BlockBuilder builder)
                 throws IOException
         {
             varcharType.writeSlice(builder, truncateToLength(Slices.utf8Slice(parser.getText()), varcharType));
@@ -504,11 +509,11 @@ public class JsonDeserializer
         public CharDecoder(CharType charType)
         {
             super(charType);
-            this.charType = charType;
+            this.charType = requireNonNull(charType, "charType is null");
         }
 
         @Override
-        void decodeValue(LineBuffer lineBuffer, JsonParser parser, BlockBuilder builder)
+        void decodeValue(JsonParser parser, BlockBuilder builder)
                 throws IOException
         {
             charType.writeSlice(builder, truncateToLengthAndTrimSpaces(Slices.utf8Slice(parser.getText()), charType));
@@ -523,11 +528,11 @@ public class JsonDeserializer
         public ArrayDecoder(ArrayType arrayType, Decoder elementDecoder)
         {
             super(arrayType);
-            this.elementDecoder = elementDecoder;
+            this.elementDecoder = requireNonNull(elementDecoder, "elementDecoder is null");
         }
 
         @Override
-        void decodeValue(LineBuffer lineBuffer, JsonParser parser, BlockBuilder builder)
+        void decodeValue(JsonParser parser, BlockBuilder builder)
                 throws IOException
         {
             ((ArrayBlockBuilder) builder).buildEntry(elementBuilder -> {
@@ -535,7 +540,7 @@ public class JsonDeserializer
                     throw invalidJson("start of array expected");
                 }
                 while (nextTokenRequired(parser) != JsonToken.END_ARRAY) {
-                    elementDecoder.decode(lineBuffer, parser, elementBuilder);
+                    elementDecoder.decode(parser, elementBuilder);
                 }
             });
         }
@@ -546,66 +551,61 @@ public class JsonDeserializer
     {
         private final Decoder valueDecoder;
         private final Type keyType;
+        private final Type valueType;
         private final Function<String, DecodedTimestamp> timestampParser;
 
         private final CharsetDecoder charsetDecoder = VarbinaryDecoder.createCharsetDecoder();
 
         private final DistinctMapKeys distinctMapKeys;
         private BlockBuilder keyBlockBuilder;
+        private BlockBuilder valueBlockBuilder;
 
         public MapDecoder(MapType mapType, Decoder valueDecoder, Function<String, DecodedTimestamp> timestampParser)
         {
             super(mapType);
             this.keyType = mapType.getKeyType();
-            this.valueDecoder = valueDecoder;
-            this.timestampParser = timestampParser;
+            this.valueType = mapType.getValueType();
+            this.valueDecoder = requireNonNull(valueDecoder, "valueDecoder is null");
+            this.timestampParser = requireNonNull(timestampParser, "timestampParser is null");
 
             this.distinctMapKeys = new DistinctMapKeys(mapType, true);
             this.keyBlockBuilder = mapType.getKeyType().createBlockBuilder(null, 128);
+            this.valueBlockBuilder = mapType.getValueType().createBlockBuilder(null, 128);
         }
 
         @Override
-        void decodeValue(LineBuffer lineBuffer, JsonParser parser, BlockBuilder builder)
+        void decodeValue(JsonParser parser, BlockBuilder builder)
                 throws IOException
         {
-            Block keyBlock = readKeys(createParserAt(parser.currentTokenLocation(), lineBuffer));
-            boolean[] distinctKeys = distinctMapKeys.selectDistinctKeys(keyBlock);
-
-            ((MapBlockBuilder) builder).buildEntry((keyBuilder, valueBuilder) -> {
-                if (parser.currentToken() != START_OBJECT) {
-                    throw invalidJson("start of object expected");
-                }
-                int keyIndex = 0;
-                while (nextObjectField(parser)) {
-                    if (distinctKeys[keyIndex]) {
-                        keyType.appendTo(keyBlock, keyIndex, keyBuilder);
-                        parser.nextToken();
-                        valueDecoder.decode(lineBuffer, parser, valueBuilder);
-                    }
-                    else {
-                        skipNextValue(parser);
-                    }
-                    keyIndex++;
-                }
-            });
-        }
-
-        private Block readKeys(JsonParser fieldNameParser)
-                throws IOException
-        {
-            if (fieldNameParser.nextToken() != START_OBJECT) {
+            if (parser.currentToken() != START_OBJECT) {
                 throw invalidJson("start of object expected");
             }
 
-            while (nextObjectField(fieldNameParser)) {
-                String keyText = fieldNameParser.getText();
+            // buffer the keys and values
+            while (nextObjectField(parser)) {
+                String keyText = parser.getText();
                 serializeMapKey(keyText, keyType, keyBlockBuilder);
-                skipNextValue(fieldNameParser);
+                parser.nextToken();
+                valueDecoder.decode(parser, valueBlockBuilder);
             }
+            ValueBlock keys = keyBlockBuilder.buildValueBlock();
+            ValueBlock values = valueBlockBuilder.buildValueBlock();
+            keyBlockBuilder = keyType.createBlockBuilder(null, keys.getPositionCount());
+            valueBlockBuilder = valueType.createBlockBuilder(null, values.getPositionCount());
 
-            Block keyBlock = keyBlockBuilder.build();
-            keyBlockBuilder = keyType.createBlockBuilder(null, keyBlock.getPositionCount());
-            return keyBlock;
+            // copy the distinct key entries to the output
+            boolean[] distinctKeys = distinctMapKeys.selectDistinctKeys(keys);
+
+            ((MapBlockBuilder) builder).buildEntry((keyBuilder, valueBuilder) -> {
+                // this could use bulk append positions, but that would require converting the mask to a list of positions
+                for (int index = 0; index < distinctKeys.length; index++) {
+                    boolean distinctKey = distinctKeys[index];
+                    if (distinctKey) {
+                        keyBuilder.append(keys, index);
+                        valueBuilder.append(values, index);
+                    }
+                }
+            });
         }
 
         private void serializeMapKey(String value, Type type, BlockBuilder builder)
@@ -663,10 +663,11 @@ public class JsonDeserializer
         private static final Pattern INTERNAL_PATTERN = Pattern.compile("_col([0-9]+)");
 
         private final Map<String, Integer> fieldPositions;
-        private final List<Decoder> fieldDecoders;
+        private final Decoder[] fieldDecoders;
+        private final boolean[] fieldWritten;
         private final IntUnaryOperator ordinalToFieldPosition;
 
-        public RowDecoder(RowType rowType, List<Decoder> fieldDecoders, IntUnaryOperator ordinalToFieldPosition)
+        public RowDecoder(RowType rowType, Decoder[] fieldDecoders, IntUnaryOperator ordinalToFieldPosition)
         {
             super(rowType);
 
@@ -677,45 +678,51 @@ public class JsonDeserializer
                 fieldPositions.put(field.getName().orElseThrow().toLowerCase(Locale.ROOT), i);
             }
             this.fieldPositions = fieldPositions.buildOrThrow();
-            this.fieldDecoders = fieldDecoders;
-            this.ordinalToFieldPosition = ordinalToFieldPosition;
+            this.fieldDecoders = requireNonNull(fieldDecoders, "fieldDecoders is null");
+            checkArgument(this.fieldDecoders.length == fields.size(), "fieldDecoders size mismatch: %s <> %s", this.fieldDecoders.length, fields.size());
+            checkArgument(Arrays.stream(this.fieldDecoders).noneMatch(Objects::isNull), "fieldDecoders contains null element");
+            this.fieldWritten = new boolean[this.fieldDecoders.length];
+            this.ordinalToFieldPosition = requireNonNull(ordinalToFieldPosition, "ordinalToFieldPosition is null");
         }
 
-        public void decode(LineBuffer lineBuffer, JsonParser parser, PageBuilder builder)
+        public void decode(JsonParser parser, PageBuilder builder)
                 throws IOException
         {
             builder.declarePosition();
-            decodeValue(lineBuffer, parser, builder::getBlockBuilder);
+            decodeValue(parser, builder.getPositionCount(), builder::getBlockBuilder);
         }
 
         @Override
-        void decodeValue(LineBuffer lineBuffer, JsonParser parser, BlockBuilder builder)
+        void decodeValue(JsonParser parser, BlockBuilder builder)
                 throws IOException
         {
-            ((RowBlockBuilder) builder).buildEntry(fieldBuilders -> decodeValue(lineBuffer, parser, fieldBuilders::get));
+            ((RowBlockBuilder) builder).buildEntry(fieldBuilders -> decodeValue(parser, builder.getPositionCount(), fieldBuilders::get));
         }
 
-        private void decodeValue(LineBuffer lineBuffer, JsonParser parser, IntFunction<BlockBuilder> fieldBuilders)
+        private void decodeValue(JsonParser parser, int currentPosition, IntFunction<BlockBuilder> fieldBuilders)
                 throws IOException
         {
             if (parser.currentToken() != START_OBJECT) {
                 throw invalidJson("start of object expected");
             }
 
-            int[] jsonToRowIndex = getJsonToRowIndex(lineBuffer, parser);
-            boolean[] fieldWritten = new boolean[fieldDecoders.size()];
+            Arrays.fill(fieldWritten, false);
 
-            int jsonFieldIndex = 0;
             while (nextObjectField(parser)) {
-                int rowIndex = jsonToRowIndex[jsonFieldIndex];
-                jsonFieldIndex++;
+                String fieldName = parser.getText();
+                int rowIndex = getFieldPosition(fieldName);
                 if (rowIndex < 0) {
                     skipNextValue(parser);
                     continue;
                 }
 
+                BlockBuilder fieldBuilder = fieldBuilders.apply(rowIndex);
+                if (fieldWritten[rowIndex]) {
+                    fieldBuilder.resetTo(currentPosition);
+                }
+
                 nextTokenRequired(parser);
-                fieldDecoders.get(rowIndex).decode(lineBuffer, parser, fieldBuilders.apply(rowIndex));
+                fieldDecoders[rowIndex].decode(parser, fieldBuilder);
                 fieldWritten[rowIndex] = true;
             }
 
@@ -725,43 +732,6 @@ public class JsonDeserializer
                     fieldBuilders.apply(i).appendNull();
                 }
             }
-        }
-
-        private int[] getJsonToRowIndex(LineBuffer lineBuffer, JsonParser parser)
-                throws IOException
-        {
-            // create a new parser starting at the beginning of the json object
-            JsonParser fieldNameParser = createParserAt(parser.currentTokenLocation(), lineBuffer);
-            if (fieldNameParser.nextToken() != START_OBJECT) {
-                throw invalidJson("start of object expected");
-            }
-
-            // build a mapping from field in the row to the field in the json object
-            int[] rowToJson = new int[fieldDecoders.size()];
-            Arrays.fill(rowToJson, -1);
-
-            int jsonFieldIndex = 0;
-            while (nextObjectField(fieldNameParser)) {
-                String fieldName = fieldNameParser.getText();
-                int rowIndex = getFieldPosition(fieldName);
-                skipNextValue(fieldNameParser);
-
-                if (rowIndex >= 0) {
-                    rowToJson[rowIndex] = jsonFieldIndex;
-                }
-                jsonFieldIndex++;
-            }
-
-            // reverse the mapping
-            int[] jsonToRowIndex = new int[jsonFieldIndex];
-            Arrays.fill(jsonToRowIndex, -1);
-            for (int rowIndex = 0; rowIndex < rowToJson.length; rowIndex++) {
-                int jsonIndex = rowToJson[rowIndex];
-                if (jsonIndex >= 0) {
-                    jsonToRowIndex[jsonIndex] = rowIndex;
-                }
-            }
-            return jsonToRowIndex;
         }
 
         private int getFieldPosition(String fieldName)
@@ -783,21 +753,12 @@ public class JsonDeserializer
         }
     }
 
-    /**
-     * Create a new parser at the specified location.
-     */
-    private static JsonParser createParserAt(JsonLocation jsonLocation, LineBuffer lineBuffer)
-            throws IOException
-    {
-        return JSON_FACTORY.createParser(lineBuffer.getBuffer(), (int) jsonLocation.getByteOffset(), lineBuffer.getLength() - (int) jsonLocation.getByteOffset());
-    }
-
     private static void skipNextValue(JsonParser parser)
             throws IOException
     {
         JsonToken valueToken = parser.nextToken();
         if ((valueToken == START_ARRAY) || (valueToken == START_OBJECT)) {
-            // if the currently read token is a beginning of an array or object, move stream forward
+            // if the currently read token is a beginning of an array or object, move the stream forward
             // skipping any child tokens till we're at the corresponding END_ARRAY or END_OBJECT token
             parser.skipChildren();
         }

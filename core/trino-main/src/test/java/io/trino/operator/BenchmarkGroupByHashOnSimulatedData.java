@@ -28,7 +28,7 @@ import io.trino.spi.type.IntegerType;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeOperators;
 import io.trino.spi.type.VarcharType;
-import io.trino.sql.gen.JoinCompiler;
+import org.junit.jupiter.api.Test;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
 import org.openjdk.jmh.annotations.Fork;
@@ -42,7 +42,6 @@ import org.openjdk.jmh.annotations.Setup;
 import org.openjdk.jmh.annotations.State;
 import org.openjdk.jmh.annotations.Warmup;
 import org.openjdk.jmh.runner.RunnerException;
-import org.testng.annotations.Test;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -79,22 +78,19 @@ public class BenchmarkGroupByHashOnSimulatedData
     private static final int DEFAULT_POSITIONS = 10_000_000;
     private static final int EXPECTED_GROUP_COUNT = 10_000;
     private static final int DEFAULT_PAGE_SIZE = 8192;
-    private static final TypeOperators TYPE_OPERATORS = new TypeOperators();
 
-    private final JoinCompiler joinCompiler = new JoinCompiler(TYPE_OPERATORS);
+    private final FlatHashStrategyCompiler hashStrategyCompiler = new FlatHashStrategyCompiler(new TypeOperators());
 
     @Benchmark
     @OperationsPerInvocation(DEFAULT_POSITIONS)
     public Object groupBy(BenchmarkContext data)
     {
         GroupByHash groupByHash = GroupByHash.createGroupByHash(
-                true,
                 data.getTypes(),
-                false,
+                data.getHashMode(),
                 EXPECTED_GROUP_COUNT,
                 false,
-                joinCompiler,
-                TYPE_OPERATORS,
+                hashStrategyCompiler,
                 NOOP);
         List<int[]> results = addInputPages(groupByHash, data.getPages(), data.getWorkType());
 
@@ -108,7 +104,9 @@ public class BenchmarkGroupByHashOnSimulatedData
                 pageBuilder.reset();
             }
         }
-        pages.add(pageBuilder.build());
+        if (!pageBuilder.isEmpty()) {
+            pages.add(pageBuilder.build());
+        }
         return ImmutableList.of(pages, results); // all the things that might get erased by the compiler
     }
 
@@ -234,6 +232,8 @@ public class BenchmarkGroupByHashOnSimulatedData
         @Param({"0", ".1", ".5", ".9"})
         private double nullChance;
 
+        private GroupByHashMode hashMode;
+
         private final int positions;
         private List<Page> pages;
         private List<Type> types;
@@ -258,6 +258,7 @@ public class BenchmarkGroupByHashOnSimulatedData
                     .map(channel -> channel.columnType.type)
                     .collect(toImmutableList());
             pages = createPages(query);
+            hashMode = GroupByHash.selectGroupByHashMode(false, false, types);
         }
 
         private List<Page> createPages(AggregationDefinition definition)
@@ -297,6 +298,11 @@ public class BenchmarkGroupByHashOnSimulatedData
         public WorkType getWorkType()
         {
             return workType;
+        }
+
+        public GroupByHashMode getHashMode()
+        {
+            return hashMode;
         }
     }
 
@@ -544,7 +550,7 @@ public class BenchmarkGroupByHashOnSimulatedData
 
         private void createNonDictionaryBlock(int blockCount, int positionsPerBlock, int channel, double nullChance, Block[] blocks)
         {
-            BlockBuilder allValues = generateValues(channel, distinctValuesCountInColumn);
+            Block allValues = generateValues(channel, distinctValuesCountInColumn).build();
             Random r = new Random(channel);
             for (int i = 0; i < blockCount; i++) {
                 BlockBuilder block = columnType.getType().createBlockBuilder(null, positionsPerBlock);

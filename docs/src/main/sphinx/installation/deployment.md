@@ -1,11 +1,9 @@
 # Deploying Trino
 
 (requirements)=
-
 ## Requirements
 
 (requirements-linux)=
-
 ### Linux operating system
 
 - 64-bit required
@@ -29,31 +27,18 @@
   trino hard nproc 128000
   ```
 
-% These values are used in core/trino-server-rpm/src/main/resources/dist/etc/init.d/trino
-
 (requirements-java)=
-
 ### Java runtime environment
 
-Trino requires a 64-bit version of Java 17, with a minimum required version of 17.0.3.
-Earlier major versions such as Java 8 or Java 11 do not work.
-Newer major versions such as Java 18 or 19, are not supported -- they may work, but are not tested.
+Trino requires a 64-bit version of Java 23, with a minimum required version of
+23.0.0 and a recommendation to use the latest patch version. Earlier versions
+such as Java 8, Java 11, Java 17, Java 21 or Java 22 do not work. 
+Newer versions such as Java 24 are not supported -- they may work, but are not tested.
 
 We recommend using the Eclipse Temurin OpenJDK distribution from
 [Adoptium](https://adoptium.net/) as the JDK for Trino, as Trino is tested
 against that distribution. Eclipse Temurin is also the JDK used by the [Trino
 Docker image](https://hub.docker.com/r/trinodb/trino).
-
-If you are using Java 17 or 18, the JVM must be configured to use UTF-8 as the default charset by
-adding `-Dfile.encoding=UTF-8` to `etc/jvm.config`. Starting with Java 19, the Java default 
-charset is UTF-8, so this configuration is not needed.
-
-(requirements-python)=
-
-### Python
-
-- version 2.6.x, 2.7.x, or 3.x
-- required by the `bin/launcher` script only
 
 ## Installing Trino
 
@@ -61,9 +46,26 @@ Download the Trino server tarball, {maven_download}`server`, and unpack it. The
 tarball contains a single top-level directory, `trino-server-|trino_version|`,
 which we call the *installation* directory.
 
-Trino needs a *data* directory for storing logs, etc.
+The default tarball contains all plugins and must be configured for use. The
+minimal `server-core` tarball, {maven_download}`server-core`, contains a minimal
+set of essential plugins, and it is therefore mostly suitable as a base for
+custom tarball creation.
+
+The [trino-packages project](https://github.com/trinodb/trino-packages) includes
+a module to create a fully configured tarball with an example configuration. The
+custom tarball is ready to use and can be further configured and adjusted to
+your needs.
+
+Trino needs a *data* directory for storing logs, etc. By default, an
+installation from the tarball uses the same location for the installation and data
+directories.
+
 We recommend creating a data directory outside of the installation directory,
-which allows it to be easily preserved when upgrading Trino.
+which allows it to be easily preserved when upgrading Trino. This directory path
+must be configured with the [](node-properties).
+
+The user that runs the Trino process must have full read access to the
+installation directory, and read and write access to the data directory.
 
 ## Configuring Trino
 
@@ -79,7 +81,6 @@ This holds the following configuration:
   in the respective connector documentation.
 
 (node-properties)=
-
 ### Node properties
 
 The node properties file, `etc/node.properties`, contains configuration
@@ -112,7 +113,6 @@ The above properties are described below:
   logs and other data here.
 
 (jvm-config)=
-
 ### JVM config
 
 The JVM config file, `etc/jvm.config`, contains a list of command line
@@ -138,11 +138,9 @@ The following provides a good starting point for creating `etc/jvm.config`:
 -XX:PerBytecodeRecompilationCutoff=10000
 -Djdk.attach.allowAttachSelf=true
 -Djdk.nio.maxCachedBufferSize=2000000
--XX:+UnlockDiagnosticVMOptions
--XX:+UseAESCTRIntrinsics
 -Dfile.encoding=UTF-8
-# Disable Preventive GC for performance reasons (JDK-8293861)
--XX:-G1UsePreventiveGC
+# Allow loading dynamic agent used by JOL
+-XX:+EnableDynamicAgentLoading
 ```
 
 You must adjust the value for the memory used by Trino, specified with `-Xmx`
@@ -166,18 +164,20 @@ Because an `OutOfMemoryError` typically leaves the JVM in an
 inconsistent state, we write a heap dump, for debugging, and forcibly
 terminate the process when this occurs.
 
-The temporary directory used by the JVM must allow execution of code.
-Specifically, the mount must not have the `noexec` flag set. The default
-`/tmp` directory is mounted with this flag in some installations, which
-prevents Trino from starting. You can workaround this by overriding the
-temporary directory by adding `-Djava.io.tmpdir=/path/to/other/tmpdir` to the
-list of JVM options.
+(tmp-directory)=
+#### Temporary directory
 
-We enable `-XX:+UnlockDiagnosticVMOptions` and `-XX:+UseAESCTRIntrinsics` to improve AES performance for S3, etc. on ARM64 ([JDK-8271567](https://bugs.openjdk.java.net/browse/JDK-8271567))
-We disable Preventive GC (`-XX:-G1UsePreventiveGC`) for performance reasons (see [JDK-8293861](https://bugs.openjdk.org/browse/JDK-8293861))
+The temporary directory used by the JVM must allow execution of code, because
+Trino accesses and uses shared library binaries for purposes such as
+[](file-compression).
+
+Specifically, the partition mount and directory must not have the `noexec` flag
+set. The default `/tmp` directory is mounted with this flag in some operating
+system installations, which prevents Trino from starting. You can work around
+this by overriding the temporary directory by adding
+`-Djava.io.tmpdir=/path/to/other/tmpdir` to the list of JVM options.
 
 (config-properties)=
-
 ### Config properties
 
 The config properties file, `etc/config.properties`, contains the
@@ -226,8 +226,8 @@ These properties require some explanation:
   available for the critical task of scheduling, managing and monitoring
   query execution.
 - `http-server.http.port`:
-  Specifies the port for the HTTP server. Trino uses HTTP for all
-  communication, internal and external.
+  Specifies the port for the [HTTP server](/admin/properties-http-server).
+  Trino uses HTTP for all communication, internal and external.
 - `discovery.uri`:
   The Trino coordinator has a discovery service that is used by all the nodes
   to find each other. Every Trino instance registers itself with the discovery
@@ -249,36 +249,22 @@ properties for topics such as {doc}`/admin/properties-general`,
 {doc}`/admin/properties-query-management`,
 {doc}`/admin/properties-web-interface`, and others.
 
-(log-levels)=
-
-### Log levels
-
-The optional log levels file, `etc/log.properties`, allows setting the
-minimum log level for named logger hierarchies. Every logger has a name,
-which is typically the fully qualified name of the class that uses the logger.
-Loggers have a hierarchy based on the dots in the name, like Java packages.
-For example, consider the following log levels file:
-
-```text
-io.trino=INFO
-```
-
-This would set the minimum level to `INFO` for both
-`io.trino.server` and `io.trino.plugin.hive`.
-The default minimum level is `INFO`,
-thus the above example does not actually change anything.
-There are four levels: `DEBUG`, `INFO`, `WARN` and `ERROR`.
+Further configuration can include [](/admin/logging), [](/admin/opentelemetry),
+[](/admin/jmx), [](/admin/openmetrics), and other functionality described in the
+[](/admin) section.
 
 (catalog-properties)=
-
 ### Catalog properties
 
-Trino accesses data via *connectors*, which are mounted in catalogs.
-The connector provides all of the schemas and tables inside of the catalog.
-For example, the Hive connector maps each Hive database to a schema.
-If the Hive connector is mounted as the `hive` catalog, and Hive
-contains a table `clicks` in database `web`, that table can be accessed
-in Trino as `hive.web.clicks`.
+Trino accesses data in a [data source](trino-concept-data-source) with a
+[connector](trino-concept-connector), which is configured in a
+[catalog](trino-concept-catalog). The connector provides all of the schemas and
+tables inside of the catalog.
+
+For example, the Hive connector maps each Hive database to a schema. If the Hive
+connector is configured in the `example` catalog, and Hive contains a table
+`clicks` in the database `web`, that table can be accessed in Trino as
+`example.web.clicks`.
 
 Catalogs are registered by creating a catalog properties file
 in the `etc/catalog` directory.
@@ -289,44 +275,41 @@ contents to mount the `jmx` connector as the `jmx` catalog:
 connector.name=jmx
 ```
 
-See {doc}`/connector` for more information about configuring connectors.
+See {doc}`/connector` for more information about configuring catalogs.
 
 (running-trino)=
-
 ## Running Trino
 
-The installation provides a `bin/launcher` script, which requires Python in
-the `PATH`. The script can be used manually or as a daemon startup script. It
-accepts the following commands:
+The installation provides a `bin/launcher` script that can be used manually 
+or as a daemon startup script. It accepts the following commands:
 
-```{eval-rst}
-.. list-table:: ``launcher`` commands
-  :widths: 15, 85
-  :header-rows: 1
+:::{list-table} `launcher` commands
+:widths: 15, 85
+:header-rows: 1
 
-  * - Command
-    - Action
-  * - ``run``
-    - Starts the server in the foreground and leaves it running. To shut down
-      the server, use Ctrl+C in this terminal or the ``stop`` command from
-      another terminal.
-  * - ``start``
-    - Starts the server as a daemon and returns its process ID.
-  * - ``stop``
-    - Shuts down a server started with either ``start`` or ``run``. Sends the
-      SIGTERM signal.
-  * - ``restart``
-    - Stops then restarts a running server, or starts a stopped server,
-      assigning a new process ID.
-  * - ``kill``
-    - Shuts down a possibly hung server by sending the SIGKILL signal.
-  * - ``status``
-    - Prints a status line, either *Stopped pid* or *Running as pid*.
-```
+* - Command
+  - Action
+* - `run`
+  - Starts the server in the foreground and leaves it running. To shut down
+    the server, use Ctrl+C in this terminal or the `stop` command from
+    another terminal.
+* - `start`
+  - Starts the server as a daemon and returns its process ID.
+* - `stop`
+  - Shuts down a server started with either `start` or `run`. Sends the
+    SIGTERM signal.
+* - `restart`
+  - Stops then restarts a running server, or starts a stopped server,
+    assigning a new process ID.
+* - `kill`
+  - Shuts down a possibly hung server by sending the SIGKILL signal.
+* - `status`
+  - Prints a status line, either *Stopped pid* or *Running as pid*.
+:::
 
 A number of additional options allow you to specify configuration file and
 directory locations, as well as Java options. Run the launcher with `--help`
-to see the supported commands and command line options.
+to see the supported commands, command line options, and default values.
 
 The `-v` or `--verbose` option for each command prepends the server's
 current settings before the command's usual output.
@@ -337,6 +320,13 @@ Trino can be started as a daemon by running the following:
 bin/launcher start
 ```
 
+Use the status command with the verbose option for the pid and a list of
+configuration settings:
+
+```text
+bin/launcher -v status
+```
+
 Alternatively, it can be run in the foreground, with the logs and other
 output written to stdout/stderr. Both streams should be captured
 if using a supervision system like daemontools:
@@ -345,14 +335,16 @@ if using a supervision system like daemontools:
 bin/launcher run
 ```
 
-The launcher configures default values for the configuration
-directory `etc`, configuration files, the data directory `var`,
-and log files in the data directory. You can change these values
-to adjust your Trino usage to any requirements, such as using a
-directory outside the installation directory, specific mount points
-or locations, and even using other file names. For example, the Trino
-RPM adjusts the used directories to better follow the Linux Filesystem
-Hierarchy Standard (FHS).
+The launcher configures default values for the configuration directory `etc`,
+configuration files in `etc`, the data directory identical to the installation
+directory, the pid file as `var/run/launcher.pid` and log files in the `var/log`
+directory.
+
+You can change these values to adjust your Trino usage to any requirements, such
+as using a directory outside the installation directory, specific mount points
+or locations, and even using other file names. For example, the [Trino
+RPM](https://github.com/trinodb/trino-packages) adjusts the used directories to
+better follow the Linux Filesystem Hierarchy Standard (FHS).
 
 After starting Trino, you can find log files in the `log` directory inside
 the data directory `var`:

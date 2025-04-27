@@ -25,11 +25,11 @@ public class TestUnknownType
     {
         super(UNKNOWN,
                 boolean.class,
-                UNKNOWN.createBlockBuilder(null, 3)
+                UNKNOWN.createFixedSizeBlockBuilder(3)
                         .appendNull()
                         .appendNull()
                         .appendNull()
-                        .build());
+                        .buildValueBlock());
     }
 
     @Override
@@ -45,6 +45,7 @@ public class TestUnknownType
                 .isEmpty();
     }
 
+    @Test
     @Override
     public void testFlat()
             throws Throwable

@@ -24,7 +24,6 @@ import io.trino.spi.function.InvocationConvention;
 import io.trino.spi.function.LiteralParameter;
 import io.trino.spi.function.OperatorDependency;
 import io.trino.spi.function.OperatorType;
-import io.trino.spi.function.QualifiedFunctionName;
 import io.trino.spi.function.TypeParameter;
 import io.trino.spi.type.TypeSignature;
 import io.trino.spi.type.TypeSignatureParameter;
@@ -41,6 +40,7 @@ import java.util.Set;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.collect.ImmutableList.toImmutableList;
+import static io.trino.metadata.GlobalFunctionCatalog.builtinFunctionName;
 import static io.trino.operator.annotations.FunctionsParserHelper.containsImplementationDependencyAnnotation;
 import static io.trino.sql.analyzer.TypeSignatureTranslator.parseTypeSignature;
 
@@ -71,11 +71,11 @@ public interface ImplementationDependency
 
     static void validateImplementationDependencyAnnotation(AnnotatedElement element, Annotation annotation, Set<String> typeParametersNames, Collection<String> literalParameters)
     {
-        if (annotation instanceof TypeParameter) {
-            checkTypeParameters(parseTypeSignature(((TypeParameter) annotation).value(), ImmutableSet.of()), typeParametersNames, element);
+        if (annotation instanceof TypeParameter typeParameter) {
+            checkTypeParameters(parseTypeSignature(typeParameter.value(), ImmutableSet.of()), typeParametersNames, element);
         }
-        if (annotation instanceof LiteralParameter) {
-            checkArgument(literalParameters.contains(((LiteralParameter) annotation).value()), "Parameter injected by @LiteralParameter must be declared with @LiteralParameters on the method [%s]", element);
+        if (annotation instanceof LiteralParameter literalParameter) {
+            checkArgument(literalParameters.contains(literalParameter.value()), "Parameter injected by @LiteralParameter must be declared with @LiteralParameters on the method [%s]", element);
         }
     }
 
@@ -101,16 +101,16 @@ public interface ImplementationDependency
 
         public static ImplementationDependency createDependency(Annotation annotation, Set<String> literalParameters, Class<?> type)
         {
-            if (annotation instanceof TypeParameter) {
-                return new TypeImplementationDependency(parseTypeSignature(((TypeParameter) annotation).value(), literalParameters));
+            if (annotation instanceof TypeParameter typeParameter) {
+                return new TypeImplementationDependency(parseTypeSignature(typeParameter.value(), literalParameters));
             }
-            if (annotation instanceof LiteralParameter) {
-                return new LiteralImplementationDependency(((LiteralParameter) annotation).value());
+            if (annotation instanceof LiteralParameter literalParameter) {
+                return new LiteralImplementationDependency(literalParameter.value());
             }
 
             if (annotation instanceof FunctionDependency functionDependency) {
                 return new FunctionImplementationDependency(
-                        QualifiedFunctionName.of(functionDependency.name()),
+                        builtinFunctionName(functionDependency.name()),
                         Arrays.stream(functionDependency.argumentTypes())
                                 .map(signature -> parseTypeSignature(signature, literalParameters))
                                 .collect(toImmutableList()),

@@ -15,6 +15,7 @@ package io.trino.type;
 
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.block.ValueBlock;
 import io.trino.spi.type.Type;
 import org.junit.jupiter.api.Test;
 
@@ -34,27 +35,27 @@ public class TestBigintArrayType
         super(TESTING_TYPE_MANAGER.getType(arrayType(BIGINT.getTypeSignature())), List.class, createTestBlock(TESTING_TYPE_MANAGER.getType(arrayType(BIGINT.getTypeSignature()))));
     }
 
-    public static Block createTestBlock(Type arrayType)
+    public static ValueBlock createTestBlock(Type arrayType)
     {
         BlockBuilder blockBuilder = arrayType.createBlockBuilder(null, 4);
         arrayType.writeObject(blockBuilder, arrayBlockOf(BIGINT, 1, 2));
         arrayType.writeObject(blockBuilder, arrayBlockOf(BIGINT, 1, 2, 3));
         arrayType.writeObject(blockBuilder, arrayBlockOf(BIGINT, 1, 2, 3));
         arrayType.writeObject(blockBuilder, arrayBlockOf(BIGINT, 100, 200, 300));
-        return blockBuilder.build();
+        return blockBuilder.buildValueBlock();
     }
 
     @Override
     protected Object getGreaterValue(Object value)
     {
         Block block = (Block) value;
-        BlockBuilder blockBuilder = BIGINT.createBlockBuilder(null, block.getPositionCount() + 1);
+        BlockBuilder blockBuilder = BIGINT.createFixedSizeBlockBuilder(block.getPositionCount() + 1);
         for (int i = 0; i < block.getPositionCount(); i++) {
             BIGINT.appendTo(block, i, blockBuilder);
         }
         BIGINT.writeLong(blockBuilder, 1L);
 
-        return blockBuilder.build();
+        return blockBuilder.buildValueBlock();
     }
 
     @Test

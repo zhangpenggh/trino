@@ -37,6 +37,7 @@ import io.trino.plugin.jdbc.LongReadFunction;
 import io.trino.plugin.jdbc.LongWriteFunction;
 import io.trino.plugin.jdbc.PreparedQuery;
 import io.trino.plugin.jdbc.QueryBuilder;
+import io.trino.plugin.jdbc.RemoteTableName;
 import io.trino.plugin.jdbc.WriteFunction;
 import io.trino.plugin.jdbc.WriteMapping;
 import io.trino.plugin.jdbc.aggregation.ImplementAvgFloatingPoint;
@@ -80,10 +81,13 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.function.BiFunction;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Strings.isNullOrEmpty;
+import static com.google.common.base.Verify.verify;
+import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.trino.plugin.ignite.IgniteTableProperties.PRIMARY_KEY_PROPERTY;
 import static io.trino.plugin.jdbc.ColumnMapping.longMapping;
 import static io.trino.plugin.jdbc.DecimalConfig.DecimalMapping.ALLOW_OVERFLOW;
@@ -163,8 +167,17 @@ public class IgniteClient
         JdbcTypeHandle bigintTypeHandle = new JdbcTypeHandle(Types.BIGINT, Optional.of("bigint"), Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty());
         this.connectorExpressionRewriter = JdbcConnectorExpressionRewriterBuilder.newBuilder()
                 .addStandardRules(this::quoted)
+                .map("$equal(left, right)").to("left = right")
+                .map("$not_equal(left, right)").to("left <> right")
+                .map("$identical(left, right)").to("left IS NOT DISTINCT FROM right")
+                .map("$less_than(left, right)").to("left < right")
+                .map("$less_than_or_equal(left, right)").to("left <= right")
+                .map("$greater_than(left, right)").to("left > right")
+                .map("$greater_than_or_equal(left, right)").to("left >= right")
                 .map("$like(value: varchar, pattern: varchar): boolean").to("value LIKE pattern")
-                .map("$like(value: varchar, pattern: varchar, escape: varchar(1)): boolean").to("value LIKE pattern ESCAPE escape")
+                .map("$not($is_null(value))").to("value IS NOT NULL")
+                .map("$not(value: boolean)").to("NOT value")
+                .map("$is_null(value)").to("value IS NULL")
                 .build();
         this.aggregateFunctionRewriter = new AggregateFunctionRewriter<>(
                 connectorExpressionRewriter,
@@ -207,7 +220,7 @@ public class IgniteClient
             return mapping;
         }
 
-        switch (typeHandle.getJdbcType()) {
+        switch (typeHandle.jdbcType()) {
             case Types.BOOLEAN:
                 return Optional.of(booleanColumnMapping());
 
@@ -230,8 +243,8 @@ public class IgniteClient
                 return Optional.of(doubleColumnMapping());
 
             case Types.DECIMAL:
-                int decimalDigits = typeHandle.getRequiredDecimalDigits();
-                int precision = typeHandle.getRequiredColumnSize();
+                int decimalDigits = typeHandle.requiredDecimalDigits();
+                int precision = typeHandle.requiredColumnSize();
                 if (getDecimalRounding(session) == ALLOW_OVERFLOW && precision > Decimals.MAX_PRECISION) {
                     int scale = min(decimalDigits, getDecimalDefaultScale(session));
                     return Optional.of(decimalColumnMapping(createDecimalType(Decimals.MAX_PRECISION, scale), getDecimalRoundingMode(session)));
@@ -243,7 +256,7 @@ public class IgniteClient
                 return Optional.of(decimalColumnMapping(createDecimalType(precision, max(decimalDigits, 0))));
 
             case Types.VARCHAR:
-                return Optional.of(varcharColumnMapping(typeHandle.getColumnSize()));
+                return Optional.of(varcharColumnMapping(typeHandle.columnSize()));
 
             case Types.DATE:
                 return Optional.of(longMapping(DATE, dateReadFunction(), dateWriteFunction()));
@@ -285,8 +298,8 @@ public class IgniteClient
             }
             return WriteMapping.objectMapping(dataType, longDecimalWriteFunction(decimalType));
         }
-        if (type instanceof CharType) {
-            return WriteMapping.sliceMapping("varchar(" + ((CharType) type).getLength() + ")", varcharWriteFunction());
+        if (type instanceof CharType charType) {
+            return WriteMapping.sliceMapping("varchar(" + charType.getLength() + ")", varcharWriteFunction());
         }
         if (type instanceof VarcharType varcharType) {
             String dataType;
@@ -406,8 +419,7 @@ public class IgniteClient
             execute(session, connection, sql);
 
             return new IgniteOutputTableHandle(
-                    schemaTableName.getSchemaName(),
-                    schemaTableName.getTableName(),
+                    new RemoteTableName(Optional.empty(), Optional.of(schemaTableName.getSchemaName()), schemaTableName.getTableName()),
                     columnNames,
                     columnTypes.build(),
                     Optional.empty(),
@@ -458,6 +470,26 @@ public class IgniteClient
     }
 
     @Override
+    public boolean supportsMerge()
+    {
+        return true;
+    }
+
+    @Override
+    public List<JdbcColumnHandle> getPrimaryKeys(ConnectorSession session, RemoteTableName remoteTableName)
+    {
+        JdbcTableHandle plainTable = new JdbcTableHandle(remoteTableName.getSchemaTableName(), remoteTableName, Optional.empty());
+        Map<String, Object> tableProperties = getTableProperties(session, plainTable);
+        Set<String> primaryKey = ImmutableSet.copyOf(IgniteTableProperties.getPrimaryKey(tableProperties));
+        List<JdbcColumnHandle> primaryKeys = getColumns(session, remoteTableName.getSchemaTableName(), remoteTableName)
+                .stream()
+                .filter(columnHandle -> primaryKey.contains(columnHandle.getColumnName().toLowerCase(ENGLISH)))
+                .collect(toImmutableList());
+        verify(!primaryKeys.isEmpty(), "Ignite primary keys is empty");
+        return primaryKeys;
+    }
+
+    @Override
     public boolean supportsTopN(ConnectorSession session, JdbcTableHandle handle, List<JdbcSortItem> sortOrder)
     {
         return true;
@@ -469,9 +501,9 @@ public class IgniteClient
         return Optional.of((query, sortItems, limit) -> {
             String orderBy = sortItems.stream()
                     .map(sortItem -> {
-                        String ordering = sortItem.getSortOrder().isAscending() ? "ASC" : "DESC";
-                        String nullsHandling = sortItem.getSortOrder().isNullsFirst() ? "IS NULL DESC" : "IS NULL ASC";
-                        String columnName = quoted(sortItem.getColumn().getColumnName());
+                        String ordering = sortItem.sortOrder().isAscending() ? "ASC" : "DESC";
+                        String nullsHandling = sortItem.sortOrder().isNullsFirst() ? "IS NULL DESC" : "IS NULL ASC";
+                        String columnName = quoted(sortItem.column().getColumnName());
 
                         return format("%s %s, %1$s %s", columnName, nullsHandling, ordering);
                     })
@@ -559,13 +591,32 @@ public class IgniteClient
         }
         return format(
                 "INSERT INTO %s (%s) VALUES (%s)",
-                quoted(null, handle.getSchemaName(), handle.getTableName()),
+                quoted(handle.getRemoteTableName()),
                 columns,
                 params);
     }
 
     @Override
     public Optional<PreparedQuery> implementJoin(
+            ConnectorSession session,
+            JoinType joinType,
+            PreparedQuery leftSource,
+            Map<JdbcColumnHandle, String> leftProjections,
+            PreparedQuery rightSource,
+            Map<JdbcColumnHandle, String> rightProjections,
+            List<ParameterizedExpression> joinConditions,
+            JoinStatistics statistics)
+    {
+        // Ignite does not support FULL JOIN
+        if (joinType == JoinType.FULL_OUTER) {
+            return Optional.empty();
+        }
+
+        return super.implementJoin(session, joinType, leftSource, leftProjections, rightSource, rightProjections, joinConditions, statistics);
+    }
+
+    @Override
+    public Optional<PreparedQuery> legacyImplementJoin(
             ConnectorSession session,
             JoinType joinType,
             PreparedQuery leftSource,
@@ -580,7 +631,7 @@ public class IgniteClient
             return Optional.empty();
         }
 
-        return super.implementJoin(session, joinType, leftSource, rightSource, joinConditions, rightAssignments, leftAssignments, statistics);
+        return super.legacyImplementJoin(session, joinType, leftSource, rightSource, joinConditions, rightAssignments, leftAssignments, statistics);
     }
 
     @Override

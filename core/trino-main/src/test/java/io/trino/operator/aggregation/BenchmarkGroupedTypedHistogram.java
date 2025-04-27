@@ -15,9 +15,10 @@ package io.trino.operator.aggregation;
 
 import com.google.common.collect.ImmutableList;
 import io.trino.metadata.TestingFunctionResolution;
+import io.trino.operator.AggregationMetrics;
 import io.trino.spi.Page;
 import io.trino.spi.block.Block;
-import io.trino.sql.tree.QualifiedName;
+import org.junit.jupiter.api.Test;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.Fork;
 import org.openjdk.jmh.annotations.Measurement;
@@ -29,7 +30,6 @@ import org.openjdk.jmh.annotations.State;
 import org.openjdk.jmh.annotations.Warmup;
 import org.openjdk.jmh.profile.GCProfiler;
 import org.openjdk.jmh.runner.RunnerException;
-import org.testng.annotations.Test;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -115,7 +115,7 @@ public class BenchmarkGroupedTypedHistogram
 
             TestingAggregationFunction aggregationFunction = getInternalAggregationFunctionVarChar();
             groupedAggregator = aggregationFunction.createAggregatorFactory(SINGLE, ImmutableList.of(0), OptionalInt.empty())
-                    .createGroupedAggregator();
+                    .createGroupedAggregator(new AggregationMetrics());
         }
     }
 
@@ -137,7 +137,7 @@ public class BenchmarkGroupedTypedHistogram
     private static TestingAggregationFunction getInternalAggregationFunctionVarChar()
     {
         TestingFunctionResolution functionResolution = new TestingFunctionResolution();
-        return functionResolution.getAggregateFunction(QualifiedName.of("histogram"), fromTypes(VARCHAR));
+        return functionResolution.getAggregateFunction("histogram", fromTypes(VARCHAR));
     }
 
     @Test

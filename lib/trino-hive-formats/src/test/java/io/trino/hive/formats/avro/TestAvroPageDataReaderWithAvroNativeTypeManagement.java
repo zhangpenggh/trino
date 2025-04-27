@@ -38,8 +38,9 @@ import org.apache.avro.Schema;
 import org.apache.avro.SchemaBuilder;
 import org.apache.avro.generic.GenericData;
 import org.apache.avro.generic.GenericRecord;
-import org.testng.annotations.BeforeClass;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
 
 import java.io.IOException;
 import java.math.BigInteger;
@@ -56,8 +57,10 @@ import static io.trino.hive.formats.avro.NativeLogicalTypesAvroTypeManager.TIME_
 import static io.trino.hive.formats.avro.NativeLogicalTypesAvroTypeManager.UUID_SCHEMA;
 import static io.trino.hive.formats.avro.NativeLogicalTypesAvroTypeManager.padBigEndianToSize;
 import static io.trino.spi.type.Decimals.MAX_SHORT_PRECISION;
-import static org.assertj.core.api.AssertionsForClassTypes.assertThat;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
 
+@TestInstance(PER_CLASS)
 public class TestAvroPageDataReaderWithAvroNativeTypeManagement
         extends TestAvroBase
 {
@@ -120,12 +123,12 @@ public class TestAvroPageDataReaderWithAvroNativeTypeManagement
         ALL_SUPPORTED_TYPES_GENERIC_RECORD = new GenericData.Record(ALL_SUPPORTED_TYPES_SCHEMA);
 
         ALL_SUPPORTED_TYPES_GENERIC_RECORD.put("timestampMillis", testTime.getTime());
-        BlockBuilder timestampMilliBlock = TimestampType.TIMESTAMP_MILLIS.createBlockBuilder(null, 1);
+        BlockBuilder timestampMilliBlock = TimestampType.TIMESTAMP_MILLIS.createFixedSizeBlockBuilder(1);
         TimestampType.TIMESTAMP_MILLIS.writeLong(timestampMilliBlock, testTime.getTime() * Timestamps.MICROSECONDS_PER_MILLISECOND);
         blocks.add(timestampMilliBlock.build());
 
         ALL_SUPPORTED_TYPES_GENERIC_RECORD.put("timestampMicros", testTime.getTime() * 1000);
-        BlockBuilder timestampMicroBlock = TimestampType.TIMESTAMP_MICROS.createBlockBuilder(null, 1);
+        BlockBuilder timestampMicroBlock = TimestampType.TIMESTAMP_MICROS.createFixedSizeBlockBuilder(1);
         TimestampType.TIMESTAMP_MICROS.writeLong(timestampMicroBlock, testTime.getTime() * Timestamps.MICROSECONDS_PER_MILLISECOND);
         blocks.add(timestampMicroBlock.build());
 
@@ -144,29 +147,29 @@ public class TestAvroPageDataReaderWithAvroNativeTypeManagement
         blocks.add(largeDecimalBlock.build());
 
         ALL_SUPPORTED_TYPES_GENERIC_RECORD.put("date", 9035);
-        BlockBuilder dateBlockBuilder = DateType.DATE.createBlockBuilder(null, 1);
+        BlockBuilder dateBlockBuilder = DateType.DATE.createFixedSizeBlockBuilder(1);
         DateType.DATE.writeInt(dateBlockBuilder, 9035);
         blocks.add(dateBlockBuilder.build());
 
         ALL_SUPPORTED_TYPES_GENERIC_RECORD.put("timeMillis", 39_600_000);
-        BlockBuilder timeMillisBlock = TimeType.TIME_MILLIS.createBlockBuilder(null, 1);
+        BlockBuilder timeMillisBlock = TimeType.TIME_MILLIS.createFixedSizeBlockBuilder(1);
         TimeType.TIME_MILLIS.writeLong(timeMillisBlock, 39_600_000L * Timestamps.PICOSECONDS_PER_MILLISECOND);
         blocks.add(timeMillisBlock.build());
 
         ALL_SUPPORTED_TYPES_GENERIC_RECORD.put("timeMicros", 39_600_000_000L);
-        BlockBuilder timeMicrosBlock = TimeType.TIME_MICROS.createBlockBuilder(null, 1);
+        BlockBuilder timeMicrosBlock = TimeType.TIME_MICROS.createFixedSizeBlockBuilder(1);
         TimeType.TIME_MICROS.writeLong(timeMicrosBlock, 39_600_000_000L * Timestamps.PICOSECONDS_PER_MICROSECOND);
         blocks.add(timeMicrosBlock.build());
 
         ALL_SUPPORTED_TYPES_GENERIC_RECORD.put("id", RANDOM_UUID.toString());
-        BlockBuilder uuidBlock = UuidType.UUID.createBlockBuilder(null, 1);
+        BlockBuilder uuidBlock = UuidType.UUID.createFixedSizeBlockBuilder(1);
         UuidType.UUID.writeSlice(uuidBlock, UuidType.javaUuidToTrinoUuid(RANDOM_UUID));
         blocks.add(uuidBlock.build());
 
         ALL_SUPPORTED_PAGE = new Page(blocks.build().toArray(Block[]::new));
     }
 
-    @BeforeClass
+    @BeforeAll
     public void testStatics()
     {
         // Identity
@@ -178,7 +181,7 @@ public class TestAvroPageDataReaderWithAvroNativeTypeManagement
             throws IOException, AvroTypeException
     {
         TrinoInputFile input = createWrittenFileWithData(ALL_SUPPORTED_TYPES_SCHEMA, ImmutableList.of(ALL_SUPPORTED_TYPES_GENERIC_RECORD));
-        try (AvroFileReader pageIterator = new AvroFileReader(input, ALL_SUPPORTED_TYPES_SCHEMA, new NativeLogicalTypesAvroTypeManager())) {
+        try (AvroFileReader pageIterator = new AvroFileReader(input, ALL_SUPPORTED_TYPES_SCHEMA, new NativeLogicalTypesAvroTypeBlockHandler())) {
             while (pageIterator.hasNext()) {
                 Page p = pageIterator.next();
                 assertIsAllSupportedTypePage(p);
@@ -210,7 +213,7 @@ public class TestAvroPageDataReaderWithAvroNativeTypeManagement
                 .endRecord();
 
         TrinoInputFile input = createWrittenFileWithSchema(10, writeSchema);
-        try (AvroFileReader avroFileReader = new AvroFileReader(input, schema, new NativeLogicalTypesAvroTypeManager())) {
+        try (AvroFileReader avroFileReader = new AvroFileReader(input, schema, new NativeLogicalTypesAvroTypeBlockHandler())) {
             int totalRecords = 0;
             while (avroFileReader.hasNext()) {
                 Page p = avroFileReader.next();
@@ -248,14 +251,14 @@ public class TestAvroPageDataReaderWithAvroNativeTypeManagement
                 AvroCompressionKind.NULL,
                 ImmutableMap.of(),
                 ALL_SUPPORTED_TYPES_SCHEMA.getFields().stream().map(Schema.Field::name).collect(toImmutableList()),
-                AvroTypeUtils.typeFromAvro(ALL_SUPPORTED_TYPES_SCHEMA, new NativeLogicalTypesAvroTypeManager()).getTypeParameters())) {
+                new NativeLogicalTypesAvroTypeBlockHandler().typeFor(ALL_SUPPORTED_TYPES_SCHEMA).getTypeParameters(), false)) {
             fileWriter.write(ALL_SUPPORTED_PAGE);
         }
 
         try (AvroFileReader fileReader = new AvroFileReader(
                 trinoLocalFilesystem.newInputFile(testLocation),
                 ALL_SUPPORTED_TYPES_SCHEMA,
-                new NativeLogicalTypesAvroTypeManager())) {
+                new NativeLogicalTypesAvroTypeBlockHandler())) {
             assertThat(fileReader.hasNext()).isTrue();
             assertIsAllSupportedTypePage(fileReader.next());
             assertThat(fileReader.hasNext()).isFalse();

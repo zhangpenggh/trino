@@ -15,7 +15,10 @@ package io.trino.sql;
 
 import com.google.inject.Inject;
 import io.opentelemetry.api.trace.Tracer;
+import io.trino.execution.warnings.WarningCollector;
 import io.trino.metadata.FunctionManager;
+import io.trino.metadata.FunctionResolver;
+import io.trino.metadata.LanguageFunctionManager;
 import io.trino.metadata.Metadata;
 import io.trino.spi.block.BlockEncodingSerde;
 import io.trino.spi.type.TypeManager;
@@ -39,6 +42,7 @@ public class PlannerContext
     private final BlockEncodingSerde blockEncodingSerde;
     private final TypeManager typeManager;
     private final FunctionManager functionManager;
+    private final LanguageFunctionManager languageFunctionManager;
     private final Tracer tracer;
 
     @Inject
@@ -47,6 +51,7 @@ public class PlannerContext
             BlockEncodingSerde blockEncodingSerde,
             TypeManager typeManager,
             FunctionManager functionManager,
+            LanguageFunctionManager languageFunctionManager,
             Tracer tracer)
     {
         this.metadata = requireNonNull(metadata, "metadata is null");
@@ -54,6 +59,7 @@ public class PlannerContext
         this.blockEncodingSerde = requireNonNull(blockEncodingSerde, "blockEncodingSerde is null");
         this.typeManager = requireNonNull(typeManager, "typeManager is null");
         this.functionManager = requireNonNull(functionManager, "functionManager is null");
+        this.languageFunctionManager = requireNonNull(languageFunctionManager, "languageFunctionManager is null");
         this.tracer = requireNonNull(tracer, "tracer is null");
     }
 
@@ -80,6 +86,21 @@ public class PlannerContext
     public FunctionManager getFunctionManager()
     {
         return functionManager;
+    }
+
+    public FunctionResolver getFunctionResolver()
+    {
+        return getFunctionResolver(WarningCollector.NOOP);
+    }
+
+    public FunctionResolver getFunctionResolver(WarningCollector warningCollector)
+    {
+        return new FunctionResolver(metadata, typeManager, languageFunctionManager, warningCollector);
+    }
+
+    public LanguageFunctionManager getLanguageFunctionManager()
+    {
+        return languageFunctionManager;
     }
 
     public Tracer getTracer()

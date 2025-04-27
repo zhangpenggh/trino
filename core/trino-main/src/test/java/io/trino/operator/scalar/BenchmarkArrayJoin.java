@@ -22,10 +22,11 @@ import io.trino.operator.project.PageProcessor;
 import io.trino.spi.Page;
 import io.trino.spi.block.ArrayBlockBuilder;
 import io.trino.spi.block.Block;
+import io.trino.spi.connector.SourcePage;
 import io.trino.spi.type.ArrayType;
 import io.trino.sql.relational.CallExpression;
 import io.trino.sql.relational.RowExpression;
-import io.trino.sql.tree.QualifiedName;
+import org.junit.jupiter.api.Test;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
 import org.openjdk.jmh.annotations.Fork;
@@ -35,7 +36,6 @@ import org.openjdk.jmh.annotations.OutputTimeUnit;
 import org.openjdk.jmh.annotations.Scope;
 import org.openjdk.jmh.annotations.Setup;
 import org.openjdk.jmh.annotations.State;
-import org.testng.annotations.Test;
 
 import java.util.List;
 import java.util.Optional;
@@ -70,7 +70,7 @@ public class BenchmarkArrayJoin
                         SESSION,
                         new DriverYieldSignal(),
                         newSimpleAggregatedMemoryContext().newLocalMemoryContext(PageProcessor.class.getSimpleName()),
-                        data.getPage()));
+                        SourcePage.create(data.getPage())));
     }
 
     @SuppressWarnings("FieldMayBeFinal")
@@ -86,7 +86,7 @@ public class BenchmarkArrayJoin
             TestingFunctionResolution functionResolution = new TestingFunctionResolution();
 
             List<RowExpression> projections = ImmutableList.of(new CallExpression(
-                    functionResolution.resolveFunction(QualifiedName.of("array_join"), fromTypes(new ArrayType(BIGINT), VARCHAR)),
+                    functionResolution.resolveFunction("array_join", fromTypes(new ArrayType(BIGINT), VARCHAR)),
                     ImmutableList.of(field(0, new ArrayType(BIGINT)), constant(Slices.wrappedBuffer(",".getBytes(UTF_8)), VARCHAR))));
 
             pageProcessor = functionResolution.getExpressionCompiler()

@@ -158,10 +158,11 @@ For more details, see {doc}`comparison`
 
 For more details, see {doc}`conditional`
 
-- {ref}`coalesce <coalesce-function>`
-- {ref}`if <if-function>`
-- {ref}`nullif <nullif-function>`
-- {ref}`try <try-function>`
+- [case](case-expression)
+- [coalesce](coalesce-function)
+- [if](if-expression)
+- [nullif](nullif-function)
+- [try](try-function)
 
 ## Conversion
 
@@ -198,6 +199,7 @@ For more details, see {doc}`datetime`
 - {func}`last_day_of_month`
 - {func}`now`
 - {func}`parse_duration`
+- {func}`timezone`
 - {func}`to_iso8601`
 - {func}`to_milliseconds`
 - {func}`to_unixtime`
@@ -368,6 +370,7 @@ For more details, see {doc}`math`
 - {func}`ceil`
 - {func}`cos`
 - {func}`cosh`
+- {func}`cosine_distance`
 - {func}`cosine_similarity`
 - {func}`degrees`
 - {func}`e`
@@ -475,6 +478,7 @@ For more details, see {doc}`string`
 - {func}`luhn_check`
 - {func}`normalize`
 - {func}`position`
+- {func}`randmom_string`, catalog function of the [](/connector/faker)
 - {func}`replace`
 - {func}`reverse`
 - {func}`rpad`
@@ -499,6 +503,13 @@ For more details, see {doc}`string`
 For more details, see {doc}`system`
 
 - {func}`version`
+
+## Table
+
+For more details, see [](/functions/table)
+
+- [exclude_columns()](exclude-columns-table-function)
+- [sequence()](sequence-table-function)
 
 ## T-Digest
 

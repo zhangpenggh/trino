@@ -3,23 +3,20 @@
 PEM (Privacy Enhanced Mail) is a standard for public key and certificate
 information, and an encoding standard used to transmit keys and certificates.
 
-Trino supports PEM-encoded certificates. If you want to use other supported
-formats, see:
+Trino supports PEM files. If you want to use other supported formats, see:
 
 - {doc}`JKS keystores </security/inspect-jks>`
 - {ref}`PKCS 12 <glossPKCS12>` stores. (Look up alternate commands for these in
   `openssl` references.)
 
-A single PEM-encoded file can contain either certificate or key pair
-information, or both in the same file. Certified keys can contain a chain of
-certificates from successive certificate authorities.
+A single PEM file can contain either certificate or key pair information, or
+both in the same file. Certified keys can contain a chain of certificates from
+successive certificate authorities.
 
-Follow the steps in this topic to inspect and validate PEM-encoded key and
-certificate files. See {ref}`troubleshooting-keystore` to validate JKS
-keystores.
+Follow the steps in this topic to inspect and validate key and certificate in
+PEM files. See {ref}`troubleshooting-keystore` to validate JKS keystores.
 
 (inspect-pems)=
-
 ## Inspect PEM file
 
 The file name extensions shown on this page are examples only; there is no
@@ -75,7 +72,6 @@ The file can show a single certificate section, or more than one to express a
 chain of authorities, each certifying the previous.
 
 (validate-pems)=
-
 ## Validate PEM key section
 
 This page presumes your system provides the `openssl` command from OpenSSL 1.1
@@ -122,6 +118,5 @@ characteristics:
   `DNS:clustercoord.example.com`. Certificates without SANs are not
   supported.
 
-If your PEM certificate shows valid information for your cluster, proceed to
-configure the server, as described in {ref}`cert-placement` and
-{ref}`configure-https`.
+If your PEM file shows valid information for your cluster, proceed to configure
+the server, as described in {ref}`cert-placement` and {ref}`configure-https`.

@@ -22,14 +22,12 @@ import org.junit.jupiter.params.provider.MethodSource;
 import java.util.stream.Stream;
 
 import static java.util.concurrent.TimeUnit.SECONDS;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class TestSqlParserErrorHandling
 {
     private static final SqlParser SQL_PARSER = new SqlParser();
-    private static final ParsingOptions PARSING_OPTIONS = new ParsingOptions();
 
     private static Stream<Arguments> expressions()
     {
@@ -43,10 +41,10 @@ public class TestSqlParserErrorHandling
         return Stream.of(
                 Arguments.of("",
                         "line 1:1: mismatched input '<EOF>'. Expecting: 'ALTER', 'ANALYZE', 'CALL', 'COMMENT', 'COMMIT', 'CREATE', 'DEALLOCATE', 'DELETE', 'DENY', 'DESC', 'DESCRIBE', 'DROP', 'EXECUTE', 'EXPLAIN', 'GRANT', " +
-                                "'INSERT', 'MERGE', 'PREPARE', 'REFRESH', 'RESET', 'REVOKE', 'ROLLBACK', 'SET', 'SHOW', 'START', 'TRUNCATE', 'UPDATE', 'USE', <query>"),
+                                "'INSERT', 'MERGE', 'PREPARE', 'REFRESH', 'RESET', 'REVOKE', 'ROLLBACK', 'SET', 'SHOW', 'START', 'TRUNCATE', 'UPDATE', 'USE', 'WITH', <query>"),
                 Arguments.of("@select",
                         "line 1:1: mismatched input '@'. Expecting: 'ALTER', 'ANALYZE', 'CALL', 'COMMENT', 'COMMIT', 'CREATE', 'DEALLOCATE', 'DELETE', 'DENY', 'DESC', 'DESCRIBE', 'DROP', 'EXECUTE', 'EXPLAIN', 'GRANT', " +
-                                "'INSERT', 'MERGE', 'PREPARE', 'REFRESH', 'RESET', 'REVOKE', 'ROLLBACK', 'SET', 'SHOW', 'START', 'TRUNCATE', 'UPDATE', 'USE', <query>"),
+                                "'INSERT', 'MERGE', 'PREPARE', 'REFRESH', 'RESET', 'REVOKE', 'ROLLBACK', 'SET', 'SHOW', 'START', 'TRUNCATE', 'UPDATE', 'USE', 'WITH', <query>"),
                 Arguments.of("select * from foo where @what",
                         "line 1:25: mismatched input '@'. Expecting: <expression>"),
                 Arguments.of("select * from 'oops",
@@ -73,9 +71,9 @@ public class TestSqlParserErrorHandling
                 Arguments.of("select fuu from dual limit 10 order by fuu",
                         "line 1:31: mismatched input 'order'. Expecting: <EOF>"),
                 Arguments.of("select CAST(12223222232535343423232435343 AS BIGINT)",
-                        "line 1:1: Invalid numeric literal: 12223222232535343423232435343"),
+                        "line 1:13: Invalid numeric literal: 12223222232535343423232435343"),
                 Arguments.of("select CAST(-12223222232535343423232435343 AS BIGINT)",
-                        "line 1:1: Invalid numeric literal: -12223222232535343423232435343"),
+                        "line 1:13: Invalid numeric literal: -12223222232535343423232435343"),
                 Arguments.of("select foo.!",
                         "line 1:12: mismatched input '!'. Expecting: '*', <identifier>"),
                 Arguments.of("select foo(,1)",
@@ -87,7 +85,7 @@ public class TestSqlParserErrorHandling
                 Arguments.of("select foo(DISTINCT ,1)",
                         "line 1:21: mismatched input ','. Expecting: <expression>"),
                 Arguments.of("CREATE )",
-                        "line 1:8: mismatched input ')'. Expecting: 'CATALOG', 'MATERIALIZED', 'OR', 'ROLE', 'SCHEMA', 'TABLE', 'VIEW'"),
+                        "line 1:8: mismatched input ')'. Expecting: 'CATALOG', 'FUNCTION', 'MATERIALIZED', 'OR', 'ROLE', 'SCHEMA', 'TABLE', 'VIEW'"),
                 Arguments.of("CREATE TABLE ) AS (VALUES 1)",
                         "line 1:14: mismatched input ')'. Expecting: 'IF', <identifier>"),
                 Arguments.of("CREATE TABLE foo ",
@@ -107,7 +105,7 @@ public class TestSqlParserErrorHandling
                 Arguments.of("SELECT a FROM a AS x TABLESAMPLE x ",
                         "line 1:34: mismatched input 'x'. Expecting: 'BERNOULLI', 'SYSTEM'"),
                 Arguments.of("SELECT a AS z FROM t GROUP BY CUBE (a), ",
-                        "line 1:41: mismatched input '<EOF>'. Expecting: '(', 'CUBE', 'GROUPING', 'ROLLUP', <expression>"),
+                        "line 1:41: mismatched input '<EOF>'. Expecting: '(', 'AUTO', 'CUBE', 'GROUPING', 'ROLLUP', <expression>"),
                 Arguments.of("SELECT a AS z FROM t WHERE x = 1 + ",
                         "line 1:36: mismatched input '<EOF>'. Expecting: <expression>"),
                 Arguments.of("SELECT a AS z FROM t WHERE a. ",
@@ -221,7 +219,7 @@ public class TestSqlParserErrorHandling
     @MethodSource("statements")
     public void testStatement(String sql, String error)
     {
-        assertThatThrownBy(() -> SQL_PARSER.createStatement(sql, PARSING_OPTIONS))
+        assertThatThrownBy(() -> SQL_PARSER.createStatement(sql))
                 .isInstanceOf(ParsingException.class)
                 .hasMessage(error);
     }
@@ -230,7 +228,7 @@ public class TestSqlParserErrorHandling
     @MethodSource("expressions")
     public void testExpression(String sql, String error)
     {
-        assertThatThrownBy(() -> SQL_PARSER.createExpression(sql, PARSING_OPTIONS))
+        assertThatThrownBy(() -> SQL_PARSER.createExpression(sql))
                 .isInstanceOf(ParsingException.class)
                 .hasMessage(error);
     }
@@ -238,12 +236,12 @@ public class TestSqlParserErrorHandling
     @Test
     public void testParsingExceptionPositionInfo()
     {
-        assertThatThrownBy(() -> SQL_PARSER.createStatement("select *\nfrom x\nwhere from", PARSING_OPTIONS))
+        assertThatThrownBy(() -> SQL_PARSER.createStatement("select *\nfrom x\nwhere from"))
                 .isInstanceOfSatisfying(ParsingException.class, e -> {
-                    assertTrue(e.getMessage().startsWith("line 3:7: mismatched input 'from'"));
-                    assertTrue(e.getErrorMessage().startsWith("mismatched input 'from'"));
-                    assertEquals(3, e.getLineNumber());
-                    assertEquals(7, e.getColumnNumber());
+                    assertThat(e.getMessage().startsWith("line 3:7: mismatched input 'from'")).isTrue();
+                    assertThat(e.getErrorMessage().startsWith("mismatched input 'from'")).isTrue();
+                    assertThat(e.getLineNumber()).isEqualTo(3);
+                    assertThat(e.getColumnNumber()).isEqualTo(7);
                 });
     }
 
@@ -257,7 +255,7 @@ public class TestSqlParserErrorHandling
                         for (int i = 1; i < size; i++) {
                             expression = "(" + expression + ") OR x = y";
                         }
-                        SQL_PARSER.createExpression(expression, new ParsingOptions());
+                        SQL_PARSER.createExpression(expression);
                     }
                 })
                 .hasMessageContaining("line 1:1: expression is too large (stack overflow while parsing)");
@@ -273,7 +271,7 @@ public class TestSqlParserErrorHandling
                         for (int i = 1; i < size; i++) {
                             expression = "(" + expression + ") OR x = y";
                         }
-                        SQL_PARSER.createStatement("SELECT " + expression, PARSING_OPTIONS);
+                        SQL_PARSER.createStatement("SELECT " + expression);
                     }
                 })
                 .hasMessageContaining("line 1:1: statement is too large (stack overflow while parsing)");

@@ -23,8 +23,9 @@ The window can be specified in two ways (see {ref}`window-clause`):
 ## Aggregate functions
 
 All {doc}`aggregate` can be used as window functions by adding the `OVER`
-clause. The aggregate function is computed for each row over the rows within
-the current row's window frame.
+clause. The aggregate function is computed for each row over the rows within the
+current row's window frame. Note that [ordering during
+aggregation](aggregate-function-ordering-during-aggregation) is not supported.
 
 For example, the following query produces a rolling sum of order prices
 by day for each clerk:
@@ -44,12 +45,14 @@ Returns the cumulative distribution of a value in a group of values.
 The result is the number of rows preceding or peer with the row in the
 window ordering of the window partition divided by the total number of
 rows in the window partition. Thus, any tie values in the ordering will
-evaluate to the same distribution value.
+evaluate to the same distribution value. The window frame must not be 
+specified.
 :::
 
 :::{function} dense_rank() -> bigint
 Returns the rank of a value in a group of values. This is similar to
 {func}`rank`, except that tie values do not produce gaps in the sequence.
+The window frame must not be specified.
 :::
 
 :::{function} ntile(n) -> bigint
@@ -61,24 +64,29 @@ bucket, starting with the first bucket.
 
 For example, with `6` rows and `4` buckets, the bucket values would
 be as follows: `1` `1` `2` `2` `3` `4`
+
+For the {func}`ntile` function, the window frame must not be specified.
 :::
 
 :::{function} percent_rank() -> double
 Returns the percentage ranking of a value in group of values. The result
 is `(r - 1) / (n - 1)` where `r` is the {func}`rank` of the row and
-`n` is the total number of rows in the window partition.
+`n` is the total number of rows in the window partition. The window frame 
+must not be specified.
 :::
 
 :::{function} rank() -> bigint
 Returns the rank of a value in a group of values. The rank is one plus
 the number of rows preceding the row that are not peer with the row.
 Thus, tie values in the ordering will produce gaps in the sequence.
-The ranking is performed for each window partition.
+The ranking is performed for each window partition. The window frame must 
+not be specified.
 :::
 
 :::{function} row_number() -> bigint
 Returns a unique, sequential number for each row, starting with one,
-according to the ordering of rows within the window partition.
+according to the ordering of rows within the window partition. 
+The window frame must not be specified.
 :::
 
 ## Value functions
@@ -108,7 +116,7 @@ negative.
 Returns the value at `offset` rows after the current row in the window partition.
 Offsets start at `0`, which is the current row. The
 offset can be any scalar expression.  The default `offset` is `1`. If the
-offset is null, `null` is returned. If the offset refers to a row that is not
+offset is null, an error is raised. If the offset refers to a row that is not
 within the partition, the `default_value` is returned, or if it is not specified
 `null` is returned.
 The {func}`lead` function requires that the window ordering be specified.
@@ -119,7 +127,7 @@ Window frame must not be specified.
 Returns the value at `offset` rows before the current row in the window partition.
 Offsets start at `0`, which is the current row. The
 offset can be any scalar expression.  The default `offset` is `1`. If the
-offset is null, `null` is returned. If the offset refers to a row that is not
+offset is null, an error is raised. If the offset refers to a row that is not
 within the partition, the `default_value` is returned, or if it is not specified
 `null` is returned.
 The {func}`lag` function requires that the window ordering be specified.

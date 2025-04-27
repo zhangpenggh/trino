@@ -48,9 +48,8 @@ public final class ZipWithFunction
 
     private ZipWithFunction()
     {
-        super(FunctionMetadata.scalarBuilder()
+        super(FunctionMetadata.scalarBuilder("zip_with")
                 .signature(Signature.builder()
-                        .name("zip_with")
                         .typeVariable("T")
                         .typeVariable("U")
                         .typeVariable("R")
@@ -59,7 +58,6 @@ public final class ZipWithFunction
                         .argumentType(arrayType(new TypeSignature("U")))
                         .argumentType(functionType(new TypeSignature("T"), new TypeSignature("U"), new TypeSignature("R")))
                         .build())
-                .nondeterministic()
                 .description("Merge two arrays, element-wise, into a single array using the lambda function")
                 .build());
     }

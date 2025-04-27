@@ -21,8 +21,8 @@ import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.block.DictionaryBlock;
 import io.trino.spi.block.RunLengthEncodedBlock;
+import io.trino.spi.block.ValueBlock;
 import io.trino.spi.type.Type;
-import io.trino.sql.gen.JoinCompiler;
 
 import java.util.Arrays;
 import java.util.List;
@@ -32,8 +32,10 @@ import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.base.Verify.verify;
 import static io.airlift.slice.SizeOf.instanceSize;
 import static io.airlift.slice.SizeOf.sizeOf;
+import static io.trino.operator.FlatHash.sumExact;
 import static java.lang.Math.min;
 import static java.lang.Math.multiplyExact;
+import static java.util.Objects.requireNonNull;
 
 // This implementation assumes arrays used in the hash are always a power of 2
 public class FlatGroupByHash
@@ -44,9 +46,9 @@ public class FlatGroupByHash
     // Max (page value count / cumulative dictionary size) to trigger the low cardinality case
     private static final double SMALL_DICTIONARIES_MAX_CARDINALITY_RATIO = 0.25;
 
+    private final GroupByHashMode hashMode;
     private final FlatHash flatHash;
     private final int groupByChannelCount;
-    private final boolean hasPrecomputedHash;
 
     private final boolean processDictionary;
 
@@ -57,31 +59,51 @@ public class FlatGroupByHash
     // reusable arrays for the blocks and block builders
     private final Block[] currentBlocks;
     private final BlockBuilder[] currentBlockBuilders;
+    // reusable array for computing hash batches into
+    private long[] currentHashes;
 
     public FlatGroupByHash(
             List<Type> hashTypes,
-            boolean hasPrecomputedHash,
+            GroupByHashMode hashMode,
             int expectedSize,
             boolean processDictionary,
-            JoinCompiler joinCompiler,
+            FlatHashStrategyCompiler hashStrategyCompiler,
             UpdateMemory checkMemoryReservation)
     {
-        this.flatHash = new FlatHash(joinCompiler.getFlatHashStrategy(hashTypes), hasPrecomputedHash, expectedSize, checkMemoryReservation);
+        this.hashMode = requireNonNull(hashMode, "hashMode is null");
+        this.flatHash = new FlatHash(hashStrategyCompiler.getFlatHashStrategy(hashTypes), hashMode, expectedSize, checkMemoryReservation);
         this.groupByChannelCount = hashTypes.size();
-        this.hasPrecomputedHash = hasPrecomputedHash;
 
         checkArgument(expectedSize > 0, "expectedSize must be greater than zero");
 
-        int totalChannels = hashTypes.size() + (hasPrecomputedHash ? 1 : 0);
+        int totalChannels = hashTypes.size() + (hashMode.isHashPrecomputed() ? 1 : 0);
         this.currentBlocks = new Block[totalChannels];
         this.currentBlockBuilders = new BlockBuilder[totalChannels];
 
         this.processDictionary = processDictionary && hashTypes.size() == 1;
     }
 
-    public int getPhysicalPosition(int groupId)
+    public FlatGroupByHash(FlatGroupByHash other)
     {
-        return flatHash.getPhysicalPosition(groupId);
+        this.flatHash = other.flatHash.copy();
+        groupByChannelCount = other.groupByChannelCount;
+        hashMode = other.hashMode;
+        processDictionary = other.processDictionary;
+        dictionaryLookBack = other.dictionaryLookBack == null ? null : other.dictionaryLookBack.copy();
+        currentPageSizeInBytes = other.currentPageSizeInBytes;
+        currentBlocks = Arrays.copyOf(other.currentBlocks, other.currentBlocks.length);
+        currentBlockBuilders = Arrays.stream(other.currentBlockBuilders)
+                .map(builder -> {
+                    if (builder == null) {
+                        return null;
+                    }
+                    ValueBlock valueBlock = builder.buildValueBlock();
+                    BlockBuilder newBuilder = builder.newBlockBuilderLike(null);
+                    newBuilder.appendRange(valueBlock, 0, valueBlock.getPositionCount());
+                    return newBuilder;
+                })
+                .toArray(BlockBuilder[]::new);
+        currentHashes = other.currentHashes == null ? null : Arrays.copyOf(other.currentHashes, other.currentHashes.length);
     }
 
     @Override
@@ -93,10 +115,12 @@ public class FlatGroupByHash
     @Override
     public long getEstimatedSize()
     {
-        return INSTANCE_SIZE +
-                flatHash.getEstimatedSize() +
-                currentPageSizeInBytes +
-                (dictionaryLookBack != null ? dictionaryLookBack.getRetainedSizeInBytes() : 0);
+        return sumExact(
+                INSTANCE_SIZE,
+                flatHash.getEstimatedSize(),
+                currentPageSizeInBytes,
+                sizeOf(currentHashes),
+                (dictionaryLookBack != null ? dictionaryLookBack.getRetainedSizeInBytes() : 0));
     }
 
     @Override
@@ -168,9 +192,23 @@ public class FlatGroupByHash
         return flatHash.getCapacity();
     }
 
+    @Override
+    public GroupByHash copy()
+    {
+        return new FlatGroupByHash(this);
+    }
+
     private int putIfAbsent(Block[] blocks, int position)
     {
         return flatHash.putIfAbsent(blocks, position);
+    }
+
+    private long[] getHashesBufferArray()
+    {
+        if (currentHashes == null) {
+            currentHashes = new long[BATCH_SIZE];
+        }
+        return currentHashes;
     }
 
     private Block[] getBlocksFromPage(Page page)
@@ -196,7 +234,7 @@ public class FlatGroupByHash
             return false;
         }
 
-        if (!hasPrecomputedHash) {
+        if (!hashMode.isHashPrecomputed()) {
             return true;
         }
 
@@ -257,6 +295,12 @@ public class FlatGroupByHash
             Arrays.fill(processed, -1);
         }
 
+        private DictionaryLookBack(DictionaryLookBack other)
+        {
+            dictionary = other.dictionary;
+            processed = Arrays.copyOf(other.processed, other.processed.length);
+        }
+
         public Block getDictionary()
         {
             return dictionary;
@@ -279,9 +323,15 @@ public class FlatGroupByHash
 
         public long getRetainedSizeInBytes()
         {
-            return INSTANCE_SIZE +
-                    sizeOf(processed) +
-                    dictionary.getRetainedSizeInBytes();
+            return sumExact(
+                    INSTANCE_SIZE,
+                    sizeOf(processed),
+                    dictionary.getRetainedSizeInBytes());
+        }
+
+        public DictionaryLookBack copy()
+        {
+            return new DictionaryLookBack(this);
         }
     }
 
@@ -305,14 +355,16 @@ public class FlatGroupByHash
 
             int remainingPositions = positionCount - lastPosition;
 
+            long[] hashes = getHashesBufferArray();
             while (remainingPositions != 0) {
-                int batchSize = min(remainingPositions, BATCH_SIZE);
+                int batchSize = min(remainingPositions, hashes.length);
                 if (!flatHash.ensureAvailableCapacity(batchSize)) {
                     return false;
                 }
 
-                for (int i = lastPosition; i < lastPosition + batchSize; i++) {
-                    putIfAbsent(blocks, i);
+                flatHash.computeHashes(blocks, hashes, lastPosition, batchSize);
+                for (int i = 0; i < batchSize; i++) {
+                    flatHash.putIfAbsent(blocks, lastPosition + i, hashes[i]);
                 }
 
                 lastPosition += batchSize;
@@ -470,14 +522,16 @@ public class FlatGroupByHash
 
             int remainingPositions = positionCount - lastPosition;
 
+            long[] hashes = getHashesBufferArray();
             while (remainingPositions != 0) {
-                int batchSize = min(remainingPositions, BATCH_SIZE);
+                int batchSize = min(remainingPositions, hashes.length);
                 if (!flatHash.ensureAvailableCapacity(batchSize)) {
                     return false;
                 }
 
-                for (int i = lastPosition; i < lastPosition + batchSize; i++) {
-                    groupIds[i] = putIfAbsent(blocks, i);
+                flatHash.computeHashes(blocks, hashes, lastPosition, batchSize);
+                for (int i = 0, position = lastPosition; i < batchSize; i++, position++) {
+                    groupIds[position] = flatHash.putIfAbsent(blocks, position, hashes[i]);
                 }
 
                 lastPosition += batchSize;

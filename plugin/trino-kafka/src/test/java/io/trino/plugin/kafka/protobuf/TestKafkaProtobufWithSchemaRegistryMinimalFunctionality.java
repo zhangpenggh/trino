@@ -28,13 +28,14 @@ import io.confluent.kafka.schemaregistry.protobuf.ProtobufSchemaProvider;
 import io.confluent.kafka.serializers.protobuf.KafkaProtobufSerializer;
 import io.confluent.kafka.serializers.subject.RecordNameStrategy;
 import io.confluent.kafka.serializers.subject.TopicRecordNameStrategy;
-import io.trino.plugin.kafka.schema.confluent.KafkaWithConfluentSchemaRegistryQueryRunner;
+import io.trino.plugin.kafka.KafkaQueryRunner;
 import io.trino.spi.type.SqlTimestamp;
 import io.trino.testing.AbstractTestQueryFramework;
 import io.trino.testing.QueryRunner;
 import io.trino.testing.kafka.TestingKafka;
 import org.apache.kafka.clients.producer.ProducerRecord;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.Execution;
 
 import java.io.File;
 import java.net.URI;
@@ -46,8 +47,8 @@ import java.util.Map;
 import static com.google.common.io.Resources.getResource;
 import static com.google.protobuf.Descriptors.FieldDescriptor.JavaType.ENUM;
 import static com.google.protobuf.Descriptors.FieldDescriptor.JavaType.STRING;
-import static io.confluent.kafka.serializers.AbstractKafkaAvroSerDeConfig.SCHEMA_REGISTRY_URL_CONFIG;
-import static io.confluent.kafka.serializers.AbstractKafkaAvroSerDeConfig.VALUE_SUBJECT_NAME_STRATEGY;
+import static io.confluent.kafka.serializers.AbstractKafkaSchemaSerDeConfig.SCHEMA_REGISTRY_URL_CONFIG;
+import static io.confluent.kafka.serializers.AbstractKafkaSchemaSerDeConfig.VALUE_SUBJECT_NAME_STRATEGY;
 import static io.trino.decoder.protobuf.ProtobufRowDecoderFactory.DEFAULT_MESSAGE;
 import static io.trino.decoder.protobuf.ProtobufUtils.getFileDescriptor;
 import static io.trino.decoder.protobuf.ProtobufUtils.getProtoFile;
@@ -64,9 +65,9 @@ import static java.util.Objects.requireNonNull;
 import static org.apache.kafka.clients.producer.ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG;
 import static org.apache.kafka.clients.producer.ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.testng.Assert.assertTrue;
+import static org.junit.jupiter.api.parallel.ExecutionMode.SAME_THREAD;
 
-@Test(singleThreaded = true)
+@Execution(SAME_THREAD)
 public class TestKafkaProtobufWithSchemaRegistryMinimalFunctionality
         extends AbstractTestQueryFramework
 {
@@ -80,7 +81,9 @@ public class TestKafkaProtobufWithSchemaRegistryMinimalFunctionality
             throws Exception
     {
         testingKafka = closeAfterClass(TestingKafka.createWithSchemaRegistry());
-        return KafkaWithConfluentSchemaRegistryQueryRunner.builder(testingKafka).build();
+        testingKafka.start();
+        return KafkaQueryRunner.builderForConfluentSchemaRegistry(testingKafka)
+                .build();
     }
 
     @Test
@@ -223,7 +226,8 @@ public class TestKafkaProtobufWithSchemaRegistryMinimalFunctionality
         waitUntilTableExists(topic);
 
         assertThat(query(format("SELECT list, map, row FROM %s", toDoubleQuoted(topic))))
-                .matches("""
+                .matches(
+                        """
                         VALUES (
                             ARRAY[CAST('Search' AS VARCHAR)],
                             MAP(CAST(ARRAY['Key1'] AS ARRAY(VARCHAR)), CAST(ARRAY['Value1'] AS ARRAY(VARCHAR))),
@@ -237,7 +241,8 @@ public class TestKafkaProtobufWithSchemaRegistryMinimalFunctionality
                                     boolean_column BOOLEAN,
                                     number_column VARCHAR,
                                     timestamp_column TIMESTAMP(6),
-                                    bytes_column VARBINARY)))""");
+                                    bytes_column VARBINARY)))
+                        """);
     }
 
     @Test
@@ -263,7 +268,8 @@ public class TestKafkaProtobufWithSchemaRegistryMinimalFunctionality
         waitUntilTableExists(topic);
 
         assertThat(query(format("SELECT testOneOfColumn FROM %s", toDoubleQuoted(topic))))
-                .matches("""
+                .matches(
+                        """
                         VALUES (JSON '{"stringColumn":"%s"}')
                         """.formatted(stringData));
     }
@@ -317,7 +323,8 @@ public class TestKafkaProtobufWithSchemaRegistryMinimalFunctionality
 
         URI anySchemaFile = new File(Resources.getResource("protobuf/any/structural_datatypes/schema").getFile()).toURI();
         assertThat(query(format("SELECT id, anyMessage FROM %s", toDoubleQuoted(topic))))
-                .matches("""
+                .matches(
+                        """
                         VALUES (1, JSON '{"@type":"%s","list":["Search"],"map":{"Key1":"Value1"},"row":{"booleanColumn":true,"bytesColumn":"VHJpbm8=","doubleColumn":3.141592653589793,"floatColumn":3.14,"integerColumn":1,"longColumn":"493857959588286460","numberColumn":"ONE","stringColumn":"Trino","timestampColumn":"2020-12-12T15:35:45.923Z"}}')
                         """.formatted(anySchemaFile));
     }
@@ -431,13 +438,13 @@ public class TestKafkaProtobufWithSchemaRegistryMinimalFunctionality
                                 .withMaxAttempts(10)
                                 .withDelay(Duration.ofMillis(100))
                                 .build())
-                .run(() -> assertTrue(schemaExists()));
+                .run(() -> assertThat(schemaExists()).isTrue());
         Failsafe.with(
                         RetryPolicy.builder()
                                 .withMaxAttempts(10)
                                 .withDelay(Duration.ofMillis(100))
                                 .build())
-                .run(() -> assertTrue(tableExists(tableName)));
+                .run(() -> assertThat(tableExists(tableName)).isTrue());
     }
 
     private boolean schemaExists()

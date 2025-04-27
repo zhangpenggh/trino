@@ -22,22 +22,23 @@ import io.airlift.slice.Slice;
 import io.trino.metadata.SqlScalarFunction;
 import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
+import io.trino.spi.block.SqlMap;
+import io.trino.spi.function.Constraint;
 import io.trino.spi.function.Convention;
 import io.trino.spi.function.Description;
 import io.trino.spi.function.LiteralParameter;
 import io.trino.spi.function.LiteralParameters;
 import io.trino.spi.function.OperatorDependency;
 import io.trino.spi.function.ScalarFunction;
-import io.trino.spi.function.Signature;
 import io.trino.spi.function.SqlNullable;
 import io.trino.spi.function.SqlType;
 import io.trino.spi.type.Decimals;
 import io.trino.spi.type.Int128;
 import io.trino.spi.type.StandardTypes;
 import io.trino.type.BlockTypeOperators.BlockPositionHashCode;
-import io.trino.type.BlockTypeOperators.BlockPositionIsDistinctFrom;
-import io.trino.type.Constraint;
+import io.trino.type.BlockTypeOperators.BlockPositionIsIdentical;
 import org.apache.commons.math3.distribution.BetaDistribution;
+import org.apache.commons.math3.distribution.TDistribution;
 import org.apache.commons.math3.special.Erf;
 
 import java.math.BigInteger;
@@ -51,7 +52,7 @@ import static io.trino.spi.function.InvocationConvention.InvocationArgumentConve
 import static io.trino.spi.function.InvocationConvention.InvocationReturnConvention.FAIL_ON_NULL;
 import static io.trino.spi.function.InvocationConvention.InvocationReturnConvention.NULLABLE_RETURN;
 import static io.trino.spi.function.OperatorType.HASH_CODE;
-import static io.trino.spi.function.OperatorType.IS_DISTINCT_FROM;
+import static io.trino.spi.function.OperatorType.IDENTICAL;
 import static io.trino.spi.type.Decimals.longTenToNth;
 import static io.trino.spi.type.Decimals.overflows;
 import static io.trino.spi.type.DoubleType.DOUBLE;
@@ -62,7 +63,6 @@ import static io.trino.spi.type.Int128Math.rescaleTruncate;
 import static io.trino.spi.type.Int128Math.subtract;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.type.DecimalOperators.modulusScalarFunction;
-import static io.trino.type.DecimalOperators.modulusSignatureBuilder;
 import static io.trino.util.Failures.checkCondition;
 import static java.lang.Character.MAX_RADIX;
 import static java.lang.Character.MIN_RADIX;
@@ -73,7 +73,7 @@ import static java.lang.String.format;
 
 public final class MathFunctions
 {
-    public static final SqlScalarFunction DECIMAL_MOD_FUNCTION = decimalModFunction();
+    public static final SqlScalarFunction DECIMAL_MOD_FUNCTION = modulusScalarFunction();
 
     private static final Int128[] DECIMAL_HALF_UNSCALED_FOR_SCALE;
     private static final Int128[] DECIMAL_ALMOST_HALF_UNSCALED_FOR_SCALE;
@@ -537,10 +537,7 @@ public final class MathFunctions
 
     private static SqlScalarFunction decimalModFunction()
     {
-        Signature signature = modulusSignatureBuilder()
-                .name("mod")
-                .build();
-        return modulusScalarFunction(signature);
+        return modulusScalarFunction();
     }
 
     @Description("Remainder of given quotient")
@@ -704,6 +701,32 @@ public final class MathFunctions
         checkCondition(a > 0 && b > 0, INVALID_FUNCTION_ARGUMENT, "a, b must be > 0");
         BetaDistribution distribution = new BetaDistribution(null, a, b, BetaDistribution.DEFAULT_INVERSE_ABSOLUTE_ACCURACY);
         return distribution.cumulativeProbability(value);
+    }
+
+    @Description("Student's t-distribution cumulative density function given the x and degrees of freedom")
+    @ScalarFunction
+    @SqlType(StandardTypes.DOUBLE)
+    public static double tCdf(
+            @SqlType(StandardTypes.DOUBLE) double x,
+            @SqlType(StandardTypes.DOUBLE) double degreesOfFreedom)
+    {
+        if (degreesOfFreedom < 1) {
+            throw new TrinoException(INVALID_FUNCTION_ARGUMENT, "degrees of freedom must be greater than or equal to 1");
+        }
+        return new TDistribution(degreesOfFreedom).cumulativeProbability(x);
+    }
+
+    @Description("Student's t-distribution given the x and degrees of freedom")
+    @ScalarFunction
+    @SqlType(StandardTypes.DOUBLE)
+    public static double tPdf(
+            @SqlType(StandardTypes.DOUBLE) double x,
+            @SqlType(StandardTypes.DOUBLE) double degreesOfFreedom)
+    {
+        if (degreesOfFreedom < 1) {
+            throw new TrinoException(INVALID_FUNCTION_ARGUMENT, "degrees of freedom must be greater than or equal to 1");
+        }
+        return new TDistribution(degreesOfFreedom).density(x);
     }
 
     @Description("Round to nearest integer")
@@ -932,6 +955,8 @@ public final class MathFunctions
     @Description("Round to given number of decimal places")
     public static final class RoundN
     {
+        private RoundN() {}
+
         @LiteralParameters({"p", "s", "rp"})
         @SqlType("decimal(rp, s)")
         @Constraint(variable = "rp", expression = "min(38, p + 1)")
@@ -1001,6 +1026,8 @@ public final class MathFunctions
     @Description("Round to integer by dropping digits after decimal point")
     public static final class Truncate
     {
+        private Truncate() {}
+
         @LiteralParameters({"p", "s", "rp"})
         @SqlType("decimal(rp,0)")
         @Constraint(variable = "rp", expression = "max(1, p - s)")
@@ -1154,7 +1181,7 @@ public final class MathFunctions
     @SqlType(StandardTypes.REAL)
     public static long signFloat(@SqlType(StandardTypes.REAL) long num)
     {
-        return floatToRawIntBits((Math.signum(intBitsToFloat((int) num))));
+        return floatToRawIntBits(Math.signum(intBitsToFloat((int) num)));
     }
 
     @Description("Sine")
@@ -1359,15 +1386,15 @@ public final class MathFunctions
     @SqlType(StandardTypes.DOUBLE)
     public static Double cosineSimilarity(
             @OperatorDependency(
-                    operator = IS_DISTINCT_FROM,
+                    operator = IDENTICAL,
                     argumentTypes = {"varchar", "varchar"},
-                    convention = @Convention(arguments = {BLOCK_POSITION, BLOCK_POSITION}, result = NULLABLE_RETURN)) BlockPositionIsDistinctFrom varcharDistinct,
+                    convention = @Convention(arguments = {BLOCK_POSITION, BLOCK_POSITION}, result = NULLABLE_RETURN)) BlockPositionIsIdentical varcharIdentical,
             @OperatorDependency(
                     operator = HASH_CODE,
                     argumentTypes = "varchar",
                     convention = @Convention(arguments = BLOCK_POSITION, result = FAIL_ON_NULL)) BlockPositionHashCode varcharHashCode,
-            @SqlType("map(varchar,double)") Block leftMap,
-            @SqlType("map(varchar,double)") Block rightMap)
+            @SqlType("map(varchar,double)") SqlMap leftMap,
+            @SqlType("map(varchar,double)") SqlMap rightMap)
     {
         Double normLeftMap = mapL2Norm(leftMap);
         Double normRightMap = mapL2Norm(rightMap);
@@ -1376,42 +1403,52 @@ public final class MathFunctions
             return null;
         }
 
-        double dotProduct = mapDotProduct(varcharDistinct, varcharHashCode, leftMap, rightMap);
+        double dotProduct = mapDotProduct(varcharIdentical, varcharHashCode, leftMap, rightMap);
 
         return dotProduct / (normLeftMap * normRightMap);
     }
 
-    private static double mapDotProduct(BlockPositionIsDistinctFrom varcharDistinct, BlockPositionHashCode varcharHashCode, Block leftMap, Block rightMap)
+    private static double mapDotProduct(BlockPositionIsIdentical varcharIdentical, BlockPositionHashCode varcharHashCode, SqlMap leftMap, SqlMap rightMap)
     {
-        BlockSet rightMapKeys = new BlockSet(VARCHAR, varcharDistinct, varcharHashCode, rightMap.getPositionCount() / 2);
+        int leftRawOffset = leftMap.getRawOffset();
+        Block leftRawKeyBlock = leftMap.getRawKeyBlock();
+        Block leftRawValueBlock = leftMap.getRawValueBlock();
+        int rightRawOffset = rightMap.getRawOffset();
+        Block rightRawKeyBlock = rightMap.getRawKeyBlock();
+        Block rightRawValueBlock = rightMap.getRawValueBlock();
 
-        for (int i = 0; i < rightMap.getPositionCount(); i += 2) {
-            rightMapKeys.add(rightMap, i);
+        BlockSet rightMapKeys = new BlockSet(VARCHAR, varcharIdentical, varcharHashCode, rightMap.getSize());
+
+        for (int i = 0; i < rightMap.getSize(); i++) {
+            rightMapKeys.add(rightRawKeyBlock, rightRawOffset + i);
         }
 
         double result = 0.0;
 
-        for (int i = 0; i < leftMap.getPositionCount(); i += 2) {
-            int position = rightMapKeys.positionOf(leftMap, i);
+        for (int leftIndex = 0; leftIndex < leftMap.getSize(); leftIndex++) {
+            int rightIndex = rightMapKeys.positionOf(leftRawKeyBlock, leftRawOffset + leftIndex);
 
-            if (position != -1) {
-                result += DOUBLE.getDouble(leftMap, i + 1) *
-                        DOUBLE.getDouble(rightMap, 2 * position + 1);
+            if (rightIndex != -1) {
+                result += DOUBLE.getDouble(leftRawValueBlock, leftRawOffset + leftIndex) *
+                        DOUBLE.getDouble(rightRawValueBlock, rightRawOffset + rightIndex);
             }
         }
 
         return result;
     }
 
-    private static Double mapL2Norm(Block map)
+    private static Double mapL2Norm(SqlMap map)
     {
+        int rawOffset = map.getRawOffset();
+        Block rawValueBlock = map.getRawValueBlock();
+
         double norm = 0.0;
 
-        for (int i = 1; i < map.getPositionCount(); i += 2) {
-            if (map.isNull(i)) {
+        for (int i = 0; i < map.getSize(); i++) {
+            if (rawValueBlock.isNull(rawOffset + i)) {
                 return null;
             }
-            norm += DOUBLE.getDouble(map, i) * DOUBLE.getDouble(map, i);
+            norm += DOUBLE.getDouble(rawValueBlock, rawOffset + i) * DOUBLE.getDouble(rawValueBlock, rawOffset + i);
         }
 
         return Math.sqrt(norm);

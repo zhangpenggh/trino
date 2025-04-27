@@ -25,6 +25,7 @@ import io.trino.spi.Page;
 import io.trino.spi.block.ArrayBlockBuilder;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.connector.SourcePage;
 import io.trino.spi.function.BoundSignature;
 import io.trino.spi.function.FunctionMetadata;
 import io.trino.spi.function.Signature;
@@ -33,12 +34,12 @@ import io.trino.spi.type.RowType;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeSignature;
 import io.trino.sql.gen.ExpressionCompiler;
+import io.trino.sql.planner.Symbol;
 import io.trino.sql.relational.CallExpression;
 import io.trino.sql.relational.LambdaDefinitionExpression;
 import io.trino.sql.relational.RowExpression;
 import io.trino.sql.relational.SpecialForm;
 import io.trino.sql.relational.VariableReferenceExpression;
-import io.trino.sql.tree.QualifiedName;
 import io.trino.type.FunctionType;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
@@ -112,7 +113,7 @@ public class BenchmarkArrayFilter
                         SESSION,
                         new DriverYieldSignal(),
                         newSimpleAggregatedMemoryContext().newLocalMemoryContext(PageProcessor.class.getSimpleName()),
-                        data.getPage()));
+                        SourcePage.create(data.getPage())));
     }
 
     @Benchmark
@@ -124,7 +125,7 @@ public class BenchmarkArrayFilter
                         SESSION,
                         new DriverYieldSignal(),
                         newSimpleAggregatedMemoryContext().newLocalMemoryContext(PageProcessor.class.getSimpleName()),
-                        data.getPage()));
+                        SourcePage.create(data.getPage())));
     }
 
     @SuppressWarnings("FieldMayBeFinal")
@@ -148,14 +149,13 @@ public class BenchmarkArrayFilter
                 Type elementType = TYPES.get(i);
                 ArrayType arrayType = new ArrayType(elementType);
                 ResolvedFunction resolvedFunction = functionResolution.resolveFunction(
-                        QualifiedName.of(name),
+                        name,
                         fromTypes(arrayType, new FunctionType(ImmutableList.of(BIGINT), BOOLEAN)));
                 ResolvedFunction lessThan = functionResolution.resolveOperator(LESS_THAN, ImmutableList.of(BIGINT, BIGINT));
                 projectionsBuilder.add(new CallExpression(resolvedFunction, ImmutableList.of(
                         field(0, arrayType),
                         new LambdaDefinitionExpression(
-                                ImmutableList.of(BIGINT),
-                                ImmutableList.of("x"),
+                                ImmutableList.of(new Symbol(BIGINT, "x")),
                                 new CallExpression(lessThan, ImmutableList.of(constant(0L, BIGINT), new VariableReferenceExpression("x", BIGINT)))))));
                 blocks[i] = createChannel(POSITIONS, ARRAY_SIZE, arrayType);
             }
@@ -214,16 +214,13 @@ public class BenchmarkArrayFilter
             for (int i = 0; i < ROW_TYPES.size(); i++) {
                 Type elementType = ROW_TYPES.get(i);
                 ArrayType arrayType = new ArrayType(elementType);
-                ResolvedFunction resolvedFunction = functionResolution.resolveFunction(
-                        QualifiedName.of(name),
-                        fromTypes(arrayType, new FunctionType(ROW_TYPES, BOOLEAN)));
+                ResolvedFunction resolvedFunction = functionResolution.resolveFunction(name, fromTypes(arrayType, new FunctionType(ROW_TYPES, BOOLEAN)));
                 ResolvedFunction lessThan = functionResolution.resolveOperator(LESS_THAN, ImmutableList.of(BIGINT, BIGINT));
 
                 projectionsBuilder.add(new CallExpression(resolvedFunction, ImmutableList.of(
                         field(0, arrayType),
                         new LambdaDefinitionExpression(
-                                ImmutableList.of(elementType),
-                                ImmutableList.of("x"),
+                                ImmutableList.of(new Symbol(elementType, "x")),
                                 new CallExpression(
                                         lessThan,
                                         ImmutableList.of(
@@ -231,8 +228,8 @@ public class BenchmarkArrayFilter
                                                 new SpecialForm(
                                                         DEREFERENCE,
                                                         BIGINT,
-                                                        new VariableReferenceExpression("x", elementType),
-                                                        constant(0, INTEGER))))))));
+                                                        ImmutableList.of(new VariableReferenceExpression("x", elementType), constant(0, INTEGER)),
+                                                        ImmutableList.of())))))));
                 blocks[i] = createChannel(POSITIONS, arrayType);
             }
 
@@ -284,9 +281,8 @@ public class BenchmarkArrayFilter
 
         private ExactArrayFilterFunction()
         {
-            super(FunctionMetadata.scalarBuilder()
+            super(FunctionMetadata.scalarBuilder("exact_filter")
                     .signature(Signature.builder()
-                            .name("exact_filter")
                             .typeVariable("T")
                             .returnType(arrayType(new TypeSignature("T")))
                             .argumentType(arrayType(new TypeSignature("T")))
@@ -339,9 +335,8 @@ public class BenchmarkArrayFilter
 
         private ExactArrayFilterObjectFunction()
         {
-            super(FunctionMetadata.scalarBuilder()
+            super(FunctionMetadata.scalarBuilder("exact_filter")
                     .signature(Signature.builder()
-                            .name("exact_filter")
                             .typeVariable("T")
                             .returnType(arrayType(new TypeSignature("T")))
                             .argumentType(arrayType(new TypeSignature("T")))

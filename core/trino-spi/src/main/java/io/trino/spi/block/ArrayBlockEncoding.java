@@ -32,9 +32,15 @@ public class ArrayBlockEncoding
     }
 
     @Override
+    public Class<? extends Block> getBlockClass()
+    {
+        return ArrayBlock.class;
+    }
+
+    @Override
     public void writeBlock(BlockEncodingSerde blockEncodingSerde, SliceOutput sliceOutput, Block block)
     {
-        AbstractArrayBlock arrayBlock = (AbstractArrayBlock) block;
+        ArrayBlock arrayBlock = (ArrayBlock) block;
 
         int positionCount = arrayBlock.getPositionCount();
 
@@ -50,11 +56,11 @@ public class ArrayBlockEncoding
         for (int position = 0; position < positionCount + 1; position++) {
             sliceOutput.writeInt(offsets[offsetBase + position] - valuesStartOffset);
         }
-        encodeNullsAsBits(sliceOutput, block);
+        encodeNullsAsBits(sliceOutput, arrayBlock);
     }
 
     @Override
-    public Block readBlock(BlockEncodingSerde blockEncodingSerde, SliceInput sliceInput)
+    public ArrayBlock readBlock(BlockEncodingSerde blockEncodingSerde, SliceInput sliceInput)
     {
         Block values = blockEncodingSerde.readBlock(sliceInput);
 

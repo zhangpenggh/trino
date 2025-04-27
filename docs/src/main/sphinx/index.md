@@ -10,7 +10,9 @@ security
 admin
 optimizer
 connector
+object-storage
 functions
+udf
 language
 sql
 develop

@@ -29,6 +29,7 @@ import io.trino.spi.connector.RecordSet;
 import io.trino.spi.type.Type;
 
 import javax.management.Attribute;
+import javax.management.InstanceNotFoundException;
 import javax.management.JMException;
 import javax.management.MBeanServer;
 import javax.management.ObjectName;
@@ -69,23 +70,23 @@ public class JmxRecordSetProvider
 
         for (ColumnHandle column : columns) {
             JmxColumnHandle jmxColumn = (JmxColumnHandle) column;
-            if (jmxColumn.getColumnName().equals(JmxMetadata.NODE_COLUMN_NAME)) {
+            if (jmxColumn.columnName().equals(JmxMetadata.NODE_COLUMN_NAME)) {
                 row.add(nodeId);
             }
-            else if (jmxColumn.getColumnName().equals(JmxMetadata.OBJECT_NAME_NAME)) {
+            else if (jmxColumn.columnName().equals(JmxMetadata.OBJECT_NAME_NAME)) {
                 row.add(objectName);
             }
-            else if (jmxColumn.getColumnName().equals(JmxMetadata.TIMESTAMP_COLUMN_NAME)) {
+            else if (jmxColumn.columnName().equals(JmxMetadata.TIMESTAMP_COLUMN_NAME)) {
                 row.add(packDateTimeWithZone(entryTimestamp, UTC_KEY));
             }
             else {
-                Optional<Object> optionalValue = attributes.get(jmxColumn.getColumnName());
+                Optional<Object> optionalValue = attributes.get(jmxColumn.columnName());
                 if (optionalValue == null || optionalValue.isEmpty()) {
                     row.add(null);
                 }
                 else {
                     Object value = optionalValue.get();
-                    Class<?> javaType = jmxColumn.getColumnType().getJavaType();
+                    Class<?> javaType = jmxColumn.columnType().getJavaType();
                     if (javaType == boolean.class) {
                         if (value instanceof Boolean) {
                             row.add(value);
@@ -96,8 +97,8 @@ public class JmxRecordSetProvider
                         }
                     }
                     else if (javaType == long.class) {
-                        if (value instanceof Number) {
-                            row.add(((Number) value).longValue());
+                        if (value instanceof Number number) {
+                            row.add(number.longValue());
                         }
                         else {
                             // mbeans can lie about types
@@ -105,8 +106,8 @@ public class JmxRecordSetProvider
                         }
                     }
                     else if (javaType == double.class) {
-                        if (value instanceof Number) {
-                            row.add(((Number) value).doubleValue());
+                        if (value instanceof Number number) {
+                            row.add(number.doubleValue());
                         }
                         else {
                             // mbeans can lie about types
@@ -164,12 +165,12 @@ public class JmxRecordSetProvider
 
         List<List<Object>> rows;
         try {
-            if (tableHandle.isLiveData()) {
+            if (tableHandle.liveData()) {
                 rows = getLiveRows(tableHandle, columns);
             }
             else {
-                List<Integer> selectedColumns = calculateSelectedColumns(tableHandle.getColumnHandles(), getColumnNames(columns));
-                rows = tableHandle.getObjectNames().stream()
+                List<Integer> selectedColumns = calculateSelectedColumns(tableHandle.columnHandles(), getColumnNames(columns));
+                rows = tableHandle.objectNames().stream()
                         .flatMap(objectName -> jmxHistoricalData.getRows(objectName, selectedColumns).stream())
                         .collect(toImmutableList());
             }
@@ -186,7 +187,7 @@ public class JmxRecordSetProvider
         ImmutableList.Builder<Integer> selectedColumns = ImmutableList.builder();
         for (int i = 0; i < columnHandles.size(); i++) {
             JmxColumnHandle column = columnHandles.get(i);
-            if (selectedColumnNames.contains((column.getColumnName()))) {
+            if (selectedColumnNames.contains(column.columnName())) {
                 selectedColumns.add(i);
             }
         }
@@ -197,7 +198,7 @@ public class JmxRecordSetProvider
     {
         return columnHandles.stream()
                 .map(column -> (JmxColumnHandle) column)
-                .map(JmxColumnHandle::getColumnName)
+                .map(JmxColumnHandle::columnName)
                 .collect(Collectors.toSet());
     }
 
@@ -205,7 +206,7 @@ public class JmxRecordSetProvider
     {
         return columnHandles.stream()
                 .map(column -> (JmxColumnHandle) column)
-                .map(JmxColumnHandle::getColumnType)
+                .map(JmxColumnHandle::columnType)
                 .collect(Collectors.toList());
     }
 
@@ -227,8 +228,13 @@ public class JmxRecordSetProvider
             throws JMException
     {
         ImmutableList.Builder<List<Object>> rows = ImmutableList.builder();
-        for (String objectName : tableHandle.getObjectNames()) {
-            rows.add(getLiveRow(objectName, columns, 0));
+        for (String objectName : tableHandle.objectNames()) {
+            try {
+                rows.add(getLiveRow(objectName, columns, 0));
+            }
+            catch (InstanceNotFoundException _) {
+                // Ignore if the object doesn't exist. This might happen when it exists on the coordinator but has not yet been created on the worker.
+            }
         }
         return rows.build();
     }

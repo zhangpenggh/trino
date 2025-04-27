@@ -28,6 +28,7 @@ import java.util.List;
 import java.util.Queue;
 import java.util.Set;
 import java.util.concurrent.Executor;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.base.Throwables.throwIfUnchecked;
@@ -47,12 +48,11 @@ public class StreamingDirectExchangeBuffer
 
     @GuardedBy("this")
     private final Queue<Slice> bufferedPages = new ArrayDeque<>();
-    @GuardedBy("this")
-    private volatile long bufferRetainedSizeInBytes;
+    private final AtomicLong bufferRetainedSizeInBytes = new AtomicLong();
     @GuardedBy("this")
     private volatile long maxBufferRetainedSizeInBytes;
     @GuardedBy("this")
-    private Queue<SettableFuture<Void>> blocked = new ArrayDeque<>();
+    private final Queue<SettableFuture<Void>> blocked = new ArrayDeque<>();
     @GuardedBy("this")
     private final Set<TaskId> activeTasks = new HashSet<>();
     @GuardedBy("this")
@@ -90,8 +90,8 @@ public class StreamingDirectExchangeBuffer
         }
         Slice page = bufferedPages.poll();
         if (page != null) {
-            bufferRetainedSizeInBytes -= page.getRetainedSize();
-            checkState(bufferRetainedSizeInBytes >= 0, "unexpected bufferRetainedSizeInBytes: %s", bufferRetainedSizeInBytes);
+            long retained = bufferRetainedSizeInBytes.addAndGet(-page.getRetainedSize());
+            checkState(retained >= 0, "unexpected bufferRetainedSizeInBytes: %s", retained);
         }
         return page;
     }
@@ -119,8 +119,8 @@ public class StreamingDirectExchangeBuffer
             }
             checkState(activeTasks.contains(taskId), "taskId is not active: %s", taskId);
             bufferedPages.addAll(pages);
-            bufferRetainedSizeInBytes += pagesRetainedSizeInBytes;
-            maxBufferRetainedSizeInBytes = max(maxBufferRetainedSizeInBytes, bufferRetainedSizeInBytes);
+            long retained = bufferRetainedSizeInBytes.addAndGet(pagesRetainedSizeInBytes);
+            maxBufferRetainedSizeInBytes = max(maxBufferRetainedSizeInBytes, retained);
             // Unblock the same number of consumers as pages to reduce the possibility of a thread waking up with an empty pull from the buffer.
             unblock(pages.size());
         }
@@ -147,7 +147,7 @@ public class StreamingDirectExchangeBuffer
         }
         checkState(activeTasks.contains(taskId), "taskId not registered: %s", taskId);
 
-        if (t instanceof TrinoException && REMOTE_TASK_FAILED.toErrorCode().equals(((TrinoException) t).getErrorCode())) {
+        if (t instanceof TrinoException exception && REMOTE_TASK_FAILED.toErrorCode().equals(exception.getErrorCode())) {
             // This error indicates that a downstream task was trying to fetch results from an upstream task that is marked as failed
             // Instead of failing a downstream task let the coordinator handle and report the failure of an upstream task to ensure correct error reporting
             log.debug("Task failure discovered while fetching task results: %s", taskId);
@@ -183,13 +183,13 @@ public class StreamingDirectExchangeBuffer
     @Override
     public long getRemainingCapacityInBytes()
     {
-        return max(bufferCapacityInBytes - bufferRetainedSizeInBytes, 0);
+        return max(bufferCapacityInBytes - bufferRetainedSizeInBytes.get(), 0);
     }
 
     @Override
     public long getRetainedSizeInBytes()
     {
-        return bufferRetainedSizeInBytes;
+        return bufferRetainedSizeInBytes.get();
     }
 
     @Override
@@ -223,7 +223,7 @@ public class StreamingDirectExchangeBuffer
             return;
         }
         bufferedPages.clear();
-        bufferRetainedSizeInBytes = 0;
+        bufferRetainedSizeInBytes.set(0);
         activeTasks.clear();
         noMoreTasks = true;
         closed = true;

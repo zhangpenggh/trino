@@ -16,12 +16,13 @@ package io.trino.operator.aggregation;
 import com.google.common.collect.ImmutableList;
 import io.trino.jmh.Benchmarks;
 import io.trino.metadata.TestingFunctionResolution;
+import io.trino.operator.AggregationMetrics;
 import io.trino.spi.Page;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.type.DecimalType;
 import io.trino.spi.type.Type;
-import io.trino.sql.tree.QualifiedName;
+import org.junit.jupiter.api.Test;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
 import org.openjdk.jmh.annotations.Fork;
@@ -35,7 +36,6 @@ import org.openjdk.jmh.annotations.Setup;
 import org.openjdk.jmh.annotations.State;
 import org.openjdk.jmh.annotations.Warmup;
 import org.openjdk.jmh.runner.options.WarmupMode;
-import org.testng.annotations.Test;
 
 import java.util.OptionalInt;
 import java.util.Random;
@@ -46,7 +46,7 @@ import static io.trino.spi.type.DecimalType.createDecimalType;
 import static io.trino.sql.analyzer.TypeSignatureProvider.fromTypes;
 import static io.trino.sql.planner.plan.AggregationNode.Step.FINAL;
 import static io.trino.sql.planner.plan.AggregationNode.Step.PARTIAL;
-import static org.testng.Assert.assertEquals;
+import static org.assertj.core.api.Assertions.assertThat;
 
 @State(Scope.Thread)
 @OutputTimeUnit(TimeUnit.NANOSECONDS)
@@ -63,7 +63,7 @@ public class BenchmarkDecimalAggregation
     @OperationsPerInvocation(ELEMENT_COUNT)
     public GroupedAggregator benchmark(BenchmarkData data)
     {
-        GroupedAggregator aggregator = data.getPartialAggregatorFactory().createGroupedAggregator();
+        GroupedAggregator aggregator = data.getPartialAggregatorFactory().createGroupedAggregator(new AggregationMetrics());
         aggregator.processPage(data.getGroupCount(), data.getGroupIds(), data.getValues());
         return aggregator;
     }
@@ -72,7 +72,7 @@ public class BenchmarkDecimalAggregation
     @OperationsPerInvocation(ELEMENT_COUNT)
     public Block benchmarkEvaluateIntermediate(BenchmarkData data)
     {
-        GroupedAggregator aggregator = data.getPartialAggregatorFactory().createGroupedAggregator();
+        GroupedAggregator aggregator = data.getPartialAggregatorFactory().createGroupedAggregator(new AggregationMetrics());
         aggregator.processPage(data.getGroupCount(), data.getGroupIds(), data.getValues());
         BlockBuilder builder = aggregator.getType().createBlockBuilder(null, data.getGroupCount());
         for (int groupId = 0; groupId < data.getGroupCount(); groupId++) {
@@ -84,7 +84,7 @@ public class BenchmarkDecimalAggregation
     @Benchmark
     public Block benchmarkEvaluateFinal(BenchmarkData data)
     {
-        GroupedAggregator aggregator = data.getFinalAggregatorFactory().createGroupedAggregator();
+        GroupedAggregator aggregator = data.getFinalAggregatorFactory().createGroupedAggregator(new AggregationMetrics());
         // Add the intermediate input multiple times to invoke the combine behavior
         aggregator.processPage(data.getGroupCount(), data.getGroupIds(), data.getIntermediateValues());
         aggregator.processPage(data.getGroupCount(), data.getGroupIds(), data.getIntermediateValues());
@@ -139,7 +139,7 @@ public class BenchmarkDecimalAggregation
                 ids[i] = RANDOM.nextInt(groupCount);
             }
             groupIds = ids;
-            intermediateValues = new Page(createIntermediateValues(partialAggregatorFactory.createGroupedAggregator(), groupIds, values));
+            intermediateValues = new Page(createIntermediateValues(partialAggregatorFactory.createGroupedAggregator(new AggregationMetrics()), groupIds, values));
         }
 
         private Block createIntermediateValues(GroupedAggregator aggregator, int[] groupIds, Page inputPage)
@@ -154,7 +154,7 @@ public class BenchmarkDecimalAggregation
 
         private Page createValues(TestingFunctionResolution functionResolution, Type type)
         {
-            TestingAggregationFunction implementation = functionResolution.getAggregateFunction(QualifiedName.of(function), fromTypes(type));
+            TestingAggregationFunction implementation = functionResolution.getAggregateFunction(function, fromTypes(type));
             partialAggregatorFactory = implementation.createAggregatorFactory(PARTIAL, ImmutableList.of(0), OptionalInt.empty());
             finalAggregatorFactory = implementation.createAggregatorFactory(FINAL, ImmutableList.of(0), OptionalInt.empty());
 
@@ -198,7 +198,7 @@ public class BenchmarkDecimalAggregation
         BenchmarkData data = new BenchmarkData();
         data.setup();
 
-        assertEquals(data.getGroupIds().length, data.getValues().getPositionCount());
+        assertThat(data.getGroupIds().length).isEqualTo(data.getValues().getPositionCount());
 
         new BenchmarkDecimalAggregation().benchmark(data);
     }

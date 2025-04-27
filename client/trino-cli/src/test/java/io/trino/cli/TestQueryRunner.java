@@ -14,52 +14,52 @@
 package io.trino.cli;
 
 import com.google.common.collect.ImmutableList;
-import io.airlift.json.JsonCodec;
 import io.airlift.units.Duration;
 import io.trino.client.ClientSession;
 import io.trino.client.ClientTypeSignature;
 import io.trino.client.Column;
 import io.trino.client.QueryResults;
 import io.trino.client.StatementStats;
+import io.trino.client.TrinoJsonCodec;
+import io.trino.client.TypedQueryData;
 import io.trino.client.uri.PropertyName;
 import io.trino.client.uri.TrinoUri;
-import okhttp3.logging.HttpLoggingInterceptor;
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
-import org.testng.annotations.AfterMethod;
-import org.testng.annotations.BeforeMethod;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
 
 import java.io.IOException;
 import java.io.PrintStream;
-import java.sql.SQLException;
 import java.time.ZoneId;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.OptionalDouble;
+import java.util.OptionalLong;
 import java.util.Properties;
 
 import static com.google.common.io.ByteStreams.nullOutputStream;
 import static com.google.common.net.HttpHeaders.CONTENT_TYPE;
 import static com.google.common.net.HttpHeaders.LOCATION;
 import static com.google.common.net.HttpHeaders.SET_COOKIE;
-import static io.airlift.json.JsonCodec.jsonCodec;
 import static io.trino.cli.ClientOptions.OutputFormat.CSV;
 import static io.trino.cli.TerminalUtils.getTerminal;
 import static io.trino.client.ClientStandardTypes.BIGINT;
+import static io.trino.client.TrinoJsonCodec.jsonCodec;
 import static io.trino.client.auth.external.ExternalRedirectStrategy.PRINT;
 import static java.util.concurrent.TimeUnit.MINUTES;
-import static org.testng.Assert.assertEquals;
-import static org.testng.Assert.assertNull;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_METHOD;
 
-@Test(singleThreaded = true)
+@TestInstance(PER_METHOD)
 public class TestQueryRunner
 {
-    private static final JsonCodec<QueryResults> QUERY_RESULTS_CODEC = jsonCodec(QueryResults.class);
-
+    private static final TrinoJsonCodec<QueryResults> QUERY_RESULTS_CODEC = jsonCodec(QueryResults.class);
     private MockWebServer server;
 
-    @BeforeMethod
+    @BeforeEach
     public void setup()
             throws IOException
     {
@@ -67,7 +67,7 @@ public class TestQueryRunner
         server.start();
     }
 
-    @AfterMethod(alwaysRun = true)
+    @AfterEach
     public void teardown()
             throws IOException
     {
@@ -93,19 +93,18 @@ public class TestQueryRunner
         QueryRunner queryRunner = createQueryRunner(createTrinoUri(server, false), createClientSession(server));
 
         try (Query query = queryRunner.startQuery("first query will introduce a cookie")) {
-            query.renderOutput(getTerminal(), nullPrintStream(), nullPrintStream(), CSV, Optional.of(""), false);
+            query.renderOutput(getTerminal(), nullPrintStream(), nullPrintStream(), CSV, Optional.of(""), false, false);
         }
         try (Query query = queryRunner.startQuery("second query should carry the cookie")) {
-            query.renderOutput(getTerminal(), nullPrintStream(), nullPrintStream(), CSV, Optional.of(""), false);
+            query.renderOutput(getTerminal(), nullPrintStream(), nullPrintStream(), CSV, Optional.of(""), false, false);
         }
 
-        assertNull(server.takeRequest().getHeader("Cookie"));
-        assertEquals(server.takeRequest().getHeader("Cookie"), "a=apple");
-        assertEquals(server.takeRequest().getHeader("Cookie"), "a=apple");
+        assertThat(server.takeRequest().getHeader("Cookie")).isNull();
+        assertThat(server.takeRequest().getHeader("Cookie")).isEqualTo("a=apple");
+        assertThat(server.takeRequest().getHeader("Cookie")).isEqualTo("a=apple");
     }
 
     static TrinoUri createTrinoUri(MockWebServer server, boolean insecureSsl)
-            throws SQLException
     {
         Properties properties = new Properties();
         properties.setProperty(PropertyName.EXTERNAL_AUTHENTICATION_REDIRECT_HANDLERS.toString(), PRINT.name());
@@ -117,7 +116,7 @@ public class TestQueryRunner
     {
         return ClientSession.builder()
                 .server(server.url("/").uri())
-                .principal(Optional.of("user"))
+                .user(Optional.of("user"))
                 .source("source")
                 .clientInfo("clientInfo")
                 .catalog("catalog")
@@ -138,7 +137,7 @@ public class TestQueryRunner
                 null,
                 null,
                 ImmutableList.of(new Column("_col0", BIGINT, new ClientTypeSignature(BIGINT))),
-                ImmutableList.of(ImmutableList.of(123)),
+                TypedQueryData.of(ImmutableList.of(ImmutableList.of(123))),
                 StatementStats.builder()
                         .setState("FINISHED")
                         .setProgressPercentage(OptionalDouble.empty())
@@ -148,7 +147,7 @@ public class TestQueryRunner
                 null,
                 ImmutableList.of(),
                 null,
-                null);
+                OptionalLong.empty());
         return QUERY_RESULTS_CODEC.toJson(queryResults);
     }
 
@@ -157,8 +156,7 @@ public class TestQueryRunner
         return new QueryRunner(
                 uri,
                 clientSession,
-                false,
-                HttpLoggingInterceptor.Level.NONE);
+                false);
     }
 
     static PrintStream nullPrintStream()

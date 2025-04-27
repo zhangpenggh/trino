@@ -42,6 +42,7 @@ import io.trino.operator.OperatorStats;
 import io.trino.security.AccessControl;
 import io.trino.server.BasicQueryInfo;
 import io.trino.server.BasicQueryStats;
+import io.trino.server.ResultQueryInfo;
 import io.trino.spi.ErrorCode;
 import io.trino.spi.QueryId;
 import io.trino.spi.TrinoException;
@@ -52,9 +53,9 @@ import io.trino.spi.resourcegroups.QueryType;
 import io.trino.spi.resourcegroups.ResourceGroupId;
 import io.trino.spi.security.SelectedRole;
 import io.trino.spi.type.Type;
+import io.trino.sql.SessionPropertyResolver.SessionPropertiesApplier;
 import io.trino.sql.analyzer.Output;
 import io.trino.sql.planner.PlanFragment;
-import io.trino.sql.planner.plan.TableScanNode;
 import io.trino.tracing.TrinoAttributes;
 import io.trino.transaction.TransactionId;
 import io.trino.transaction.TransactionInfo;
@@ -88,6 +89,7 @@ import static com.google.common.base.Strings.nullToEmpty;
 import static com.google.common.util.concurrent.MoreExecutors.directExecutor;
 import static io.airlift.units.DataSize.succinctBytes;
 import static io.trino.SystemSessionProperties.getRetryPolicy;
+import static io.trino.SystemSessionProperties.isSpoolingEnabled;
 import static io.trino.execution.BasicStageStats.EMPTY_STAGE_STATS;
 import static io.trino.execution.QueryState.DISPATCHING;
 import static io.trino.execution.QueryState.FAILED;
@@ -104,6 +106,7 @@ import static io.trino.operator.RetryPolicy.TASK;
 import static io.trino.server.DynamicFilterService.DynamicFiltersStats;
 import static io.trino.spi.StandardErrorCode.NOT_FOUND;
 import static io.trino.spi.StandardErrorCode.USER_CANCELED;
+import static io.trino.spi.resourcegroups.QueryType.SELECT;
 import static io.trino.util.Ciphers.createRandomAesEncryptionKey;
 import static io.trino.util.Ciphers.serializeAesEncryptionKey;
 import static io.trino.util.Failures.toFailure;
@@ -153,6 +156,7 @@ public class QueryStateMachine
 
     private final AtomicReference<String> setAuthorizationUser = new AtomicReference<>();
     private final AtomicBoolean resetAuthorizationUser = new AtomicBoolean();
+    private final Set<SelectedRole> setOriginalRoles = Sets.newConcurrentHashSet();
 
     private final Map<String, String> setSessionProperties = new ConcurrentHashMap<>();
     private final Set<String> resetSessionProperties = Sets.newConcurrentHashSet();
@@ -243,6 +247,7 @@ public class QueryStateMachine
             PlanOptimizersStatsCollector queryStatsCollector,
             Optional<QueryType> queryType,
             boolean faultTolerantExecutionExchangeEncryptionEnabled,
+            Optional<SessionPropertiesApplier> sessionPropertiesApplier,
             NodeVersion version)
     {
         return beginWithTicker(
@@ -262,6 +267,7 @@ public class QueryStateMachine
                 queryStatsCollector,
                 queryType,
                 faultTolerantExecutionExchangeEncryptionEnabled,
+                sessionPropertiesApplier,
                 version);
     }
 
@@ -282,6 +288,7 @@ public class QueryStateMachine
             PlanOptimizersStatsCollector queryStatsCollector,
             Optional<QueryType> queryType,
             boolean faultTolerantExecutionExchangeEncryptionEnabled,
+            Optional<SessionPropertiesApplier> sessionPropertiesApplier,
             NodeVersion version)
     {
         // if there is an existing transaction, activate it
@@ -306,6 +313,15 @@ public class QueryStateMachine
         if (getRetryPolicy(session) == TASK && faultTolerantExecutionExchangeEncryptionEnabled) {
             // encryption is mandatory for fault tolerant execution as it relies on an external storage to store intermediate data generated during an exchange
             session = session.withExchangeEncryption(serializeAesEncryptionKey(createRandomAesEncryptionKey()));
+        }
+
+        if (!queryType.map(SELECT::equals).orElse(false) || !isSpoolingEnabled(session)) {
+            session = session.withoutSpooling();
+        }
+
+        // Apply WITH SESSION properties which require transaction to be started to resolve catalog handles
+        if (sessionPropertiesApplier.isPresent()) {
+            session = sessionPropertiesApplier.orElseThrow().apply(session);
         }
 
         Span querySpan = session.getQuerySpan();
@@ -352,6 +368,8 @@ public class QueryStateMachine
                 querySpan.end();
             }
         });
+
+        metadata.beginQuery(session);
 
         return queryStateMachine;
     }
@@ -447,40 +465,7 @@ public class QueryStateMachine
         }
 
         BasicStageStats stageStats = rootStage.orElse(EMPTY_STAGE_STATS);
-        BasicQueryStats queryStats = new BasicQueryStats(
-                queryStateTimer.getCreateTime(),
-                getEndTime().orElse(null),
-                queryStateTimer.getQueuedTime(),
-                queryStateTimer.getElapsedTime(),
-                queryStateTimer.getExecutionTime(),
-
-                stageStats.getFailedTasks(),
-
-                stageStats.getTotalDrivers(),
-                stageStats.getQueuedDrivers(),
-                stageStats.getRunningDrivers(),
-                stageStats.getCompletedDrivers(),
-
-                stageStats.getRawInputDataSize(),
-                stageStats.getRawInputPositions(),
-                stageStats.getPhysicalInputDataSize(),
-
-                stageStats.getCumulativeUserMemory(),
-                stageStats.getFailedCumulativeUserMemory(),
-                stageStats.getUserMemoryReservation(),
-                stageStats.getTotalMemoryReservation(),
-                succinctBytes(getPeakUserMemoryInBytes()),
-                succinctBytes(getPeakTotalMemoryInBytes()),
-
-                stageStats.getTotalCpuTime(),
-                stageStats.getFailedCpuTime(),
-                stageStats.getTotalScheduledTime(),
-                stageStats.getFailedScheduledTime(),
-
-                stageStats.isFullyBlocked(),
-                stageStats.getBlockedReasons(),
-                stageStats.getProgressPercentage(),
-                stageStats.getRunningPercentage());
+        BasicQueryStats queryStats = createBasicQueryStats(stageStats);
 
         return new BasicQueryInfo(
                 queryId,
@@ -497,6 +482,106 @@ public class QueryStateMachine
                 errorCode,
                 queryType,
                 getRetryPolicy(session));
+    }
+
+    @VisibleForTesting
+    ResultQueryInfo getResultQueryInfo(Optional<BasicStageInfo> stageInfo)
+    {
+        QueryState state = queryState.get();
+
+        ErrorCode errorCode = null;
+        if (state == FAILED) {
+            ExecutionFailureInfo failureCause = this.failureCause.get();
+            if (failureCause != null) {
+                errorCode = failureCause.getErrorCode();
+            }
+        }
+
+        List<BasicStageInfo> allStages = BasicStageInfo.getAllStages(stageInfo);
+        boolean finalInfo = state.isDone() && allStages.stream().allMatch(BasicStageInfo::isFinalStageInfo);
+
+        BasicStageStats stageStats = stageInfo
+                .map(stage -> allStages.stream().map(BasicStageInfo::getStageStats).toList())
+                .map(BasicStageStats::aggregateBasicStageStats)
+                .orElse(EMPTY_STAGE_STATS);
+
+        BasicQueryStats queryStats = createBasicQueryStats(stageStats);
+
+        boolean scheduled = getRetryPolicy(session) == TASK
+                ? stageInfo.isPresent() && allStages.stream().map(BasicStageInfo::getState).anyMatch(StageState::isScheduled)
+                : stageInfo.isPresent() && allStages.stream().map(BasicStageInfo::getState).allMatch(StageState::isScheduled);
+
+        return new ResultQueryInfo(
+                queryId,
+                state,
+                scheduled,
+                updateType.get(),
+                queryStats,
+                errorCode,
+                stageInfo,
+                finalInfo,
+                failureCause.get(),
+                Optional.ofNullable(setCatalog.get()),
+                Optional.ofNullable(setSchema.get()),
+                Optional.ofNullable(setPath.get()),
+                Optional.ofNullable(setAuthorizationUser.get()),
+                resetAuthorizationUser.get(),
+                setOriginalRoles,
+                setSessionProperties,
+                resetSessionProperties,
+                setRoles,
+                addedPreparedStatements,
+                deallocatedPreparedStatements,
+                Optional.ofNullable(startedTransactionId.get()),
+                clearTransactionId.get(),
+                warningCollector.getWarnings());
+    }
+
+    private BasicQueryStats createBasicQueryStats(BasicStageStats stageStats)
+    {
+        BasicQueryStats queryStats = new BasicQueryStats(
+                queryStateTimer.getCreateTime(),
+                getEndTime().orElse(null),
+                queryStateTimer.getQueuedTime(),
+                queryStateTimer.getElapsedTime(),
+                queryStateTimer.getExecutionTime(),
+
+                stageStats.getFailedTasks(),
+
+                stageStats.getTotalDrivers(),
+                stageStats.getQueuedDrivers(),
+                stageStats.getRunningDrivers(),
+                stageStats.getCompletedDrivers(),
+                stageStats.getBlockedDrivers(),
+
+                stageStats.getRawInputDataSize(),
+                stageStats.getRawInputPositions(),
+                stageStats.getSpilledDataSize(),
+                stageStats.getPhysicalInputDataSize(),
+                stageStats.getPhysicalWrittenDataSize(),
+                stageStats.getInternalNetworkInputDataSize(),
+
+                stageStats.getCumulativeUserMemory(),
+                stageStats.getFailedCumulativeUserMemory(),
+                stageStats.getUserMemoryReservation(),
+                stageStats.getTotalMemoryReservation(),
+                succinctBytes(getPeakUserMemoryInBytes()),
+                succinctBytes(getPeakTotalMemoryInBytes()),
+
+                queryStateTimer.getPlanningTime(),
+                queryStateTimer.getAnalysisTime(),
+                stageStats.getTotalCpuTime(),
+                stageStats.getFailedCpuTime(),
+                stageStats.getTotalScheduledTime(),
+                stageStats.getFailedScheduledTime(),
+                queryStateTimer.getFinishingTime(),
+                stageStats.getPhysicalInputReadTime(),
+
+                stageStats.isFullyBlocked(),
+                stageStats.getBlockedReasons(),
+                stageStats.getProgressPercentage(),
+                stageStats.getRunningPercentage());
+        return queryStats;
     }
 
     @VisibleForTesting
@@ -535,6 +620,7 @@ public class QueryStateMachine
                 Optional.ofNullable(setPath.get()),
                 Optional.ofNullable(setAuthorizationUser.get()),
                 resetAuthorizationUser.get(),
+                setOriginalRoles,
                 setSessionProperties,
                 resetSessionProperties,
                 setRoles,
@@ -667,7 +753,7 @@ public class QueryStateMachine
             failedInternalNetworkInputPositions += stageStats.getFailedInternalNetworkInputPositions();
 
             PlanFragment plan = stageInfo.getPlan();
-            if (plan != null && plan.getPartitionedSourceNodes().stream().anyMatch(TableScanNode.class::isInstance)) {
+            if (plan != null && plan.containsTableScanNode()) {
                 rawInputDataSize += stageStats.getRawInputDataSize().toBytes();
                 failedRawInputDataSize += stageStats.getFailedRawInputDataSize().toBytes();
                 rawInputPositions += stageStats.getRawInputPositions();
@@ -762,6 +848,7 @@ public class QueryStateMachine
                 queryStateTimer.getAnalysisTime(),
                 queryStateTimer.getPlanningTime(),
                 queryStateTimer.getPlanningCpuTime(),
+                queryStateTimer.getStartingTime(),
                 queryStateTimer.getFinishingTime(),
 
                 totalTasks,
@@ -940,6 +1027,11 @@ public class QueryStateMachine
         resetAuthorizationUser.set(true);
     }
 
+    public void addSetOriginalRoles(SelectedRole role)
+    {
+        setOriginalRoles.add(requireNonNull(role, "role is null"));
+    }
+
     public void addSetSessionProperties(String key, String value)
     {
         setSessionProperties.put(requireNonNull(key, "key is null"), requireNonNull(value, "value is null"));
@@ -1108,9 +1200,18 @@ public class QueryStateMachine
         queryState.setIf(FINISHED, currentState -> !currentState.isDone());
     }
 
+    public boolean transitionToCanceled()
+    {
+        return transitionToFailed(new TrinoException(USER_CANCELED, "Query was canceled"), false);
+    }
+
     public boolean transitionToFailed(Throwable throwable)
     {
-        cleanupQueryQuietly();
+        return transitionToFailed(throwable, true);
+    }
+
+    private boolean transitionToFailed(Throwable throwable, boolean log)
+    {
         queryStateTimer.endQuery();
 
         // NOTE: The failure cause must be set before triggering the state change, so
@@ -1119,14 +1220,20 @@ public class QueryStateMachine
         requireNonNull(throwable, "throwable is null");
         failureCause.compareAndSet(null, toFailure(throwable));
 
+        cleanupQueryQuietly();
+
         QueryState oldState = queryState.trySet(FAILED);
         if (oldState.isDone()) {
-            QUERY_STATE_LOG.debug(throwable, "Failure after query %s finished", queryId);
+            if (log) {
+                QUERY_STATE_LOG.debug(throwable, "Failure after query %s finished", queryId);
+            }
             return false;
         }
 
         try {
-            QUERY_STATE_LOG.debug(throwable, "Query %s failed", queryId);
+            if (log) {
+                QUERY_STATE_LOG.debug(throwable, "Query %s failed", queryId);
+            }
             session.getTransactionId().flatMap(transactionManager::getTransactionInfoIfExist).ifPresent(transaction -> {
                 try {
                     if (transaction.isAutoCommitContext()) {
@@ -1138,7 +1245,9 @@ public class QueryStateMachine
                 }
                 catch (RuntimeException e) {
                     // This shouldn't happen but be safe and just fail the transaction directly
-                    QUERY_STATE_LOG.error(e, "Error aborting transaction for failed query. Transaction will be failed directly");
+                    if (log) {
+                        QUERY_STATE_LOG.error(e, "Error aborting transaction for failed query. Transaction will be failed directly");
+                    }
                 }
             });
         }
@@ -1150,31 +1259,6 @@ public class QueryStateMachine
         }
 
         return true;
-    }
-
-    public boolean transitionToCanceled()
-    {
-        cleanupQueryQuietly();
-        queryStateTimer.endQuery();
-
-        // NOTE: The failure cause must be set before triggering the state change, so
-        // listeners can observe the exception. This is safe because the failure cause
-        // can only be observed if the transition to FAILED is successful.
-        failureCause.compareAndSet(null, toFailure(new TrinoException(USER_CANCELED, "Query was canceled")));
-
-        boolean canceled = queryState.setIf(FAILED, currentState -> !currentState.isDone());
-        if (canceled) {
-            session.getTransactionId().flatMap(transactionManager::getTransactionInfoIfExist).ifPresent(transaction -> {
-                if (transaction.isAutoCommitContext()) {
-                    transactionManager.asyncAbort(transaction.getTransactionId());
-                }
-                else {
-                    transactionManager.fail(transaction.getTransactionId());
-                }
-            });
-        }
-
-        return canceled;
     }
 
     private void cleanupQuery()
@@ -1256,7 +1340,7 @@ public class QueryStateMachine
     {
         // Execution start time is empty if planning has not started
         return queryStateTimer.getExecutionStartTime()
-                .map(ignored -> queryStateTimer.getPlanningTime());
+                .map(_ -> queryStateTimer.getPlanningTime());
     }
 
     public DateTime getLastHeartbeat()
@@ -1291,6 +1375,17 @@ public class QueryStateMachine
         return queryInfo;
     }
 
+    public ResultQueryInfo updateResultQueryInfo(Optional<BasicStageInfo> stageInfo, Supplier<Optional<StageInfo>> stageInfoProvider)
+    {
+        ResultQueryInfo queryInfo = getResultQueryInfo(stageInfo);
+        if (queryInfo.finalQueryInfo()) {
+            QueryInfo fullQueryInfo = getQueryInfo(stageInfoProvider.get());
+            finalQueryInfo.compareAndSet(Optional.empty(), Optional.of(fullQueryInfo));
+            return new ResultQueryInfo(fullQueryInfo);
+        }
+        return queryInfo;
+    }
+
     public void pruneQueryInfo()
     {
         Optional<QueryInfo> finalInfo = finalQueryInfo.get();
@@ -1298,7 +1393,12 @@ public class QueryStateMachine
             return;
         }
 
-        QueryInfo queryInfo = finalInfo.get();
+        QueryInfo prunedQueryInfo = QueryStateMachine.pruneQueryInfo(finalInfo.get(), version);
+        finalQueryInfo.compareAndSet(finalInfo, Optional.of(prunedQueryInfo));
+    }
+
+    public static QueryInfo pruneQueryInfo(QueryInfo queryInfo, NodeVersion version)
+    {
         Optional<StageInfo> prunedOutputStage = queryInfo.getOutputStage().map(outputStage -> new StageInfo(
                 outputStage.getStageId(),
                 outputStage.getState(),
@@ -1311,7 +1411,7 @@ public class QueryStateMachine
                 ImmutableMap.of(), // Remove tables
                 outputStage.getFailureCause()));
 
-        QueryInfo prunedQueryInfo = new QueryInfo(
+        return new QueryInfo(
                 queryInfo.getQueryId(),
                 queryInfo.getSession(),
                 queryInfo.getState(),
@@ -1325,6 +1425,7 @@ public class QueryStateMachine
                 queryInfo.getSetPath(),
                 queryInfo.getSetAuthorizationUser(),
                 queryInfo.isResetAuthorizationUser(),
+                queryInfo.getSetOriginalRoles(),
                 queryInfo.getSetSessionProperties(),
                 queryInfo.getResetSessionProperties(),
                 queryInfo.getSetRoles(),
@@ -1347,7 +1448,6 @@ public class QueryStateMachine
                 queryInfo.getRetryPolicy(),
                 true,
                 version);
-        finalQueryInfo.compareAndSet(finalInfo, Optional.of(prunedQueryInfo));
     }
 
     private static QueryStats pruneQueryStats(QueryStats queryStats)
@@ -1365,11 +1465,12 @@ public class QueryStateMachine
                 queryStats.getAnalysisTime(),
                 queryStats.getPlanningTime(),
                 queryStats.getPlanningCpuTime(),
+                queryStats.getStartingTime(),
                 queryStats.getFinishingTime(),
                 queryStats.getTotalTasks(),
-                queryStats.getFailedTasks(),
                 queryStats.getRunningTasks(),
                 queryStats.getCompletedTasks(),
+                queryStats.getFailedTasks(),
                 queryStats.getTotalDrivers(),
                 queryStats.getQueuedDrivers(),
                 queryStats.getRunningDrivers(),
@@ -1426,8 +1527,15 @@ public class QueryStateMachine
                 queryStats.getFailedPhysicalWrittenDataSize(),
                 queryStats.getStageGcStatistics(),
                 queryStats.getDynamicFiltersStats(),
-                ImmutableList.of(),
-                ImmutableList.of()); // Remove the operator summaries as OperatorInfo (especially DirectExchangeClientStatus) can hold onto a large amount of memory
+                ImmutableList.of(), // Remove the operator summaries as OperatorInfo (especially DirectExchangeClientStatus) can hold onto a large amount of memory
+                ImmutableList.of());
+    }
+
+    public boolean isQueryInfoPruned()
+    {
+        return finalQueryInfo.get()
+                .map(QueryInfo::isPruned)
+                .orElse(false);
     }
 
     private QueryOutputManager getOutputManager()
@@ -1521,6 +1629,7 @@ public class QueryStateMachine
             }
             queryCompleted = true;
             inputsQueue.clear();
+            outputTaskFailureListeners.clear();
             noMoreInputs = true;
         }
 
@@ -1528,7 +1637,9 @@ public class QueryStateMachine
         {
             Map<TaskId, Throwable> failures;
             synchronized (this) {
-                outputTaskFailureListeners.add(listener);
+                if (!queryCompleted) {
+                    outputTaskFailureListeners.add(listener);
+                }
                 failures = ImmutableMap.copyOf(outputTaskFailures);
             }
             if (!failures.isEmpty()) {
@@ -1540,6 +1651,10 @@ public class QueryStateMachine
         {
             List<TaskFailureListener> listeners;
             synchronized (this) {
+                if (queryCompleted) {
+                    // ignore late task failed events after query is completed
+                    return;
+                }
                 outputTaskFailures.putIfAbsent(taskId, failure);
                 listeners = ImmutableList.copyOf(outputTaskFailureListeners);
             }

@@ -1,7 +1,7 @@
 ---
 myst:
   substitutions:
-    default_domain_compaction_threshold: '`32`'
+    default_domain_compaction_threshold: '`256`'
 ---
 
 # SQL Server connector
@@ -19,7 +19,7 @@ between two different SQL Server instances.
 
 To connect to SQL Server, you need:
 
-- SQL Server 2012 or higher, or Azure SQL Database.
+- SQL Server 2019 or higher, or Azure SQL Database.
 - Network access from the Trino coordinator and workers to SQL Server.
   Port 1433 is the default port.
 
@@ -50,7 +50,6 @@ use {doc}`secrets </security/secrets>` to avoid actual values in the catalog
 properties files.
 
 (sqlserver-tls)=
-
 ### Connection security
 
 The JDBC driver, and therefore the connector, automatically use Transport Layer
@@ -97,27 +96,27 @@ catalog named `sales` using the configured connector.
 The SQL Server connector supports additional catalog properties to configure the
 behavior of the connector and the issues queries to the database.
 
-```{eval-rst}
-.. list-table::
-  :widths: 45, 55
-  :header-rows: 1
+:::{list-table}
+:widths: 45, 55
+:header-rows: 1
 
-  * - Property name
-    - Description
-  * - ``sqlserver.snapshot-isolation.disabled``
-    - Control the automatic use of snapshot isolation for transactions issued by
-      Trino in SQL Server. Defaults to ``false``, which means that snapshot
+* - Property name
+  - Description
+* - `sqlserver.snapshot-isolation.disabled`
+  - Control the automatic use of snapshot isolation for transactions issued by
+      Trino in SQL Server. Defaults to `false`, which means that snapshot
       isolation is enabled.
-```
-
-```{include} jdbc-procedures.fragment
-```
+:::
 
 ```{include} jdbc-case-insensitive-matching.fragment
 ```
 
-```{include} non-transactional-insert.fragment
-```
+(sqlserver-fte-support)=
+### Fault-tolerant execution support
+
+The connector supports {doc}`/admin/fault-tolerant-execution` of query
+processing. Read and write operations are both supported with any retry policy.
+
 
 ## Querying SQL Server
 
@@ -156,7 +155,6 @@ If you used a different name for your catalog properties file, use
 that catalog name instead of `example` in the above examples.
 
 (sqlserver-type-mapping)=
-
 ## Type mapping
 
 Because Trino and SQL Server each support types that the other does not, this
@@ -169,136 +167,133 @@ each direction.
 
 The connector maps SQL Server types to the corresponding Trino types following this table:
 
-```{eval-rst}
-.. list-table:: SQL Server type to Trino type mapping
-  :widths: 30, 20, 50
-  :header-rows: 1
+:::{list-table} SQL Server type to Trino type mapping
+:widths: 30, 30, 40
+:header-rows: 1
 
-  * - SQL Server database type
-    - Trino type
-    - Notes
-  * - ``BIT``
-    - ``BOOLEAN``
-    -
-  * - ``TINYINT``
-    - ``SMALLINT``
-    - SQL Server ``TINYINT`` is actually ``unsigned TINYINT``
-  * - ``SMALLINT``
-    - ``SMALLINT``
-    -
-  * - ``INTEGER``
-    - ``INTEGER``
-    -
-  * - ``BIGINT``
-    - ``BIGINT``
-    -
-  * - ``DOUBLE PRECISION``
-    - ``DOUBLE``
-    -
-  * - ``FLOAT[(n)]``
-    - ``REAL`` or ``DOUBLE``
-    -  See :ref:`sqlserver-numeric-mapping`
-  * - ``REAL``
-    - ``REAL``
-    -
-  * - ``DECIMAL[(p[, s])]``, ``NUMERIC[(p[, s])]``
-    - ``DECIMAL(p, s)``
-    -
-  * - ``CHAR[(n)]``
-    - ``CHAR(n)``
-    - ``1 <= n <= 8000``
-  * - ``NCHAR[(n)]``
-    - ``CHAR(n)``
-    - ``1 <= n <= 4000``
-  * - ``VARCHAR[(n | max)]``, ``NVARCHAR[(n | max)]``
-    - ``VARCHAR(n)``
-    - ``1 <= n <= 8000``, ``max = 2147483647``
-  * - ``TEXT``
-    - ``VARCHAR(2147483647)``
-    -
-  * - ``NTEXT``
-    - ``VARCHAR(1073741823)``
-    -
-  * - ``VARBINARY[(n | max)]``
-    - ``VARBINARY``
-    - ``1 <= n <= 8000``, ``max = 2147483647``
-  * - ``DATE``
-    - ``DATE``
-    -
-  * - ``TIME[(n)]``
-    - ``TIME(n)``
-    - ``0 <= n <= 7``
-  * - ``DATETIME2[(n)]``
-    - ``TIMESTAMP(n)``
-    - ``0 <= n <= 7``
-  * - ``SMALLDATETIME``
-    - ``TIMESTAMP(0)``
-    -
-  * - ``DATETIMEOFFSET[(n)]``
-    - ``TIMESTAMP(n) WITH TIME ZONE``
-    - ``0 <= n <= 7``
-```
+* - SQL Server database type
+  - Trino type
+  - Notes
+* - `BIT`
+  - `BOOLEAN`
+  -
+* - `TINYINT`
+  - `SMALLINT`
+  - SQL Server `TINYINT` is actually `unsigned TINYINT`
+* - `SMALLINT`
+  - `SMALLINT`
+  -
+* - `INTEGER`
+  - `INTEGER`
+  -
+* - `BIGINT`
+  - `BIGINT`
+  -
+* - `DOUBLE PRECISION`
+  - `DOUBLE`
+  -
+* - `FLOAT[(n)]`
+  - `REAL` or `DOUBLE`
+  -  See [](sqlserver-numeric-mapping)
+* - `REAL`
+  - `REAL`
+  -
+* - `DECIMAL[(p[, s])]`, `NUMERIC[(p[, s])]`
+  - `DECIMAL(p, s)`
+  -
+* - `CHAR[(n)]`
+  - `CHAR(n)`
+  - `1 <= n <= 8000`
+* - `NCHAR[(n)]`
+  - `CHAR(n)`
+  - `1 <= n <= 4000`
+* - `VARCHAR[(n | max)]`, `NVARCHAR[(n | max)]`
+  - `VARCHAR(n)`
+  - `1 <= n <= 8000`, `max = 2147483647`
+* - `TEXT`
+  - `VARCHAR(2147483647)`
+  -
+* - `NTEXT`
+  - `VARCHAR(1073741823)`
+  -
+* - `VARBINARY[(n | max)]`
+  - `VARBINARY`
+  - `1 <= n <= 8000`, `max = 2147483647`
+* - `DATE`
+  - `DATE`
+  -
+* - `TIME[(n)]`
+  - `TIME(n)`
+  - `0 <= n <= 7`
+* - `DATETIME2[(n)]`
+  - `TIMESTAMP(n)`
+  - `0 <= n <= 7`
+* - `SMALLDATETIME`
+  - `TIMESTAMP(0)`
+  -
+* - `DATETIMEOFFSET[(n)]`
+  - `TIMESTAMP(n) WITH TIME ZONE`
+  - `0 <= n <= 7`
+:::
 
 ### Trino type to SQL Server type mapping
 
 The connector maps Trino types to the corresponding SQL Server types following this table:
 
-```{eval-rst}
-.. list-table:: Trino type to SQL Server type mapping
-  :widths: 30, 20, 50
-  :header-rows: 1
+:::{list-table} Trino type to SQL Server type mapping
+:widths: 30, 30, 40
+:header-rows: 1
 
-  * - Trino type
-    - SQL Server type
-    - Notes
-  * - ``BOOLEAN``
-    - ``BIT``
-    -
-  * - ``TINYINT``
-    - ``TINYINT``
-    - Trino only supports writing values belonging to ``[0, 127]``
-  * - ``SMALLINT``
-    - ``SMALLINT``
-    -
-  * - ``INTEGER``
-    - ``INTEGER``
-    -
-  * - ``BIGINT``
-    - ``BIGINT``
-    -
-  * - ``REAL``
-    - ``REAL``
-    -
-  * - ``DOUBLE``
-    - ``DOUBLE PRECISION``
-    -
-  * - ``DECIMAL(p, s)``
-    - ``DECIMAL(p, s)``
-    -
-  * - ``CHAR(n)``
-    - ``NCHAR(n)`` or ``NVARCHAR(max)``
-    -  See :ref:`sqlserver-character-mapping`
-  * - ``VARCHAR(n)``
-    - ``NVARCHAR(n)`` or ``NVARCHAR(max)``
-    -  See :ref:`sqlserver-character-mapping`
-  * - ``VARBINARY``
-    - ``VARBINARY(max)``
-    -
-  * - ``DATE``
-    - ``DATE``
-    -
-  * - ``TIME(n)``
-    - ``TIME(n)``
-    - ``0 <= n <= 7``
-  * - ``TIMESTAMP(n)``
-    - ``DATETIME2(n)``
-    - ``0 <= n <= 7``
-```
+* - Trino type
+  - SQL Server type
+  - Notes
+* - `BOOLEAN`
+  - `BIT`
+  -
+* - `TINYINT`
+  - `TINYINT`
+  - Trino only supports writing values belonging to `[0, 127]`
+* - `SMALLINT`
+  - `SMALLINT`
+  -
+* - `INTEGER`
+  - `INTEGER`
+  -
+* - `BIGINT`
+  - `BIGINT`
+  -
+* - `REAL`
+  - `REAL`
+  -
+* - `DOUBLE`
+  - `DOUBLE PRECISION`
+  -
+* - `DECIMAL(p, s)`
+  - `DECIMAL(p, s)`
+  -
+* - `CHAR(n)`
+  - `NCHAR(n)` or `NVARCHAR(max)`
+  -  See [](sqlserver-character-mapping)
+* - `VARCHAR(n)`
+  - `NVARCHAR(n)` or `NVARCHAR(max)`
+  -  See [](sqlserver-character-mapping)
+* - `VARBINARY`
+  - `VARBINARY(max)`
+  -
+* - `DATE`
+  - `DATE`
+  -
+* - `TIME(n)`
+  - `TIME(n)`
+  - `0 <= n <= 7`
+* - `TIMESTAMP(n)`
+  - `DATETIME2(n)`
+  - `0 <= n <= 7`
+:::
 
 Complete list of [SQL Server data types](https://msdn.microsoft.com/library/ms187752.aspx).
 
 (sqlserver-numeric-mapping)=
-
 ### Numeric type mapping
 
 For SQL Server `FLOAT[(n)]`:
@@ -308,7 +303,6 @@ For SQL Server `FLOAT[(n)]`:
 - If `24 < n <= 53` maps to Trino `DOUBLE`
 
 (sqlserver-character-mapping)=
-
 ### Character type mapping
 
 For Trino `CHAR(n)`:
@@ -325,40 +319,55 @@ For Trino `VARCHAR(n)`:
 ```
 
 (sqlserver-sql-support)=
-
 ## SQL support
 
 The connector provides read access and write access to data and metadata in SQL
-Server. In addition to the {ref}`globally available <sql-globally-available>`
-and {ref}`read operation <sql-read-operations>` statements, the connector
-supports the following features:
+Server. In addition to the [globally available](sql-globally-available) and
+[read operation](sql-read-operations) statements, the connector supports the
+following features:
 
-- {doc}`/sql/insert`
-- {doc}`/sql/delete`
-- {doc}`/sql/truncate`
-- {ref}`sql-schema-table-management`
+- [](/sql/insert), see also [](sqlserver-insert)
+- [](/sql/update), see also [](sqlserver-update)
+- [](/sql/delete), see also [](sqlserver-delete)
+- [](/sql/truncate)
+- [](sql-schema-table-management), see also:
+  - [](sqlserver-alter-table)
+- [](sqlserver-procedures)
+- [](sqlserver-table-functions)
 
+
+(sqlserver-insert)=
+```{include} non-transactional-insert.fragment
+```
+
+(sqlserver-update)=
+```{include} sql-update-limitation.fragment
+```
+
+(sqlserver-delete)=
 ```{include} sql-delete-limitation.fragment
 ```
 
+(sqlserver-alter-table)=
 ```{include} alter-table-limitation.fragment
 ```
 
-(sqlserver-fte-support)=
+(sqlserver-procedures)=
+### Procedures
 
-## Fault-tolerant execution support
+```{include} jdbc-procedures-flush.fragment
+```
+```{include} procedures-execute.fragment
+```
 
-The connector supports {doc}`/admin/fault-tolerant-execution` of query
-processing. Read and write operations are both supported with any retry policy.
-
-## Table functions
+(sqlserver-table-functions)=
+### Table functions
 
 The connector provides specific {doc}`table functions </functions/table>` to
 access SQL Server.
 
 (sqlserver-query-function)=
-
-### `query(varchar) -> table`
+#### `query(varchar) -> table`
 
 The `query` function allows you to query the underlying database directly. It
 requires syntax native to SQL Server, because the full query is pushed down and
@@ -389,13 +398,12 @@ FROM
 ```
 
 (sqlserver-procedure-function)=
-
 ### `procedure(varchar) -> table`
 
 The `procedure` function allows you to run stored procedures on the underlying
 database directly. It requires syntax native to SQL Server, because the full query
 is pushed down and processed in SQL Server. In order to use this table function set
-`sqlserver.experimental.stored-procedure-table-function-enabled` to `true`.
+`sqlserver.stored-procedure-table-function-enabled` to `true`.
 
 :::{note}
 The `procedure` function does not support running StoredProcedures that return multiple statements,
@@ -444,7 +452,6 @@ The connector includes a number of performance improvements, detailed in the
 following sections.
 
 (sqlserver-table-statistics)=
-
 ### Table statistics
 
 The SQL Server connector can use {doc}`table and column statistics
@@ -476,7 +483,6 @@ Refer to SQL Server documentation for information about options, limitations and
 additional considerations.
 
 (sqlserver-pushdown)=
-
 ### Pushdown
 
 The connector supports pushdown for a number of operations:
@@ -521,7 +527,6 @@ To ensure correct results, operators are not pushed down for columns using a
 case-insensitive collation.
 
 (sqlserver-bulk-insert)=
-
 ### Bulk insert
 
 You can optionally use the [bulk copy API](https://docs.microsoft.com/sql/connect/jdbc/use-bulk-copy-api-batch-insert-operation)
@@ -533,25 +538,24 @@ logging requirements](https://docs.microsoft.com/sql/relational-databases/import
 The following table shows the relevant catalog configuration properties and
 their default values:
 
-```{eval-rst}
-.. list-table:: Bulk load properties
-  :widths: 30, 60, 10
-  :header-rows: 1
+:::{list-table} Bulk load properties
+:widths: 30, 60, 10
+:header-rows: 1
 
-  * - Property name
-    - Description
-    - Default
-  * - ``sqlserver.bulk-copy-for-write.enabled``
-    - Use the SQL Server bulk copy API for writes. The corresponding catalog
-      session property is ``bulk_copy_for_write``.
-    - ``false``
-  * - ``sqlserver.bulk-copy-for-write.lock-destination-table``
-    - Obtain a bulk update lock on the destination table for write operations.
-      The corresponding catalog session property is
-      ``bulk_copy_for_write_lock_destination_table``. Setting is only used when
-      ``bulk-copy-for-write.enabled=true``.
-    - ``false``
-```
+* - Property name
+  - Description
+  - Default
+* - `sqlserver.bulk-copy-for-write.enabled`
+  - Use the SQL Server bulk copy API for writes. The corresponding catalog
+    session property is `bulk_copy_for_write`.
+  - `false`
+* - `sqlserver.bulk-copy-for-write.lock-destination-table`
+  - Obtain a bulk update lock on the destination table for write operations. The
+    corresponding catalog session property is
+    `bulk_copy_for_write_lock_destination_table`. Setting is only used when
+    `bulk-copy-for-write.enabled=true`.
+  - `false`
+:::
 
 Limitations:
 

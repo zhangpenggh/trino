@@ -20,7 +20,6 @@ These functions and operators operate on {ref}`date and time data types <date-ti
 | `-`      | `interval '3' year - interval '5' month`            | `2-7`                     |
 
 (at-time-zone-operator)=
-
 ## Time zone conversion
 
 The `AT TIME ZONE` operator sets the time zone of a timestamp:
@@ -121,19 +120,15 @@ SELECT from_iso8601_date('2020-123');
 ```
 :::
 
-:::{function} at_timezone(timestamp(p), zone) -> timestamp(p) with time zone
-Returns the timestamp specified in `timestamp` with the time zone
-converted from the session time zone to the time zone specified in `zone`
-with precision `p`. In the following example, the session time zone is set
-to `America/New_York`, which is three hours ahead of
-`America/Los_Angeles`:
+:::{function} at_timezone(timestamp(p) with time zone, zone) -> timestamp(p) with time zone
+Converts a `timestamp(p) with time zone` to a time zone specified in `zone`.
 
-```
-SELECT current_timezone()
--- America/New_York
+In the following example, the input timezone is `GMT`, which is seven hours
+ahead of `America/Los_Angeles` in November 2022:
 
-SELECT at_timezone(TIMESTAMP '2022-11-01 09:08:07.321', 'America/Los_Angeles')
--- 2022-11-01 06:08:07.321 America/Los_Angeles
+```sql
+SELECT at_timezone(TIMESTAMP '2022-11-01 09:08:07.321 GMT', 'America/Los_Angeles')
+-- 2022-11-01 02:08:07.321 America/Los_Angeles
 ```
 :::
 
@@ -244,6 +239,7 @@ The `date_trunc` function supports the following units:
 
 | Unit      | Example Truncated Value   |
 | --------- | ------------------------- |
+| `millisecond`  | `2001-08-22 03:04:05.321` |
 | `second`  | `2001-08-22 03:04:05.000` |
 | `minute`  | `2001-08-22 03:04:00.000` |
 | `hour`    | `2001-08-22 03:00:00.000` |
@@ -271,7 +267,6 @@ SELECT date_trunc('year', TIMESTAMP '2022-10-20 05:10:00');
 :::
 
 (datetime-interval-functions)=
-
 ## Interval functions
 
 The functions in this section support the following interval units:
@@ -426,10 +421,10 @@ SELECT date_format(TIMESTAMP '2022-10-20 05:10:00', '%m-%d-%Y %H');
 ```
 :::
 
-:::{function} date_parse(string, format) -> timestamp(3)
+:::{js:function} date_parse(string, format) → timestamp(3)
 Parses `string` into a timestamp using `format`:
 
-```
+```sql
 SELECT date_parse('2022/10/20/05', '%Y/%m/%d/%H');
 -- 2022-10-20 05:00:00.000
 ```
@@ -569,6 +564,30 @@ Returns the year of the [ISO week] from `x`.
 
 :::{function} yow(x) -> bigint
 This is an alias for {func}`year_of_week`.
+:::
+
+:::{function} timezone(timestamp(p) with time zone) -> varchar 
+
+Returns the timezone identifier from `timestamp(p) with time zone`. The format
+of the returned identifier is identical to the [format used in the input
+timestamp](timestamp-p-with-time-zone-data-type):
+
+```sql
+SELECT timezone(TIMESTAMP '2024-01-01 12:00:00 Asia/Tokyo'); -- Asia/Tokyo
+SELECT timezone(TIMESTAMP '2024-01-01 12:00:00 +01:00'); -- +01:00
+SELECT timezone(TIMESTAMP '2024-02-29 12:00:00 UTC'); -- UTC
+```
+:::
+
+:::{function} timezone(time(p) with time zone) -> varchar
+:no-index:
+Returns the timezone identifier from a `time(p) with time zone`. The format
+of the returned identifier is identical to the [format used in the input
+time](time-with-time-zone-data-type):
+
+```sql
+SELECT timezone(TIME '12:00:00+09:00'); -- +09:00
+```
 :::
 
 [datetimeformat]: http://joda-time.sourceforge.net/apidocs/org/joda/time/format/DateTimeFormat.html

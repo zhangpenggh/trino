@@ -27,15 +27,17 @@ import io.trino.cost.StatsCalculator;
 import io.trino.cost.StatsProvider;
 import io.trino.cost.TableStatsProvider;
 import io.trino.cost.TaskCountEstimator;
-import io.trino.execution.querystats.PlanOptimizersStatsCollector;
-import io.trino.execution.warnings.WarningCollector;
+import io.trino.metadata.Metadata;
 import io.trino.operator.RetryPolicy;
 import io.trino.spi.connector.CatalogHandle;
+import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.GroupingProperty;
 import io.trino.spi.connector.LocalProperty;
 import io.trino.spi.connector.WriterScalingOptions;
 import io.trino.sql.PlannerContext;
-import io.trino.sql.planner.DomainTranslator;
+import io.trino.sql.ir.Expression;
+import io.trino.sql.ir.Reference;
+import io.trino.sql.planner.NodePartitioningManager;
 import io.trino.sql.planner.Partitioning;
 import io.trino.sql.planner.PartitioningHandle;
 import io.trino.sql.planner.PartitioningScheme;
@@ -43,8 +45,7 @@ import io.trino.sql.planner.PlanNodeIdAllocator;
 import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.SymbolAllocator;
 import io.trino.sql.planner.SystemPartitioningHandle;
-import io.trino.sql.planner.TypeAnalyzer;
-import io.trino.sql.planner.TypeProvider;
+import io.trino.sql.planner.iterative.rule.DetermineTableScanNodePartitioning;
 import io.trino.sql.planner.iterative.rule.PushPredicateIntoTableScan;
 import io.trino.sql.planner.plan.AggregationNode;
 import io.trino.sql.planner.plan.ApplyNode;
@@ -82,6 +83,7 @@ import io.trino.sql.planner.plan.TableFinishNode;
 import io.trino.sql.planner.plan.TableFunctionNode;
 import io.trino.sql.planner.plan.TableFunctionProcessorNode;
 import io.trino.sql.planner.plan.TableScanNode;
+import io.trino.sql.planner.plan.TableUpdateNode;
 import io.trino.sql.planner.plan.TableWriterNode;
 import io.trino.sql.planner.plan.TopNNode;
 import io.trino.sql.planner.plan.TopNRankingNode;
@@ -89,8 +91,6 @@ import io.trino.sql.planner.plan.UnionNode;
 import io.trino.sql.planner.plan.UnnestNode;
 import io.trino.sql.planner.plan.ValuesNode;
 import io.trino.sql.planner.plan.WindowNode;
-import io.trino.sql.tree.Expression;
-import io.trino.sql.tree.SymbolReference;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -114,9 +114,11 @@ import static io.trino.SystemSessionProperties.ignoreDownStreamPreferences;
 import static io.trino.SystemSessionProperties.isColocatedJoinEnabled;
 import static io.trino.SystemSessionProperties.isDistributedSortEnabled;
 import static io.trino.SystemSessionProperties.isForceSingleNodeOutput;
+import static io.trino.SystemSessionProperties.isScaleWriters;
 import static io.trino.SystemSessionProperties.isUseCostBasedPartitioning;
 import static io.trino.SystemSessionProperties.isUseExactPartitioning;
 import static io.trino.SystemSessionProperties.isUsePartialDistinctLimit;
+import static io.trino.SystemSessionProperties.isUseTableScanNodePartitioning;
 import static io.trino.sql.planner.SystemPartitioningHandle.FIXED_ARBITRARY_DISTRIBUTION;
 import static io.trino.sql.planner.SystemPartitioningHandle.FIXED_HASH_DISTRIBUTION;
 import static io.trino.sql.planner.SystemPartitioningHandle.SCALED_WRITER_HASH_DISTRIBUTION;
@@ -142,30 +144,24 @@ public class AddExchanges
         implements PlanOptimizer
 {
     private final PlannerContext plannerContext;
-    private final TypeAnalyzer typeAnalyzer;
     private final StatsCalculator statsCalculator;
     private final TaskCountEstimator taskCountEstimator;
+    private final NodePartitioningManager nodePartitioningManager;
 
-    public AddExchanges(PlannerContext plannerContext, TypeAnalyzer typeAnalyzer, StatsCalculator statsCalculator, TaskCountEstimator taskCountEstimator)
+    public AddExchanges(PlannerContext plannerContext, StatsCalculator statsCalculator, TaskCountEstimator taskCountEstimator, NodePartitioningManager nodePartitioningManager)
     {
         this.plannerContext = requireNonNull(plannerContext, "plannerContext is null");
-        this.typeAnalyzer = requireNonNull(typeAnalyzer, "typeAnalyzer is null");
         this.statsCalculator = requireNonNull(statsCalculator, "statsCalculator is null");
         this.taskCountEstimator = requireNonNull(taskCountEstimator, "taskCountEstimator is null");
+        this.nodePartitioningManager = requireNonNull(nodePartitioningManager, "nodePartitioningManager is null");
     }
 
     @Override
-    public PlanNode optimize(
-            PlanNode plan,
-            Session session,
-            TypeProvider types,
-            SymbolAllocator symbolAllocator,
-            PlanNodeIdAllocator idAllocator,
-            WarningCollector warningCollector,
-            PlanOptimizersStatsCollector planOptimizersStatsCollector,
-            TableStatsProvider tableStatsProvider)
+    public PlanNode optimize(PlanNode plan, Context context)
     {
-        PlanWithProperties result = plan.accept(new Rewriter(idAllocator, symbolAllocator, session, tableStatsProvider), PreferredProperties.any());
+        PlanWithProperties result = plan.accept(
+                new Rewriter(context.idAllocator(), context.symbolAllocator(), context.session(), context.tableStatsProvider()),
+                PreferredProperties.any());
         return result.getNode();
     }
 
@@ -177,23 +173,17 @@ public class AddExchanges
         private static final int PREFER_PARENT_PARTITIONING_MIN_PARTITIONS_PER_DRIVER_MULTIPLIER = 128;
         private final PlanNodeIdAllocator idAllocator;
         private final SymbolAllocator symbolAllocator;
-        private final TypeProvider types;
         private final StatsProvider statsProvider;
         private final Session session;
-        private final DomainTranslator domainTranslator;
         private final boolean redistributeWrites;
-        private final boolean scaleWriters;
 
         public Rewriter(PlanNodeIdAllocator idAllocator, SymbolAllocator symbolAllocator, Session session, TableStatsProvider tableStatsProvider)
         {
             this.idAllocator = idAllocator;
             this.symbolAllocator = symbolAllocator;
-            this.types = symbolAllocator.getTypes();
-            this.statsProvider = new CachingStatsProvider(statsCalculator, session, types, tableStatsProvider);
+            this.statsProvider = new CachingStatsProvider(statsCalculator, session, tableStatsProvider);
             this.session = session;
-            this.domainTranslator = new DomainTranslator(plannerContext);
             this.redistributeWrites = SystemSessionProperties.isRedistributeWrites(session);
-            this.scaleWriters = SystemSessionProperties.isScaleWriters(session);
         }
 
         @Override
@@ -459,12 +449,12 @@ public class AddExchanges
                 return rebaseAndDeriveProperties(node, child);
             }
 
-            List<Symbol> partitionBy = node.getSpecification().orElseThrow().getPartitionBy();
+            List<Symbol> partitionBy = node.getSpecification().orElseThrow().partitionBy();
             List<LocalProperty<Symbol>> desiredProperties = new ArrayList<>();
             if (!partitionBy.isEmpty()) {
                 desiredProperties.add(new GroupingProperty<>(partitionBy));
             }
-            node.getSpecification().orElseThrow().getOrderingScheme().ifPresent(orderingScheme -> desiredProperties.addAll(orderingScheme.toLocalProperties()));
+            node.getSpecification().orElseThrow().orderingScheme().ifPresent(orderingScheme -> desiredProperties.addAll(orderingScheme.toLocalProperties()));
 
             PlanWithProperties child = planChild(node, partitionedWithLocal(ImmutableSet.copyOf(partitionBy), desiredProperties));
 
@@ -594,7 +584,7 @@ public class AddExchanges
                                         node.getCount(),
                                         Optional.empty(),
                                         true,
-                                        node.getOrderingScheme().getOrderBy()),
+                                        node.getOrderingScheme().orderBy()),
                                 child.getProperties());
                     }
                     yield rebaseAndDeriveProperties(node, child);
@@ -606,18 +596,6 @@ public class AddExchanges
         public PlanWithProperties visitSort(SortNode node, PreferredProperties preferredProperties)
         {
             PlanWithProperties child = planChild(node, PreferredProperties.undistributed());
-
-            if (child.getProperties().isSingleNode()) {
-                // current plan so far is single node, so local properties are effectively global properties
-                // skip the SortNode if the local properties guarantee ordering on Sort keys
-                // TODO: This should be extracted as a separate optimizer once the planner is able to reason about the ordering of each operator
-                List<LocalProperty<Symbol>> desiredProperties = node.getOrderingScheme().toLocalProperties();
-
-                if (LocalProperties.match(child.getProperties().getLocalProperties(), desiredProperties).stream()
-                        .noneMatch(Optional::isPresent)) {
-                    return child;
-                }
-            }
 
             if (isDistributedSortEnabled(session)) {
                 child = planChild(node, PreferredProperties.any());
@@ -654,7 +632,7 @@ public class AddExchanges
 
             PlanWithProperties child = planChild(node, PreferredProperties.any());
 
-            if (!child.getProperties().isSingleNode()) {
+            if (!node.isPartial() && !child.getProperties().isSingleNode()) {
                 child = withDerivedProperties(
                         new LimitNode(idAllocator.getNextId(), child.getNode(), node.getCount(), true),
                         child.getProperties());
@@ -693,11 +671,8 @@ public class AddExchanges
                         (TableScanNode) node.getSource(),
                         true,
                         session,
-                        symbolAllocator,
                         plannerContext,
-                        typeAnalyzer,
-                        statsProvider,
-                        domainTranslator);
+                        statsProvider);
                 if (plan.isPresent()) {
                     return new PlanWithProperties(plan.get(), derivePropertiesRecursively(plan.get()));
                 }
@@ -709,7 +684,53 @@ public class AddExchanges
         @Override
         public PlanWithProperties visitTableScan(TableScanNode node, PreferredProperties preferredProperties)
         {
+            // attempt to push preferred partitioning into the table scan
+            var partitioningProperties = preferredProperties.getGlobalProperties().flatMap(PreferredProperties.Global::getPartitioningProperties);
+            if (isUseTableScanNodePartitioning(session) && partitioningProperties.isPresent()) {
+                Optional<TableScanNode> partitionedNode = pushPartitioningIntoTableScan(plannerContext.getMetadata(), session, node, partitioningProperties.get());
+                if (partitionedNode.isPresent()) {
+                    node = partitionedNode.get();
+                }
+            }
             return new PlanWithProperties(node, deriveProperties(node, ImmutableList.of()));
+        }
+
+        private Optional<TableScanNode> pushPartitioningIntoTableScan(Metadata metadata, Session session, TableScanNode node, PreferredProperties.PartitioningProperties partitioningProperties)
+        {
+            verify(node.getAssignments().keySet().containsAll(partitioningProperties.getPartitioningColumns()), "TableScanNode does not read all partitioning columns");
+
+            List<ColumnHandle> partitionColumns;
+            if (partitioningProperties.getPartitioning().isPresent()) {
+                Partitioning partitioning = partitioningProperties.getPartitioning().get();
+                // Partitioning with a required function that has constant arguments cannot be pushed into the table scan.
+                // The APIs do not support this, and it would require the connectors support evaluation with provided constants.
+                if (!partitioning.getArguments().stream().allMatch(Partitioning.ArgumentBinding::isVariable)) {
+                    return Optional.empty();
+                }
+                partitionColumns = partitioning.getArguments().stream()
+                        .map(Partitioning.ArgumentBinding::getColumn)
+                        .map(node.getAssignments()::get)
+                        .collect(toImmutableList());
+            }
+            else {
+                partitionColumns = partitioningProperties.getPartitioningColumns().stream()
+                        .map(node.getAssignments()::get)
+                        .collect(toImmutableList());
+            }
+
+            if (partitionColumns.isEmpty()) {
+                return Optional.empty();
+            }
+
+            return metadata.applyPartitioning(session, node.getTable(), partitioningProperties.getPartitioning().map(Partitioning::getHandle), partitionColumns)
+                    .map(node::withTableHandle)
+                    // Activate the partitioning if it passes the rules defined in DetermineTableScanNodePartitioning
+                    .map(newNode -> DetermineTableScanNodePartitioning.setUseConnectorNodePartitioning(
+                            plannerContext.getMetadata(),
+                            nodePartitioningManager,
+                            taskCountEstimator,
+                            session,
+                            newNode));
         }
 
         @Override
@@ -721,13 +742,16 @@ public class AddExchanges
         @Override
         public PlanWithProperties visitTableWriter(TableWriterNode node, PreferredProperties preferredProperties)
         {
-            return visitTableWriter(node, node.getPartitioningScheme(), node.getSource(), preferredProperties, node.getTarget());
+            return visitTableWriter(node, node.getPartitioningScheme(), node.getSource(), preferredProperties, node.getTarget(), isScaleWriters(session));
         }
 
         @Override
         public PlanWithProperties visitTableExecute(TableExecuteNode node, PreferredProperties preferredProperties)
         {
-            return visitTableWriter(node, node.getPartitioningScheme(), node.getSource(), preferredProperties, node.getTarget());
+            // Disable scale writers for partitioned data in case of Optimize since it can lead to small files and
+            // not deterministic wrt to user provided min file size configuration.
+            boolean scaleWriters = node.getPartitioningScheme().isEmpty() && isScaleWriters(session);
+            return visitTableWriter(node, node.getPartitioningScheme(), node.getSource(), preferredProperties, node.getTarget(), scaleWriters);
         }
 
         @Override
@@ -740,10 +764,10 @@ public class AddExchanges
                             .build());
         }
 
-        private PlanWithProperties visitTableWriter(PlanNode node, Optional<PartitioningScheme> partitioningScheme, PlanNode source, PreferredProperties preferredProperties, TableWriterNode.WriterTarget writerTarget)
+        private PlanWithProperties visitTableWriter(PlanNode node, Optional<PartitioningScheme> partitioningScheme, PlanNode source, PreferredProperties preferredProperties, TableWriterNode.WriterTarget writerTarget, boolean scaleWriters)
         {
             PlanWithProperties newSource = source.accept(this, preferredProperties);
-            PlanWithProperties partitionedSource = getWriterPlanWithProperties(partitioningScheme, newSource, writerTarget);
+            PlanWithProperties partitionedSource = getWriterPlanWithProperties(partitioningScheme, newSource, writerTarget, scaleWriters);
 
             return rebaseAndDeriveProperties(node, partitionedSource);
         }
@@ -754,12 +778,15 @@ public class AddExchanges
             PlanWithProperties source = node.getSource().accept(this, preferredProperties);
 
             Optional<PartitioningScheme> partitioningScheme = node.getPartitioningScheme();
-            PlanWithProperties partitionedSource = getWriterPlanWithProperties(partitioningScheme, source, node.getTarget());
+            // Disable scale writers for merge operation. Currently, merge operation is not supported with scale
+            // writers since it is supposed to writer a single partition from a single writer.
+            // TODO: Add support for scale writers for merge operation. https://github.com/trinodb/trino/issues/14622
+            PlanWithProperties partitionedSource = getWriterPlanWithProperties(partitioningScheme, source, node.getTarget(), false);
 
             return rebaseAndDeriveProperties(node, partitionedSource);
         }
 
-        private PlanWithProperties getWriterPlanWithProperties(Optional<PartitioningScheme> partitioningScheme, PlanWithProperties newSource, TableWriterNode.WriterTarget writerTarget)
+        private PlanWithProperties getWriterPlanWithProperties(Optional<PartitioningScheme> partitioningScheme, PlanWithProperties newSource, TableWriterNode.WriterTarget writerTarget, boolean scaleWriters)
         {
             WriterScalingOptions scalingOptions = writerTarget.getWriterScalingOptions(plannerContext.getMetadata(), session);
             if (partitioningScheme.isEmpty()) {
@@ -821,6 +848,16 @@ public class AddExchanges
 
         @Override
         public PlanWithProperties visitTableDelete(TableDeleteNode node, PreferredProperties context)
+        {
+            return new PlanWithProperties(
+                    node,
+                    ActualProperties.builder()
+                            .global(singlePartition())
+                            .build());
+        }
+
+        @Override
+        public PlanWithProperties visitTableUpdate(TableUpdateNode node, PreferredProperties context)
         {
             return new PlanWithProperties(
                     node,
@@ -942,10 +979,15 @@ public class AddExchanges
             SetMultimap<Symbol, Symbol> leftToRight = createMapping(leftSymbols, rightSymbols);
 
             PlanWithProperties right;
-
             if (isNodePartitionedOn(left.getProperties(), leftSymbols) && !left.getProperties().isSingleNode()) {
                 Partitioning rightPartitioning = left.getProperties().translate(createTranslator(leftToRight)).getNodePartitioning().get();
                 right = node.getRight().accept(this, PreferredProperties.partitioned(rightPartitioning));
+
+                // At this point the left and right might have different but compatible partitioning schemes.  This can happen in Hive/Iceberg hash bucket
+                // partitioning with different bucket counts.
+                // The inconsistencies in the partitioning schemes will be resolved in PlanFragmenter.PartitioningHandleReassigner.
+
+                // If right partitioning is not compatible with left partitioning, add an exchange to repartition the right
                 if (!right.getProperties().isCompatibleTablePartitioningWith(left.getProperties(), rightToLeft::get, plannerContext.getMetadata(), session)) {
                     right = withDerivedProperties(
                             partitionedExchange(idAllocator.getNextId(), REMOTE, right.getNode(), new PartitioningScheme(rightPartitioning, right.getNode().getOutputSymbols())),
@@ -1090,6 +1132,12 @@ public class AddExchanges
                 if (isNodePartitionedOn(source.getProperties(), sourceSymbols) && !source.getProperties().isSingleNode()) {
                     Partitioning filteringPartitioning = source.getProperties().translate(createTranslator(sourceToFiltering)).getNodePartitioning().get();
                     filteringSource = node.getFilteringSource().accept(this, PreferredProperties.partitionedWithNullsAndAnyReplicated(filteringPartitioning));
+
+                    // At this point the source and filteringSource might have different but compatible partitioning schemes.  This can happen in Hive/Iceberg hash bucket
+                    // partitioning with different bucket counts
+                    // The inconsistencies in the partitioning schemes will be resolved in PlanFragmenter.PartitioningHandleReassigner.
+
+                    // If filteringSource partitioning is not compatible with source partitioning, add an exchange to repartition the filteringSource
                     if (!source.getProperties().withReplicatedNulls(true).isCompatibleTablePartitioningWith(filteringSource.getProperties(), sourceToFiltering::get, plannerContext.getMetadata(), session)) {
                         filteringSource = withDerivedProperties(
                                 partitionedExchange(idAllocator.getNextId(), REMOTE, filteringSource.getNode(), new PartitioningScheme(
@@ -1331,7 +1379,7 @@ public class AddExchanges
                     // NOTE: new symbols for ExchangeNode output are required in order to keep plan logically correct with new local union below
 
                     List<Symbol> exchangeOutputLayout = node.getOutputSymbols().stream()
-                            .map(outputSymbol -> symbolAllocator.newSymbol(outputSymbol.getName(), types.get(outputSymbol)))
+                            .map(outputSymbol -> symbolAllocator.newSymbol(outputSymbol.name(), outputSymbol.type()))
                             .collect(toImmutableList());
 
                     result = new ExchangeNode(
@@ -1459,7 +1507,7 @@ public class AddExchanges
         private ActualProperties deriveProperties(PlanNode result, List<ActualProperties> inputProperties)
         {
             // TODO: move this logic to PlanSanityChecker once PropertyDerivations.deriveProperties fully supports local exchanges
-            ActualProperties outputProperties = PropertyDerivations.deriveProperties(result, inputProperties, plannerContext, session, types, typeAnalyzer);
+            ActualProperties outputProperties = PropertyDerivations.deriveProperties(result, inputProperties, plannerContext, session);
             verify(result instanceof SemiJoinNode || inputProperties.stream().noneMatch(ActualProperties::isNullsAndAnyReplicated) || outputProperties.isNullsAndAnyReplicated(),
                     "SemiJoinNode is the only node that can strip null replication");
             return outputProperties;
@@ -1467,7 +1515,7 @@ public class AddExchanges
 
         private ActualProperties derivePropertiesRecursively(PlanNode result)
         {
-            return PropertyDerivations.derivePropertiesRecursively(result, plannerContext, session, types, typeAnalyzer);
+            return PropertyDerivations.derivePropertiesRecursively(result, plannerContext, session);
         }
 
         private PreferredProperties computePreference(PreferredProperties preferredProperties, PreferredProperties parentPreferredProperties)
@@ -1488,7 +1536,7 @@ public class AddExchanges
     {
         Map<Symbol, Symbol> outputToInput = new HashMap<>();
         for (Map.Entry<Symbol, Expression> assignment : assignments.getMap().entrySet()) {
-            if (assignment.getValue() instanceof SymbolReference) {
+            if (assignment.getValue() instanceof Reference) {
                 outputToInput.put(assignment.getKey(), Symbol.from(assignment.getValue()));
             }
         }
@@ -1547,7 +1595,7 @@ public class AddExchanges
                 .findAll()
                 .stream()
                 .map(TableScanNode.class::cast)
-                .map(node -> node.getTable().getCatalogHandle());
+                .map(node -> node.getTable().catalogHandle());
     }
 
     private static boolean isNotRemoteExchange(PlanNode node)

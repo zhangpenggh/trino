@@ -14,17 +14,21 @@
 package io.trino.security;
 
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import io.trino.metadata.QualifiedObjectName;
+import io.trino.spi.QueryId;
 import io.trino.spi.connector.CatalogSchemaName;
 import io.trino.spi.connector.CatalogSchemaTableName;
+import io.trino.spi.connector.ColumnSchema;
+import io.trino.spi.connector.EntityKindAndName;
+import io.trino.spi.connector.EntityPrivilege;
 import io.trino.spi.connector.SchemaTableName;
-import io.trino.spi.function.FunctionKind;
+import io.trino.spi.function.SchemaFunctionName;
 import io.trino.spi.security.AccessDeniedException;
 import io.trino.spi.security.Identity;
 import io.trino.spi.security.Privilege;
 import io.trino.spi.security.TrinoPrincipal;
 import io.trino.spi.security.ViewExpression;
-import io.trino.spi.type.Type;
 
 import java.security.Principal;
 import java.util.Collection;
@@ -32,8 +36,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-
-import static io.trino.spi.security.AccessDeniedException.denySetViewAuthorization;
 
 public interface AccessControl
 {
@@ -75,7 +77,7 @@ public interface AccessControl
      *
      * @throws AccessDeniedException if not allowed
      */
-    void checkCanExecuteQuery(Identity identity);
+    void checkCanExecuteQuery(Identity identity, QueryId queryId);
 
     /**
      * Checks if identity can view a query owned by the specified user.  The method
@@ -138,13 +140,6 @@ public interface AccessControl
      * @throws AccessDeniedException if not allowed
      */
     void checkCanRenameSchema(SecurityContext context, CatalogSchemaName schemaName, String newSchemaName);
-
-    /**
-     * Check if identity is allowed to change the specified schema's user/role.
-     *
-     * @throws AccessDeniedException if not allowed
-     */
-    void checkCanSetSchemaAuthorization(SecurityContext context, CatalogSchemaName schemaName, TrinoPrincipal principal);
 
     /**
      * Check if identity is allowed to execute SHOW SCHEMAS in a catalog.
@@ -253,9 +248,9 @@ public interface AccessControl
     void checkCanShowColumns(SecurityContext context, CatalogSchemaTableName table);
 
     /**
-     * Filter the list of columns to those visible to the identity.
+     * Filter lists of columns of multiple tables to those visible to the identity.
      */
-    Set<String> filterColumns(SecurityContext context, CatalogSchemaTableName tableName, Set<String> columns);
+    Map<SchemaTableName, Set<String>> filterColumns(SecurityContext context, String catalogName, Map<SchemaTableName, Set<String>> tableColumns);
 
     /**
      * Check if identity is allowed to add columns to the specified table.
@@ -277,13 +272,6 @@ public interface AccessControl
      * @throws AccessDeniedException if not allowed
      */
     void checkCanAlterColumn(SecurityContext context, QualifiedObjectName tableName);
-
-    /**
-     * Check if identity is allowed to change the specified table's user/role.
-     *
-     * @throws AccessDeniedException if not allowed
-     */
-    void checkCanSetTableAuthorization(SecurityContext context, QualifiedObjectName tableName, TrinoPrincipal principal);
 
     /**
      * Check if identity is allowed to rename a column in the specified table.
@@ -335,16 +323,6 @@ public interface AccessControl
     void checkCanRenameView(SecurityContext context, QualifiedObjectName viewName, QualifiedObjectName newViewName);
 
     /**
-     * Check if identity is allowed to change the specified view's user/role.
-     *
-     * @throws AccessDeniedException if not allowed
-     */
-    default void checkCanSetViewAuthorization(SecurityContext context, QualifiedObjectName view, TrinoPrincipal principal)
-    {
-        denySetViewAuthorization(view.toString(), principal);
-    }
-
-    /**
      * Check if identity is allowed to drop the specified view.
      *
      * @throws AccessDeniedException if not allowed
@@ -394,20 +372,6 @@ public interface AccessControl
     void checkCanSetMaterializedViewProperties(SecurityContext context, QualifiedObjectName materializedViewName, Map<String, Optional<Object>> properties);
 
     /**
-     * Check if identity is allowed to create a view that executes the function.
-     *
-     * @throws AccessDeniedException if not allowed
-     */
-    void checkCanGrantExecuteFunctionPrivilege(SecurityContext context, String functionName, Identity grantee, boolean grantOption);
-
-    /**
-     * Check if identity is allowed to create a view that executes the function.
-     *
-     * @throws AccessDeniedException if not allowed
-     */
-    void checkCanGrantExecuteFunctionPrivilege(SecurityContext context, FunctionKind functionKind, QualifiedObjectName functionName, Identity grantee, boolean grantOption);
-
-    /**
      * Check if identity is allowed to grant a privilege to the grantee on the specified schema.
      *
      * @throws AccessDeniedException if not allowed
@@ -450,11 +414,32 @@ public interface AccessControl
     void checkCanRevokeTablePrivilege(SecurityContext context, Privilege privilege, QualifiedObjectName tableName, TrinoPrincipal revokee, boolean grantOption);
 
     /**
+     * Check if identity is allowed to grant the specified privilege to the grantee on the specified entity.
+     *
+     * @throws AccessDeniedException if not allowed
+     */
+    void checkCanGrantEntityPrivilege(SecurityContext context, EntityPrivilege privilege, EntityKindAndName entity, TrinoPrincipal grantee, boolean grantOption);
+
+    /**
+     * Check if identity is allowed to deny the specified privilege to the grantee on the specified entity.
+     *
+     * @throws AccessDeniedException if not allowed
+     */
+    void checkCanDenyEntityPrivilege(SecurityContext context, EntityPrivilege privilege, EntityKindAndName entity, TrinoPrincipal grantee);
+
+    /**
+     * Check if identity is allowed to revoke the specified privilege on the specified entity from the revokee.
+     *
+     * @throws AccessDeniedException if not allowed
+     */
+    void checkCanRevokeEntityPrivilege(SecurityContext context, EntityPrivilege privilege, EntityKindAndName entity, TrinoPrincipal revokee, boolean grantOption);
+
+    /**
      * Check if identity is allowed to set the specified system property.
      *
      * @throws AccessDeniedException if not allowed
      */
-    void checkCanSetSystemSessionProperty(Identity identity, String propertyName);
+    void checkCanSetSystemSessionProperty(Identity identity, QueryId queryId, String propertyName);
 
     /**
      * Check if identity is allowed to set the specified catalog property.
@@ -547,18 +532,14 @@ public interface AccessControl
     void checkCanExecuteProcedure(SecurityContext context, QualifiedObjectName procedureName);
 
     /**
-     * Check if identity is allowed to execute function
-     *
-     * @throws AccessDeniedException if not allowed
+     * Is the identity allowed to execute function?
      */
-    void checkCanExecuteFunction(SecurityContext context, String functionName);
+    boolean canExecuteFunction(SecurityContext context, QualifiedObjectName functionName);
 
     /**
-     * Check if identity is allowed to execute function
-     *
-     * @throws AccessDeniedException if not allowed
+     * Is the identity allowed to create a view that executes the specified function?
      */
-    void checkCanExecuteFunction(SecurityContext context, FunctionKind functionKind, QualifiedObjectName functionName);
+    boolean canCreateViewWithExecuteFunction(SecurityContext context, QualifiedObjectName functionName);
 
     /**
      * Check if identity is allowed to execute given table procedure on given table
@@ -567,13 +548,57 @@ public interface AccessControl
      */
     void checkCanExecuteTableProcedure(SecurityContext context, QualifiedObjectName tableName, String procedureName);
 
+    /**
+     * Check if identity is allowed to show functions by executing SHOW FUNCTIONS in a catalog schema.
+     * <p>
+     * NOTE: This method is only present to give users an error message when listing is not allowed.
+     * The {@link #filterFunctions} method must filter all results for unauthorized users,
+     * since there are multiple ways to list functions.
+     *
+     * @throws AccessDeniedException if not allowed
+     */
+    void checkCanShowFunctions(SecurityContext context, CatalogSchemaName schema);
+
+    /**
+     * Filter the list of functions to those visible to the identity.
+     */
+    Set<SchemaFunctionName> filterFunctions(SecurityContext context, String catalogName, Set<SchemaFunctionName> functionNames);
+
+    /**
+     * Check if identity is allowed to create the specified function.
+     *
+     * @throws AccessDeniedException if not allowed
+     */
+    void checkCanCreateFunction(SecurityContext context, QualifiedObjectName functionName);
+
+    /**
+     * Check if identity is allowed to drop the specified function.
+     *
+     * @throws AccessDeniedException if not allowed
+     */
+    void checkCanDropFunction(SecurityContext context, QualifiedObjectName functionName);
+
+    /**
+     * Check if identity is allowed to execute SHOW CREATE FUNCTION.
+     *
+     * @throws AccessDeniedException if not allowed
+     */
+    void checkCanShowCreateFunction(SecurityContext context, QualifiedObjectName functionName);
+
     default List<ViewExpression> getRowFilters(SecurityContext context, QualifiedObjectName tableName)
     {
         return ImmutableList.of();
     }
 
-    default Optional<ViewExpression> getColumnMask(SecurityContext context, QualifiedObjectName tableName, String columnName, Type type)
+    default Map<ColumnSchema, ViewExpression> getColumnMasks(SecurityContext context, QualifiedObjectName tableName, List<ColumnSchema> columns)
     {
-        return Optional.empty();
+        return ImmutableMap.of();
     }
+
+    /**
+     * Check that the principal has the privileges to set the owner of the entity with the give name and ownedKind.
+     *
+     * @throws AccessDeniedException if not allowed
+     */
+    void checkCanSetEntityAuthorization(SecurityContext context, EntityKindAndName entityKindAndName, TrinoPrincipal principal);
 }

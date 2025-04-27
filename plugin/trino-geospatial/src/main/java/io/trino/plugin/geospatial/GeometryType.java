@@ -14,24 +14,40 @@
 package io.trino.plugin.geospatial;
 
 import io.airlift.slice.Slice;
+import io.airlift.slice.XxHash64;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.block.VariableWidthBlock;
 import io.trino.spi.block.VariableWidthBlockBuilder;
 import io.trino.spi.connector.ConnectorSession;
+import io.trino.spi.function.IsNull;
+import io.trino.spi.function.ScalarOperator;
 import io.trino.spi.type.AbstractVariableWidthType;
+import io.trino.spi.type.StandardTypes;
+import io.trino.spi.type.TypeOperatorDeclaration;
+import io.trino.spi.type.TypeOperators;
 import io.trino.spi.type.TypeSignature;
 
 import static io.trino.geospatial.serde.GeometrySerde.deserialize;
+import static io.trino.spi.function.OperatorType.EQUAL;
+import static io.trino.spi.function.OperatorType.HASH_CODE;
+import static io.trino.spi.function.OperatorType.IDENTICAL;
+import static io.trino.spi.function.OperatorType.XX_HASH_64;
 
 public class GeometryType
         extends AbstractVariableWidthType
 {
     public static final GeometryType GEOMETRY = new GeometryType();
-    public static final String GEOMETRY_TYPE_NAME = "Geometry";
+
+    private static final TypeOperatorDeclaration TYPE_OPERATOR_DECLARATION =
+            TypeOperatorDeclaration.builder(Slice.class)
+                    .addOperators(DEFAULT_READ_OPERATORS)
+                    .addOperators(DEFAULT_COMPARABLE_OPERATORS)
+                    .build();
 
     private GeometryType()
     {
-        super(new TypeSignature(GEOMETRY_TYPE_NAME), Slice.class);
+        super(new TypeSignature(StandardTypes.GEOMETRY), Slice.class);
     }
 
     protected GeometryType(TypeSignature signature)
@@ -40,20 +56,23 @@ public class GeometryType
     }
 
     @Override
-    public void appendTo(Block block, int position, BlockBuilder blockBuilder)
+    public TypeOperatorDeclaration getTypeOperatorDeclaration(TypeOperators typeOperators)
     {
-        if (block.isNull(position)) {
-            blockBuilder.appendNull();
-        }
-        else {
-            ((VariableWidthBlockBuilder) blockBuilder).buildEntry(valueBuilder -> block.writeSliceTo(position, 0, block.getSliceLength(position), valueBuilder));
-        }
+        return TYPE_OPERATOR_DECLARATION;
+    }
+
+    @Override
+    public boolean isComparable()
+    {
+        return true;
     }
 
     @Override
     public Slice getSlice(Block block, int position)
     {
-        return block.getSlice(position, 0, block.getSliceLength(position));
+        VariableWidthBlock valueBlock = (VariableWidthBlock) block.getUnderlyingValueBlock();
+        int valuePosition = block.getUnderlyingValuePosition(position);
+        return valueBlock.getSlice(valuePosition);
     }
 
     @Override
@@ -82,7 +101,38 @@ public class GeometryType
         if (block.isNull(position)) {
             return null;
         }
-        Slice slice = block.getSlice(position, 0, block.getSliceLength(position));
-        return deserialize(slice).asText();
+        try {
+            return deserialize(getSlice(block, position)).asText();
+        }
+        catch (Exception e) {
+            return "<invalid geometry>";
+        }
+    }
+
+    @ScalarOperator(HASH_CODE)
+    private static long hashCodeOperator(Slice value)
+    {
+        return value.hashCode();
+    }
+
+    @ScalarOperator(XX_HASH_64)
+    private static long xxHash64Operator(Slice value)
+    {
+        return XxHash64.hash(value);
+    }
+
+    @ScalarOperator(EQUAL)
+    private static boolean equalOperator(Slice left, Slice right)
+    {
+        return left.equals(right);
+    }
+
+    @ScalarOperator(IDENTICAL)
+    private static boolean identical(Slice left, @IsNull boolean leftNull, Slice right, @IsNull boolean rightNull)
+    {
+        if (leftNull || rightNull) {
+            return leftNull == rightNull;
+        }
+        return left.equals(right);
     }
 }

@@ -24,8 +24,8 @@ import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
 import io.trino.operator.BlockedReason;
 import io.trino.operator.OperatorStats;
-import io.trino.plugin.base.metrics.TDigestHistogram;
 import io.trino.spi.eventlistener.StageGcStatistics;
+import io.trino.spi.metrics.Metrics;
 import org.joda.time.DateTime;
 
 import java.util.List;
@@ -34,7 +34,10 @@ import java.util.OptionalDouble;
 import java.util.Set;
 
 import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.airlift.units.DataSize.Unit.BYTE;
+import static io.airlift.units.DataSize.succinctBytes;
+import static io.trino.execution.DistributionSnapshot.pruneMetrics;
 import static io.trino.execution.StageState.RUNNING;
 import static java.lang.Math.min;
 import static java.util.Objects.requireNonNull;
@@ -100,11 +103,12 @@ public class StageStats
     private final Duration failedInputBlockedTime;
 
     private final DataSize bufferedDataSize;
-    private final Optional<TDigestHistogram> outputBufferUtilization;
+    private final Optional<io.trino.execution.DistributionSnapshot> outputBufferUtilization;
     private final DataSize outputDataSize;
     private final DataSize failedOutputDataSize;
     private final long outputPositions;
     private final long failedOutputPositions;
+    private final Metrics outputBufferMetrics;
 
     private final Duration outputBlockedTime;
     private final Duration failedOutputBlockedTime;
@@ -175,11 +179,12 @@ public class StageStats
             @JsonProperty("failedInputBlockedTime") Duration failedInputBlockedTime,
 
             @JsonProperty("bufferedDataSize") DataSize bufferedDataSize,
-            @JsonProperty("outputBufferUtilization") Optional<TDigestHistogram> outputBufferUtilization,
+            @JsonProperty("outputBufferUtilization") Optional<io.trino.execution.DistributionSnapshot> outputBufferUtilization,
             @JsonProperty("outputDataSize") DataSize outputDataSize,
             @JsonProperty("failedOutputDataSize") DataSize failedOutputDataSize,
             @JsonProperty("outputPositions") long outputPositions,
             @JsonProperty("failedOutputPositions") long failedOutputPositions,
+            @JsonProperty("outputBufferMetrics") Metrics outputBufferMetrics,
 
             @JsonProperty("outputBlockedTime") Duration outputBlockedTime,
             @JsonProperty("failedOutputBlockedTime") Duration failedOutputBlockedTime,
@@ -271,6 +276,7 @@ public class StageStats
         this.outputPositions = outputPositions;
         checkArgument(failedOutputPositions >= 0, "failedOutputPositions is negative");
         this.failedOutputPositions = failedOutputPositions;
+        this.outputBufferMetrics = requireNonNull(outputBufferMetrics, "outputBufferMetrics is null");
 
         this.outputBlockedTime = requireNonNull(outputBlockedTime, "outputBlockedTime is null");
         this.failedOutputBlockedTime = requireNonNull(failedOutputBlockedTime, "failedOutputBlockedTime is null");
@@ -280,7 +286,8 @@ public class StageStats
 
         this.gcInfo = requireNonNull(gcInfo, "gcInfo is null");
 
-        this.operatorSummaries = ImmutableList.copyOf(requireNonNull(operatorSummaries, "operatorSummaries is null"));
+        requireNonNull(operatorSummaries, "operatorSummaries is null");
+        this.operatorSummaries = operatorSummaries.stream().map(OperatorStats::pruneDigests).collect(toImmutableList());
     }
 
     @JsonProperty
@@ -560,7 +567,7 @@ public class StageStats
     }
 
     @JsonProperty
-    public Optional<TDigestHistogram> getOutputBufferUtilization()
+    public Optional<io.trino.execution.DistributionSnapshot> getOutputBufferUtilization()
     {
         return outputBufferUtilization;
     }
@@ -587,6 +594,12 @@ public class StageStats
     public long getFailedOutputPositions()
     {
         return failedOutputPositions;
+    }
+
+    @JsonProperty
+    public Metrics getOutputBufferMetrics()
+    {
+        return outputBufferMetrics;
     }
 
     @JsonProperty
@@ -645,13 +658,16 @@ public class StageStats
                 queuedDrivers,
                 runningDrivers,
                 completedDrivers,
+                blockedDrivers,
                 physicalInputDataSize,
                 physicalInputPositions,
                 physicalInputReadTime,
+                physicalWrittenDataSize,
                 internalNetworkInputDataSize,
                 internalNetworkInputPositions,
                 rawInputDataSize,
                 rawInputPositions,
+                succinctBytes(operatorSummaries.stream().mapToLong(operatorSummary -> operatorSummary.getSpilledDataSize().toBytes()).sum()),
                 (long) cumulativeUserMemory,
                 (long) failedCumulativeUserMemory,
                 userMemoryReservation,
@@ -664,6 +680,71 @@ public class StageStats
                 blockedReasons,
                 progressPercentage,
                 runningPercentage);
+    }
+
+    public StageStats pruneDigests()
+    {
+        return new StageStats(
+                schedulingComplete,
+                getSplitDistribution,
+                totalTasks,
+                runningTasks,
+                completedTasks,
+                failedTasks,
+                totalDrivers,
+                queuedDrivers,
+                runningDrivers,
+                blockedDrivers,
+                completedDrivers,
+                cumulativeUserMemory,
+                failedCumulativeUserMemory,
+                userMemoryReservation,
+                revocableMemoryReservation,
+                totalMemoryReservation,
+                peakUserMemoryReservation,
+                peakRevocableMemoryReservation,
+                totalScheduledTime,
+                failedScheduledTime,
+                totalCpuTime,
+                failedCpuTime,
+                totalBlockedTime,
+                fullyBlocked,
+                blockedReasons,
+                physicalInputDataSize,
+                failedPhysicalInputDataSize,
+                physicalInputPositions,
+                failedPhysicalInputPositions,
+                physicalInputReadTime,
+                failedPhysicalInputReadTime,
+                internalNetworkInputDataSize,
+                failedInternalNetworkInputDataSize,
+                internalNetworkInputPositions,
+                failedInternalNetworkInputPositions,
+                rawInputDataSize,
+                failedRawInputDataSize,
+                rawInputPositions,
+                failedRawInputPositions,
+                processedInputDataSize,
+                failedProcessedInputDataSize,
+                processedInputPositions,
+                failedProcessedInputPositions,
+                inputBlockedTime,
+                failedInputBlockedTime,
+                bufferedDataSize,
+                outputBufferUtilization,
+                outputDataSize,
+                failedOutputDataSize,
+                outputPositions,
+                failedOutputPositions,
+                pruneMetrics(outputBufferMetrics),
+                outputBlockedTime,
+                failedOutputBlockedTime,
+                physicalWrittenDataSize,
+                failedPhysicalWrittenDataSize,
+                gcInfo,
+                operatorSummaries.stream()
+                        .map(OperatorStats::pruneDigests)
+                        .collect(toImmutableList()));
     }
 
     public static StageStats createInitial()
@@ -722,6 +803,7 @@ public class StageStats
                 zeroBytes,
                 0,
                 0,
+                Metrics.EMPTY,
                 zeroSeconds,
                 zeroSeconds,
                 zeroBytes,

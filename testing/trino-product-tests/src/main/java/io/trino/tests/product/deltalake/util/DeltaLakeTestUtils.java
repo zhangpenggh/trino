@@ -13,7 +13,6 @@
  */
 package io.trino.tests.product.deltalake.util;
 
-import com.amazonaws.services.glue.model.ConcurrentModificationException;
 import com.amazonaws.services.s3.AmazonS3;
 import com.amazonaws.services.s3.model.DeleteObjectsRequest;
 import com.amazonaws.services.s3.model.ObjectListing;
@@ -24,12 +23,17 @@ import dev.failsafe.RetryPolicy;
 import io.airlift.log.Logger;
 import io.trino.tempto.query.QueryResult;
 import org.intellij.lang.annotations.Language;
+import software.amazon.awssdk.services.glue.model.ConcurrentModificationException;
 
+import java.sql.SQLException;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.regex.Pattern;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
+import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static com.google.common.collect.Iterables.getOnlyElement;
 import static com.google.common.collect.MoreCollectors.onlyElement;
 import static io.trino.tests.product.utils.QueryExecutors.onDelta;
@@ -43,7 +47,18 @@ public final class DeltaLakeTestUtils
     public static final String DATABRICKS_COMMUNICATION_FAILURE_ISSUE = "https://github.com/trinodb/trino/issues/14391";
     @Language("RegExp")
     public static final String DATABRICKS_COMMUNICATION_FAILURE_MATCH =
-            "\\Q[Databricks][DatabricksJDBCDriver](500593) Communication link failure. Failed to connect to server. Reason: HTTP retry after response received with no Retry-After header, error: HTTP Response code: 503, Error message: Unknown.";
+            "\\Q[Databricks][\\E(DatabricksJDBCDriver|JDBCDriver)\\Q](500593) Communication link failure. Failed to connect to server. Reason: \\E" +
+                    "(" +
+                    "(HTTP retry after response received with no Retry-After header, error: HTTP Response code: 503|HTTP Response code: 504), Error message: Unknown." +
+                    "|java.net.SocketTimeoutException: Read timed out." +
+                    ")";
+    private static final RetryPolicy<QueryResult> DATABRICKS_COMMUNICATION_FAILURE_RETRY_POLICY = RetryPolicy.<QueryResult>builder()
+            .handleIf(throwable -> Throwables.getRootCause(throwable) instanceof SQLException)
+            .handleIf(throwable -> Pattern.compile(DATABRICKS_COMMUNICATION_FAILURE_MATCH).matcher(Throwables.getRootCause(throwable).getMessage()).find())
+            .withBackoff(1, 10, ChronoUnit.SECONDS)
+            .withMaxRetries(3)
+            .onRetry(event -> log.warn(event.getLastException(), "Query failed on attempt %d, will retry.", event.getAttemptCount()))
+            .build();
     private static final RetryPolicy<QueryResult> CONCURRENT_MODIFICATION_EXCEPTION_RETRY_POLICY = RetryPolicy.<QueryResult>builder()
             .handleIf(throwable -> Throwables.getRootCause(throwable) instanceof ConcurrentModificationException)
             .handleIf(throwable -> throwable.getMessage() != null && throwable.getMessage().contains("Table being modified concurrently"))
@@ -56,7 +71,10 @@ public final class DeltaLakeTestUtils
 
     public static Optional<DatabricksVersion> getDatabricksRuntimeVersion()
     {
-        String version = (String) onDelta().executeQuery("SELECT java_method('java.lang.System', 'getenv', 'DATABRICKS_RUNTIME_VERSION')").getOnlyValue();
+        String version = (String) Failsafe.with(DATABRICKS_COMMUNICATION_FAILURE_RETRY_POLICY)
+                .get(() -> onDelta().executeQuery("SELECT java_method('java.lang.System', 'getenv', 'DATABRICKS_RUNTIME_VERSION')"))
+                .getOnlyValue();
+
         // OSS Spark returns null
         if (version.equals("null")) {
             return Optional.empty();
@@ -66,7 +84,8 @@ public final class DeltaLakeTestUtils
 
     public static List<String> getColumnNamesOnDelta(String schemaName, String tableName)
     {
-        QueryResult result = onDelta().executeQuery("SHOW COLUMNS IN " + schemaName + "." + tableName);
+        QueryResult result = Failsafe.with(DATABRICKS_COMMUNICATION_FAILURE_RETRY_POLICY)
+                .get(() -> onDelta().executeQuery("SHOW COLUMNS IN " + schemaName + "." + tableName));
         return result.column(1);
     }
 
@@ -79,7 +98,8 @@ public final class DeltaLakeTestUtils
 
     public static String getColumnCommentOnDelta(String schemaName, String tableName, String columnName)
     {
-        QueryResult result = onDelta().executeQuery(format("DESCRIBE %s.%s %s", schemaName, tableName, columnName));
+        QueryResult result = Failsafe.with(DATABRICKS_COMMUNICATION_FAILURE_RETRY_POLICY)
+                .get(() -> onDelta().executeQuery(format("DESCRIBE %s.%s %s", schemaName, tableName, columnName)));
         return (String) result.row(2).get(1);
     }
 
@@ -91,16 +111,27 @@ public final class DeltaLakeTestUtils
 
     public static String getTableCommentOnDelta(String schemaName, String tableName)
     {
-        QueryResult result = onDelta().executeQuery(format("DESCRIBE EXTENDED %s.%s", schemaName, tableName));
+        QueryResult result = Failsafe.with(DATABRICKS_COMMUNICATION_FAILURE_RETRY_POLICY)
+                .get(() -> onDelta().executeQuery(format("DESCRIBE EXTENDED %s.%s", schemaName, tableName)));
         return (String) result.rows().stream()
                 .filter(row -> row.get(0).equals("Comment"))
                 .map(row -> row.get(1))
                 .collect(onlyElement());
     }
 
+    public static Map<String, String> getTablePropertiesOnDelta(String schemaName, String tableName)
+    {
+        QueryResult result = Failsafe.with(DATABRICKS_COMMUNICATION_FAILURE_RETRY_POLICY)
+                .get(() -> onDelta().executeQuery("SHOW TBLPROPERTIES %s.%s".formatted(schemaName, tableName)));
+        return result.rows().stream()
+                .map(column -> Map.entry((String) column.get(0), (String) column.get(1)))
+                .collect(toImmutableMap(Map.Entry::getKey, Map.Entry::getValue));
+    }
+
     public static String getTablePropertyOnDelta(String schemaName, String tableName, String propertyName)
     {
-        QueryResult result = onDelta().executeQuery("SHOW TBLPROPERTIES %s.%s(%s)".formatted(schemaName, tableName, propertyName));
+        QueryResult result = Failsafe.with(DATABRICKS_COMMUNICATION_FAILURE_RETRY_POLICY)
+                .get(() -> onDelta().executeQuery("SHOW TBLPROPERTIES %s.%s(%s)".formatted(schemaName, tableName, propertyName)));
         return (String) getOnlyElement(result.rows()).get(1);
     }
 

@@ -473,11 +473,11 @@ public class NestedColumnReader<BufferType>
         }
 
         log.debug("readNextPage field %s, page %s, pageLastRowUnfinished %b", field, page, pageLastRowUnfinished);
-        if (page instanceof DataPageV1) {
-            readFlatPageV1((DataPageV1) page);
+        if (page instanceof DataPageV1 dataPageV1) {
+            readFlatPageV1(dataPageV1);
         }
-        else if (page instanceof DataPageV2) {
-            readFlatPageV2((DataPageV2) page);
+        else if (page instanceof DataPageV2 dataPageV2) {
+            readFlatPageV2(dataPageV2);
         }
 
         pageValueCount = page.getValueCount();
@@ -507,8 +507,8 @@ public class NestedColumnReader<BufferType>
         int maxDefinitionLevel = field.getDefinitionLevel();
         int maxRepetitionLevel = field.getRepetitionLevel();
 
-        checkArgument(maxDefinitionLevel == 0 || definitionEncoding == RLE, "Invalid definition level encoding: " + definitionEncoding);
-        checkArgument(maxRepetitionLevel == 0 || repetitionEncoding == RLE, "Invalid repetition level encoding: " + definitionEncoding);
+        checkArgument(maxDefinitionLevel == 0 || definitionEncoding == RLE, "Invalid definition level encoding: %s", definitionEncoding);
+        checkArgument(maxRepetitionLevel == 0 || repetitionEncoding == RLE, "Invalid repetition level encoding: %s", repetitionEncoding);
 
         repetitionLevelDecoder = levelsDecoderProvider.create(maxRepetitionLevel);
         if (maxRepetitionLevel > 0) {

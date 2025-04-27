@@ -19,11 +19,13 @@ import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.block.BlockBuilderStatus;
 import io.trino.spi.block.PageBuilderStatus;
+import io.trino.spi.block.VariableWidthBlock;
 import io.trino.spi.block.VariableWidthBlockBuilder;
 import io.trino.spi.function.BlockIndex;
 import io.trino.spi.function.BlockPosition;
 import io.trino.spi.function.FlatFixed;
 import io.trino.spi.function.FlatFixedOffset;
+import io.trino.spi.function.FlatVariableOffset;
 import io.trino.spi.function.FlatVariableWidth;
 import io.trino.spi.function.ScalarOperator;
 
@@ -45,7 +47,11 @@ public abstract class AbstractVariableWidthType
         extends AbstractType
         implements VariableWidthType
 {
-    private static final VarHandle INT_HANDLE = MethodHandles.byteArrayViewVarHandle(int[].class, ByteOrder.LITTLE_ENDIAN);
+    // Short strings are encoded with a negative length, so we have to encode the length in big-endian format
+    // to shift the sign bit to the beginning
+    private static final VarHandle INT_BE_HANDLE = MethodHandles.byteArrayViewVarHandle(int[].class, ByteOrder.BIG_ENDIAN);
+
+    private static final int MAX_SHORT_FLAT_LENGTH = 3;
 
     protected static final int EXPECTED_BYTES_PER_ENTRY = 32;
     protected static final TypeOperatorDeclaration DEFAULT_READ_OPERATORS = extractOperatorDeclaration(DefaultReadOperators.class, lookup(), Slice.class);
@@ -54,7 +60,7 @@ public abstract class AbstractVariableWidthType
 
     protected AbstractVariableWidthType(TypeSignature signature, Class<?> javaType)
     {
-        super(signature, javaType);
+        super(signature, javaType, VariableWidthBlock.class);
     }
 
     @Override
@@ -72,7 +78,7 @@ public abstract class AbstractVariableWidthType
         int expectedBytes = (int) min((long) expectedEntries * expectedBytesPerEntry, maxBlockSizeInBytes);
         return new VariableWidthBlockBuilder(
                 blockBuilderStatus,
-                expectedBytesPerEntry == 0 ? expectedEntries : Math.min(expectedEntries, maxBlockSizeInBytes / expectedBytesPerEntry),
+                expectedBytesPerEntry == 0 ? expectedEntries : min(expectedEntries, maxBlockSizeInBytes / expectedBytesPerEntry),
                 expectedBytes);
     }
 
@@ -80,6 +86,22 @@ public abstract class AbstractVariableWidthType
     public VariableWidthBlockBuilder createBlockBuilder(BlockBuilderStatus blockBuilderStatus, int expectedEntries)
     {
         return createBlockBuilder(blockBuilderStatus, expectedEntries, EXPECTED_BYTES_PER_ENTRY);
+    }
+
+    @Override
+    public void appendTo(Block block, int position, BlockBuilder blockBuilder)
+    {
+        if (block.isNull(position)) {
+            blockBuilder.appendNull();
+        }
+        else {
+            VariableWidthBlock variableWidthBlock = (VariableWidthBlock) block.getUnderlyingValueBlock();
+            position = block.getUnderlyingValuePosition(position);
+            Slice slice = variableWidthBlock.getRawSlice();
+            int offset = variableWidthBlock.getRawSliceOffset(position);
+            int length = variableWidthBlock.getSliceLength(position);
+            ((VariableWidthBlockBuilder) blockBuilder).writeEntry(slice, offset, length);
+        }
     }
 
     @Override
@@ -91,7 +113,7 @@ public abstract class AbstractVariableWidthType
     @Override
     public int getFlatFixedSize()
     {
-        return 16;
+        return Integer.BYTES;
     }
 
     @Override
@@ -103,26 +125,48 @@ public abstract class AbstractVariableWidthType
     @Override
     public int getFlatVariableWidthSize(Block block, int position)
     {
-        int length = block.getSliceLength(position);
-        if (length <= 12) {
+        VariableWidthBlock variableWidthBlock = (VariableWidthBlock) block.getUnderlyingValueBlock();
+        int length = variableWidthBlock.getSliceLength(block.getUnderlyingValuePosition(position));
+        if (length <= MAX_SHORT_FLAT_LENGTH) {
             return 0;
         }
         return length;
     }
 
     @Override
-    public int relocateFlatVariableWidthOffsets(byte[] fixedSizeSlice, int fixedSizeOffset, byte[] variableSizeSlice, int variableSizeOffset)
+    public int getFlatVariableWidthLength(byte[] fixedSizeSlice, int fixedSizeOffset)
     {
-        int length = (int) INT_HANDLE.get(fixedSizeSlice, fixedSizeOffset);
-        if (length <= 12) {
+        int length = readVariableWidthLength(fixedSizeSlice, fixedSizeOffset);
+        if (length <= MAX_SHORT_FLAT_LENGTH) {
             return 0;
         }
-
-        if (variableSizeSlice.length < variableSizeOffset + length) {
-            throw new IllegalArgumentException("Variable size slice does not have enough space");
-        }
-        INT_HANDLE.set(fixedSizeSlice, fixedSizeOffset + Long.BYTES + Integer.BYTES, variableSizeOffset);
         return length;
+    }
+
+    static int readVariableWidthLength(byte[] fixedSizeSlice, int fixedSizeOffset)
+    {
+        int length = (int) INT_BE_HANDLE.get(fixedSizeSlice, fixedSizeOffset);
+        if (length < 0) {
+            int shortLength = fixedSizeSlice[fixedSizeOffset] & 0x7F;
+            if (shortLength > MAX_SHORT_FLAT_LENGTH) {
+                throw new IllegalArgumentException("Invalid short variable width length: " + shortLength);
+            }
+            return shortLength;
+        }
+        return length;
+    }
+
+    static void writeFlatVariableLength(int length, byte[] fixedSizeSlice, int fixedSizeOffset)
+    {
+        if (length < 0) {
+            throw new IllegalArgumentException("Invalid variable width length: " + length);
+        }
+        if (length <= MAX_SHORT_FLAT_LENGTH) {
+            fixedSizeSlice[fixedSizeOffset] = (byte) (length | 0x80);
+        }
+        else {
+            INT_BE_HANDLE.set(fixedSizeSlice, fixedSizeOffset, length);
+        }
     }
 
     private static class DefaultReadOperators
@@ -131,14 +175,21 @@ public abstract class AbstractVariableWidthType
         private static Slice readFlatToStack(
                 @FlatFixed byte[] fixedSizeSlice,
                 @FlatFixedOffset int fixedSizeOffset,
-                @FlatVariableWidth byte[] variableSizeSlice)
+                @FlatVariableWidth byte[] variableSizeSlice,
+                @FlatVariableOffset int variableSizeOffset)
         {
-            int length = (int) INT_HANDLE.get(fixedSizeSlice, fixedSizeOffset);
-            if (length <= 12) {
-                return wrappedBuffer(fixedSizeSlice, fixedSizeOffset + Integer.BYTES, length);
+            int length = readVariableWidthLength(fixedSizeSlice, fixedSizeOffset);
+            byte[] bytes;
+            int offset;
+            if (length <= MAX_SHORT_FLAT_LENGTH) {
+                bytes = fixedSizeSlice;
+                offset = fixedSizeOffset + 1;
             }
-            int variableSizeOffset = (int) INT_HANDLE.get(fixedSizeSlice, fixedSizeOffset + Integer.BYTES + Long.BYTES);
-            return wrappedBuffer(variableSizeSlice, variableSizeOffset, length);
+            else {
+                bytes = variableSizeSlice;
+                offset = variableSizeOffset;
+            }
+            return wrappedBuffer(bytes, offset, length);
         }
 
         @ScalarOperator(READ_VALUE)
@@ -146,16 +197,21 @@ public abstract class AbstractVariableWidthType
                 @FlatFixed byte[] fixedSizeSlice,
                 @FlatFixedOffset int fixedSizeOffset,
                 @FlatVariableWidth byte[] variableSizeSlice,
+                @FlatVariableOffset int variableSizeOffset,
                 BlockBuilder blockBuilder)
         {
-            int length = (int) INT_HANDLE.get(fixedSizeSlice, fixedSizeOffset);
-            if (length <= 12) {
-                ((VariableWidthBlockBuilder) blockBuilder).writeEntry(fixedSizeSlice, fixedSizeOffset + Integer.BYTES, length);
+            int length = readVariableWidthLength(fixedSizeSlice, fixedSizeOffset);
+            byte[] bytes;
+            int offset;
+            if (length <= MAX_SHORT_FLAT_LENGTH) {
+                bytes = fixedSizeSlice;
+                offset = fixedSizeOffset + 1;
             }
             else {
-                int variableSizeOffset = (int) INT_HANDLE.get(fixedSizeSlice, fixedSizeOffset + Integer.BYTES + Long.BYTES);
-                ((VariableWidthBlockBuilder) blockBuilder).writeEntry(variableSizeSlice, variableSizeOffset, length);
+                bytes = variableSizeSlice;
+                offset = variableSizeOffset;
             }
+            ((VariableWidthBlockBuilder) blockBuilder).writeEntry(bytes, offset, length);
         }
 
         @ScalarOperator(READ_VALUE)
@@ -167,34 +223,45 @@ public abstract class AbstractVariableWidthType
                 int variableSizeOffset)
         {
             int length = value.length();
-            INT_HANDLE.set(fixedSizeSlice, fixedSizeOffset, length);
-            if (length <= 12) {
-                value.getBytes(0, fixedSizeSlice, fixedSizeOffset + Integer.BYTES, length);
+            writeFlatVariableLength(length, fixedSizeSlice, fixedSizeOffset);
+            byte[] bytes;
+            int offset;
+            if (length <= MAX_SHORT_FLAT_LENGTH) {
+                bytes = fixedSizeSlice;
+                offset = fixedSizeOffset + 1;
             }
             else {
-                INT_HANDLE.set(fixedSizeSlice, fixedSizeOffset + Integer.BYTES + Long.BYTES, variableSizeOffset);
-                value.getBytes(0, variableSizeSlice, variableSizeOffset, length);
+                bytes = variableSizeSlice;
+                offset = variableSizeOffset;
             }
+            value.getBytes(0, bytes, offset, length);
         }
 
         @ScalarOperator(READ_VALUE)
         private static void writeFlatFromBlock(
-                @BlockPosition Block block,
+                @BlockPosition VariableWidthBlock block,
                 @BlockIndex int position,
                 byte[] fixedSizeSlice,
                 int fixedSizeOffset,
                 byte[] variableSizeSlice,
                 int variableSizeOffset)
         {
+            Slice rawSlice = block.getRawSlice();
+            int rawSliceOffset = block.getRawSliceOffset(position);
             int length = block.getSliceLength(position);
-            INT_HANDLE.set(fixedSizeSlice, fixedSizeOffset, length);
-            if (length <= 12) {
-                block.writeSliceTo(position, 0, length, wrappedBuffer(fixedSizeSlice, fixedSizeOffset + Integer.BYTES, length).getOutput());
+
+            writeFlatVariableLength(length, fixedSizeSlice, fixedSizeOffset);
+            byte[] bytes;
+            int offset;
+            if (length <= MAX_SHORT_FLAT_LENGTH) {
+                bytes = fixedSizeSlice;
+                offset = fixedSizeOffset + 1;
             }
             else {
-                INT_HANDLE.set(fixedSizeSlice, fixedSizeOffset + Integer.BYTES + Long.BYTES, variableSizeOffset);
-                block.writeSliceTo(position, 0, length, wrappedBuffer(variableSizeSlice, variableSizeOffset, length).getOutput());
+                bytes = variableSizeSlice;
+                offset = variableSizeOffset;
             }
+            rawSlice.getBytes(rawSliceOffset, bytes, offset, length);
         }
     }
 
@@ -207,31 +274,33 @@ public abstract class AbstractVariableWidthType
         }
 
         @ScalarOperator(EQUAL)
-        private static boolean equalOperator(@BlockPosition Block leftBlock, @BlockIndex int leftPosition, @BlockPosition Block rightBlock, @BlockIndex int rightPosition)
+        private static boolean equalOperator(@BlockPosition VariableWidthBlock leftBlock, @BlockIndex int leftPosition, @BlockPosition VariableWidthBlock rightBlock, @BlockIndex int rightPosition)
         {
+            Slice leftRawSlice = leftBlock.getRawSlice();
+            int leftRawSliceOffset = leftBlock.getRawSliceOffset(leftPosition);
             int leftLength = leftBlock.getSliceLength(leftPosition);
+
+            Slice rightRawSlice = rightBlock.getRawSlice();
+            int rightRawSliceOffset = rightBlock.getRawSliceOffset(rightPosition);
             int rightLength = rightBlock.getSliceLength(rightPosition);
-            if (leftLength != rightLength) {
-                return false;
-            }
-            return leftBlock.equals(leftPosition, 0, rightBlock, rightPosition, 0, leftLength);
+
+            return leftRawSlice.equals(leftRawSliceOffset, leftLength, rightRawSlice, rightRawSliceOffset, rightLength);
         }
 
         @ScalarOperator(EQUAL)
-        private static boolean equalOperator(Slice left, @BlockPosition Block rightBlock, @BlockIndex int rightPosition)
+        private static boolean equalOperator(Slice left, @BlockPosition VariableWidthBlock rightBlock, @BlockIndex int rightPosition)
         {
             return equalOperator(rightBlock, rightPosition, left);
         }
 
         @ScalarOperator(EQUAL)
-        private static boolean equalOperator(@BlockPosition Block leftBlock, @BlockIndex int leftPosition, Slice right)
+        private static boolean equalOperator(@BlockPosition VariableWidthBlock leftBlock, @BlockIndex int leftPosition, Slice right)
         {
+            Slice leftRawSlice = leftBlock.getRawSlice();
+            int leftRawSliceOffset = leftBlock.getRawSliceOffset(leftPosition);
             int leftLength = leftBlock.getSliceLength(leftPosition);
-            int rightLength = right.length();
-            if (leftLength != rightLength) {
-                return false;
-            }
-            return leftBlock.bytesEqual(leftPosition, 0, right, 0, leftLength);
+
+            return leftRawSlice.equals(leftRawSliceOffset, leftLength, right, 0, right.length());
         }
 
         @ScalarOperator(EQUAL)
@@ -239,49 +308,44 @@ public abstract class AbstractVariableWidthType
                 @FlatFixed byte[] leftFixedSizeSlice,
                 @FlatFixedOffset int leftFixedSizeOffset,
                 @FlatVariableWidth byte[] leftVariableSizeSlice,
+                @FlatVariableOffset int leftVariableSizeOffset,
                 @FlatFixed byte[] rightFixedSizeSlice,
                 @FlatFixedOffset int rightFixedSizeOffset,
-                @FlatVariableWidth byte[] rightVariableSizeSlice)
+                @FlatVariableWidth byte[] rightVariableSizeSlice,
+                @FlatVariableOffset int rightVariableSizeOffset)
         {
-            int leftLength = (int) INT_HANDLE.get(leftFixedSizeSlice, leftFixedSizeOffset);
-            int rightLength = (int) INT_HANDLE.get(rightFixedSizeSlice, rightFixedSizeOffset);
+            int leftLength = readVariableWidthLength(leftFixedSizeSlice, leftFixedSizeOffset);
+            int rightLength = readVariableWidthLength(rightFixedSizeSlice, rightFixedSizeOffset);
             if (leftLength != rightLength) {
                 return false;
             }
-            if (leftLength <= 12) {
-                return Arrays.equals(
-                        leftFixedSizeSlice,
-                        leftFixedSizeOffset + Integer.BYTES,
-                        leftFixedSizeOffset + Integer.BYTES + leftLength,
-                        rightFixedSizeSlice,
-                        rightFixedSizeOffset + Integer.BYTES,
-                        rightFixedSizeOffset + Integer.BYTES + leftLength);
+            if (leftLength <= MAX_SHORT_FLAT_LENGTH) {
+                // Direct equality check on length + bytes for short strings
+                return ((int) INT_BE_HANDLE.get(leftFixedSizeSlice, leftFixedSizeOffset)) == ((int) INT_BE_HANDLE.get(rightFixedSizeSlice, rightFixedSizeOffset));
             }
-            else {
-                int leftVariableSizeOffset = (int) INT_HANDLE.get(leftFixedSizeSlice, leftFixedSizeOffset + Integer.BYTES + Long.BYTES);
-                int rightVariableSizeOffset = (int) INT_HANDLE.get(rightFixedSizeSlice, rightFixedSizeOffset + Integer.BYTES + Long.BYTES);
-                return Arrays.equals(
-                        leftVariableSizeSlice,
-                        leftVariableSizeOffset,
-                        leftVariableSizeOffset + leftLength,
-                        rightVariableSizeSlice,
-                        rightVariableSizeOffset,
-                        rightVariableSizeOffset + rightLength);
-            }
+            return Arrays.equals(
+                    leftVariableSizeSlice,
+                    leftVariableSizeOffset,
+                    leftVariableSizeOffset + leftLength,
+                    rightVariableSizeSlice,
+                    rightVariableSizeOffset,
+                    rightVariableSizeOffset + rightLength);
         }
 
         @ScalarOperator(EQUAL)
         private static boolean equalOperator(
-                @BlockPosition Block leftBlock,
+                @BlockPosition VariableWidthBlock leftBlock,
                 @BlockIndex int leftPosition,
                 @FlatFixed byte[] rightFixedSizeSlice,
                 @FlatFixedOffset int rightFixedSizeOffset,
-                @FlatVariableWidth byte[] rightVariableSizeSlice)
+                @FlatVariableWidth byte[] rightVariableSizeSlice,
+                @FlatVariableOffset int rightVariableSizeOffset)
         {
             return equalOperator(
                     rightFixedSizeSlice,
                     rightFixedSizeOffset,
                     rightVariableSizeSlice,
+                    rightVariableSizeOffset,
                     leftBlock,
                     leftPosition);
         }
@@ -291,20 +355,31 @@ public abstract class AbstractVariableWidthType
                 @FlatFixed byte[] leftFixedSizeSlice,
                 @FlatFixedOffset int leftFixedSizeOffset,
                 @FlatVariableWidth byte[] leftVariableSizeSlice,
-                @BlockPosition Block rightBlock,
+                @FlatVariableOffset int leftVariableSizeOffset,
+                @BlockPosition VariableWidthBlock rightBlock,
                 @BlockIndex int rightPosition)
         {
-            int leftLength = (int) INT_HANDLE.get(leftFixedSizeSlice, leftFixedSizeOffset);
-            if (rightBlock.isNull(rightPosition) || leftLength != rightBlock.getSliceLength(rightPosition)) {
+            int leftLength = readVariableWidthLength(leftFixedSizeSlice, leftFixedSizeOffset);
+
+            Slice rightRawSlice = rightBlock.getRawSlice();
+            int rightRawSliceOffset = rightBlock.getRawSliceOffset(rightPosition);
+            int rightLength = rightBlock.getSliceLength(rightPosition);
+
+            if (leftLength != rightLength) {
                 return false;
             }
-            if (leftLength <= 12) {
-                return rightBlock.bytesEqual(rightPosition, 0, wrappedBuffer(leftFixedSizeSlice, leftFixedSizeOffset + Integer.BYTES, leftLength), 0, leftLength);
+
+            byte[] leftBytes;
+            int leftOffset;
+            if (leftLength <= MAX_SHORT_FLAT_LENGTH) {
+                leftBytes = leftFixedSizeSlice;
+                leftOffset = leftFixedSizeOffset + 1;
             }
             else {
-                int leftVariableSizeOffset = (int) INT_HANDLE.get(leftFixedSizeSlice, leftFixedSizeOffset + Integer.BYTES + Long.BYTES);
-                return rightBlock.bytesEqual(rightPosition, 0, wrappedBuffer(leftVariableSizeSlice, leftVariableSizeOffset, leftLength), 0, leftLength);
+                leftBytes = leftVariableSizeSlice;
+                leftOffset = leftVariableSizeOffset;
             }
+            return rightRawSlice.equals(rightRawSliceOffset, rightLength, wrappedBuffer(leftBytes, leftOffset, leftLength), 0, leftLength);
         }
 
         @ScalarOperator(XX_HASH_64)
@@ -314,23 +389,30 @@ public abstract class AbstractVariableWidthType
         }
 
         @ScalarOperator(XX_HASH_64)
-        private static long xxHash64Operator(@BlockPosition Block block, @BlockIndex int position)
+        private static long xxHash64Operator(@BlockPosition VariableWidthBlock block, @BlockIndex int position)
         {
-            return block.hash(position, 0, block.getSliceLength(position));
+            return XxHash64.hash(block.getRawSlice(), block.getRawSliceOffset(position), block.getSliceLength(position));
         }
 
         @ScalarOperator(XX_HASH_64)
         private static long xxHash64Operator(
                 @FlatFixed byte[] fixedSizeSlice,
                 @FlatFixedOffset int fixedSizeOffset,
-                @FlatVariableWidth byte[] variableSizeSlice)
+                @FlatVariableWidth byte[] variableSizeSlice,
+                @FlatVariableOffset int variableSizeOffset)
         {
-            int length = (int) INT_HANDLE.get(fixedSizeSlice, fixedSizeOffset);
-            if (length <= 12) {
-                return XxHash64.hash(wrappedBuffer(fixedSizeSlice, fixedSizeOffset + Integer.BYTES, length));
+            int length = readVariableWidthLength(fixedSizeSlice, fixedSizeOffset);
+            byte[] bytes;
+            int offset;
+            if (length <= MAX_SHORT_FLAT_LENGTH) {
+                bytes = fixedSizeSlice;
+                offset = fixedSizeOffset + 1;
             }
-            int variableSizeOffset = (int) INT_HANDLE.get(fixedSizeSlice, fixedSizeOffset + Integer.BYTES + Long.BYTES);
-            return XxHash64.hash(wrappedBuffer(variableSizeSlice, variableSizeOffset, length));
+            else {
+                bytes = variableSizeSlice;
+                offset = variableSizeOffset;
+            }
+            return XxHash64.hash(wrappedBuffer(bytes, offset, length));
         }
     }
 
@@ -343,25 +425,37 @@ public abstract class AbstractVariableWidthType
         }
 
         @ScalarOperator(COMPARISON_UNORDERED_LAST)
-        private static long comparisonOperator(@BlockPosition Block leftBlock, @BlockIndex int leftPosition, @BlockPosition Block rightBlock, @BlockIndex int rightPosition)
+        private static long comparisonOperator(@BlockPosition VariableWidthBlock leftBlock, @BlockIndex int leftPosition, @BlockPosition VariableWidthBlock rightBlock, @BlockIndex int rightPosition)
         {
+            Slice leftRawSlice = leftBlock.getRawSlice();
+            int leftRawSliceOffset = leftBlock.getRawSliceOffset(leftPosition);
             int leftLength = leftBlock.getSliceLength(leftPosition);
+
+            Slice rightRawSlice = rightBlock.getRawSlice();
+            int rightRawSliceOffset = rightBlock.getRawSliceOffset(rightPosition);
             int rightLength = rightBlock.getSliceLength(rightPosition);
-            return leftBlock.compareTo(leftPosition, 0, leftLength, rightBlock, rightPosition, 0, rightLength);
+
+            return leftRawSlice.compareTo(leftRawSliceOffset, leftLength, rightRawSlice, rightRawSliceOffset, rightLength);
         }
 
         @ScalarOperator(COMPARISON_UNORDERED_LAST)
-        private static long comparisonOperator(@BlockPosition Block leftBlock, @BlockIndex int leftPosition, Slice right)
+        private static long comparisonOperator(@BlockPosition VariableWidthBlock leftBlock, @BlockIndex int leftPosition, Slice right)
         {
+            Slice leftRawSlice = leftBlock.getRawSlice();
+            int leftRawSliceOffset = leftBlock.getRawSliceOffset(leftPosition);
             int leftLength = leftBlock.getSliceLength(leftPosition);
-            return leftBlock.bytesCompare(leftPosition, 0, leftLength, right, 0, right.length());
+
+            return leftRawSlice.compareTo(leftRawSliceOffset, leftLength, right, 0, right.length());
         }
 
         @ScalarOperator(COMPARISON_UNORDERED_LAST)
-        private static long comparisonOperator(Slice left, @BlockPosition Block rightBlock, @BlockIndex int rightPosition)
+        private static long comparisonOperator(Slice left, @BlockPosition VariableWidthBlock rightBlock, @BlockIndex int rightPosition)
         {
+            Slice rightRawSlice = rightBlock.getRawSlice();
+            int rightRawSliceOffset = rightBlock.getRawSliceOffset(rightPosition);
             int rightLength = rightBlock.getSliceLength(rightPosition);
-            return -rightBlock.bytesCompare(rightPosition, 0, rightLength, left, 0, left.length());
+
+            return left.compareTo(0, left.length(), rightRawSlice, rightRawSliceOffset, rightLength);
         }
     }
 }

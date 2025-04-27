@@ -80,7 +80,7 @@ import static io.trino.server.InternalHeaders.TRINO_PAGE_NEXT_TOKEN;
 import static io.trino.server.InternalHeaders.TRINO_PAGE_TOKEN;
 import static io.trino.server.InternalHeaders.TRINO_TASK_FAILED;
 import static io.trino.server.InternalHeaders.TRINO_TASK_INSTANCE_ID;
-import static io.trino.server.PagesResponseWriter.SERIALIZED_PAGES_MAGIC;
+import static io.trino.server.PagesInputStreamFactory.SERIALIZED_PAGES_MAGIC;
 import static io.trino.spi.HostAddress.fromUri;
 import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 import static io.trino.spi.StandardErrorCode.REMOTE_BUFFER_CLOSE_FAILED;
@@ -104,7 +104,7 @@ public final class HttpPageBufferClient
      * For each request, the addPage method will be called zero or more times,
      * followed by either requestComplete or clientFinished (if buffer complete).  If the client is
      * closed, requestComplete or bufferFinished may never be called.
-     * <p/>
+     * <p>
      * <b>NOTE:</b> Implementations of this interface are not allowed to perform
      * blocking operations.
      */
@@ -320,6 +320,7 @@ public final class HttpPageBufferClient
                 initiateRequest();
             }
             catch (Throwable t) {
+                assertNotHoldsLock(HttpPageBufferClient.this);
                 // should not happen, but be safe and fail the operator
                 clientCallback.clientFailed(HttpPageBufferClient.this, t);
             }
@@ -367,7 +368,7 @@ public final class HttpPageBufferClient
             @Override
             public void onSuccess(PagesResponse result)
             {
-                assertNotHoldsLock(this);
+                assertNotHoldsLock(HttpPageBufferClient.this);
                 lastRequestDurationMillis = (ticker.read() - lastRequestStartNanos) / 1_000_000;
                 backoff.success();
 
@@ -473,7 +474,7 @@ public final class HttpPageBufferClient
             public void onFailure(Throwable t)
             {
                 log.debug("Request to %s failed %s", uri, t);
-                assertNotHoldsLock(this);
+                assertNotHoldsLock(HttpPageBufferClient.this);
 
                 lastRequestDurationMillis = (ticker.read() - lastRequestStartNanos) / 1_000_000;
 
@@ -525,9 +526,9 @@ public final class HttpPageBufferClient
             @Override
             public void onSuccess(@Nullable StatusResponse result)
             {
-                assertNotHoldsLock(this);
+                assertNotHoldsLock(HttpPageBufferClient.this);
 
-                if (result.getStatusCode() != NO_CONTENT.code()) {
+                if (result != null && result.getStatusCode() != NO_CONTENT.code()) {
                     onFailure(new TrinoTransportException(
                             REMOTE_BUFFER_CLOSE_FAILED,
                             fromUri(location),
@@ -550,7 +551,7 @@ public final class HttpPageBufferClient
             @Override
             public void onFailure(Throwable t)
             {
-                assertNotHoldsLock(this);
+                assertNotHoldsLock(HttpPageBufferClient.this);
 
                 log.error("Request to delete %s failed %s", location, t);
                 if (!(t instanceof TrinoException) && backoff.failure()) {
@@ -569,13 +570,14 @@ public final class HttpPageBufferClient
     @SuppressWarnings("checkstyle:IllegalToken")
     private static void assertNotHoldsLock(Object lock)
     {
+        // By design, clientCallback must not be called when holding a lock on HttpPageBufferClient.this.
+        // This check enforce the requirement and help reason about this invariant locally.
         assert !Thread.holdsLock(lock) : "Cannot execute this method while holding a lock";
     }
 
     private void handleFailure(Throwable t, HttpResponseFuture<?> expectedFuture)
     {
-        // Cannot delegate to other callback while holding a lock on this
-        assertNotHoldsLock(this);
+        assertNotHoldsLock(HttpPageBufferClient.this);
 
         requestsFailed.incrementAndGet();
         requestsCompleted.incrementAndGet();
@@ -605,11 +607,7 @@ public final class HttpPageBufferClient
 
         HttpPageBufferClient that = (HttpPageBufferClient) o;
 
-        if (!location.equals(that.location)) {
-            return false;
-        }
-
-        return true;
+        return location.equals(that.location);
     }
 
     @Override

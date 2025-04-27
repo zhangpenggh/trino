@@ -15,8 +15,6 @@ package io.trino.tests.product.launcher.env.jdk;
 
 import io.trino.tests.product.launcher.env.DockerContainer;
 
-import static io.trino.tests.product.launcher.Configurations.nameForJdkProvider;
-
 public interface JdkProvider
 {
     DockerContainer applyTo(DockerContainer container);
@@ -24,14 +22,4 @@ public interface JdkProvider
     String getJavaHome();
 
     String getDescription();
-
-    default String getJavaCommand()
-    {
-        return getJavaHome() + "/bin/java";
-    }
-
-    default String getName()
-    {
-        return nameForJdkProvider(this.getClass());
-    }
 }

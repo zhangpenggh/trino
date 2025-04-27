@@ -20,7 +20,9 @@ import io.trino.tests.product.launcher.env.Debug;
 import io.trino.tests.product.launcher.env.DockerContainer;
 import io.trino.tests.product.launcher.env.Environment;
 import io.trino.tests.product.launcher.env.EnvironmentConfig;
+import io.trino.tests.product.launcher.env.Ipv6;
 import io.trino.tests.product.launcher.env.ServerPackage;
+import io.trino.tests.product.launcher.env.Tracing;
 import io.trino.tests.product.launcher.env.jdk.JdkProvider;
 
 import java.io.File;
@@ -44,6 +46,8 @@ public class StandardMultinode
     private final File serverPackage;
     private final JdkProvider jdkProvider;
     private final boolean debug;
+    private final boolean tracing;
+    private final boolean ipv6;
 
     @Inject
     public StandardMultinode(
@@ -52,7 +56,9 @@ public class StandardMultinode
             EnvironmentConfig environmentConfig,
             @ServerPackage File serverPackage,
             JdkProvider jdkProvider,
-            @Debug boolean debug)
+            @Debug boolean debug,
+            @Tracing boolean tracing,
+            @Ipv6 boolean ipv6)
     {
         this.standard = requireNonNull(standard, "standard is null");
         this.dockerFiles = requireNonNull(dockerFiles, "dockerFiles is null");
@@ -61,6 +67,8 @@ public class StandardMultinode
         this.jdkProvider = requireNonNull(jdkProvider, "jdkProvider is null");
         this.serverPackage = requireNonNull(serverPackage, "serverPackage is null");
         this.debug = debug;
+        this.tracing = tracing;
+        this.ipv6 = ipv6;
         checkArgument(serverPackage.getName().endsWith(".tar.gz"), "Currently only server .tar.gz package is supported");
     }
 
@@ -81,7 +89,7 @@ public class StandardMultinode
     @SuppressWarnings("resource")
     private DockerContainer createTrinoWorker()
     {
-        return createTrinoContainer(dockerFiles, serverPackage, jdkProvider, debug, "ghcr.io/trinodb/testing/centos7-oj17:" + imagesVersion, WORKER)
+        return createTrinoContainer(dockerFiles, serverPackage, jdkProvider, debug, tracing, ipv6, "ghcr.io/trinodb/testing/almalinux9-oj17:" + imagesVersion, WORKER)
                 .withCopyFileToContainer(forHostPath(configDir.getPath("multinode-worker-config.properties")), CONTAINER_TRINO_CONFIG_PROPERTIES);
     }
 }

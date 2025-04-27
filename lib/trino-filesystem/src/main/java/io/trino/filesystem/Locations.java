@@ -13,10 +13,12 @@
  */
 package io.trino.filesystem;
 
-import static com.google.common.base.Preconditions.checkArgument;
+import java.util.regex.Pattern;
 
 public final class Locations
 {
+    private static final Pattern S3_TABLES = Pattern.compile("s3://(?!.*/).*--table-s3");
+
     private Locations() {}
 
     /**
@@ -25,18 +27,10 @@ public final class Locations
     @Deprecated
     public static String appendPath(String location, String path)
     {
-        validateLocation(location);
-
         if (!location.endsWith("/")) {
             location += "/";
         }
         return location + path;
-    }
-
-    private static void validateLocation(String location)
-    {
-        checkArgument(location.indexOf('?') < 0, "location contains a query string: %s", location);
-        checkArgument(location.indexOf('#') < 0, "location contains a fragment: %s", location);
     }
 
     /**
@@ -46,5 +40,10 @@ public final class Locations
     {
         return leftLocation.equals(rightLocation) ||
                 leftLocation.removeOneTrailingSlash().equals(rightLocation.removeOneTrailingSlash());
+    }
+
+    public static boolean isS3Tables(String location)
+    {
+        return S3_TABLES.matcher(location).matches();
     }
 }

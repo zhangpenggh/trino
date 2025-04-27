@@ -24,6 +24,8 @@ import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.block.MapBlockBuilder;
 import io.trino.spi.block.RowBlockBuilder;
+import io.trino.spi.block.SqlMap;
+import io.trino.spi.block.SqlRow;
 import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.BigintType;
 import io.trino.spi.type.BooleanType;
@@ -53,6 +55,7 @@ import static com.google.common.base.Preconditions.checkState;
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.trino.decoder.DecoderErrorCode.DECODER_CONVERSION_NOT_SUPPORTED;
 import static io.trino.spi.StandardErrorCode.GENERIC_USER_ERROR;
+import static io.trino.spi.block.MapValueBuilder.buildMapValue;
 import static io.trino.spi.block.RowValueBuilder.buildRowValue;
 import static io.trino.spi.type.Varchars.truncateToLength;
 import static java.lang.Float.floatToIntBits;
@@ -181,8 +184,8 @@ public class AvroColumnDecoder
         @Override
         public double getDouble()
         {
-            if (value instanceof Double) {
-                return ((Number) value).doubleValue();
+            if (value instanceof Double doubleValue) {
+                return doubleValue;
             }
             throw new TrinoException(DECODER_CONVERSION_NOT_SUPPORTED, format("cannot decode object of '%s' as '%s' for column '%s'", value.getClass(), columnType, columnName));
         }
@@ -190,8 +193,8 @@ public class AvroColumnDecoder
         @Override
         public boolean getBoolean()
         {
-            if (value instanceof Boolean) {
-                return (Boolean) value;
+            if (value instanceof Boolean booleanValue) {
+                return booleanValue;
             }
             throw new TrinoException(DECODER_CONVERSION_NOT_SUPPORTED, format("cannot decode object of '%s' as '%s' for column '%s'", value.getClass(), columnType, columnName));
         }
@@ -199,8 +202,11 @@ public class AvroColumnDecoder
         @Override
         public long getLong()
         {
-            if (value instanceof Long || value instanceof Integer) {
-                return ((Number) value).longValue();
+            if (value instanceof Long longValue) {
+                return longValue;
+            }
+            if (value instanceof Integer integerValue) {
+                return integerValue.longValue();
             }
             if (value instanceof Float && columnType == RealType.REAL) {
                 return floatToIntBits((float) value);
@@ -215,7 +221,7 @@ public class AvroColumnDecoder
         }
 
         @Override
-        public Block getBlock()
+        public Object getObject()
         {
             return serializeObject(null, value, columnType, columnName);
         }
@@ -228,18 +234,18 @@ public class AvroColumnDecoder
         }
 
         if (type instanceof VarbinaryType) {
-            if (value instanceof ByteBuffer) {
-                return Slices.wrappedHeapBuffer((ByteBuffer) value);
+            if (value instanceof ByteBuffer byteBuffer) {
+                return Slices.wrappedHeapBuffer(byteBuffer);
             }
-            if (value instanceof GenericFixed) {
-                return Slices.wrappedBuffer(((GenericFixed) value).bytes());
+            if (value instanceof GenericFixed genericFixed) {
+                return Slices.wrappedBuffer(genericFixed.bytes());
             }
         }
 
         throw new TrinoException(DECODER_CONVERSION_NOT_SUPPORTED, format("cannot decode object of '%s' as '%s' for column '%s'", value.getClass(), type, columnName));
     }
 
-    private static Block serializeObject(BlockBuilder builder, Object value, Type type, String columnName)
+    private static Object serializeObject(BlockBuilder builder, Object value, Type type, String columnName)
     {
         if (type instanceof ArrayType) {
             return serializeList(builder, value, type, columnName);
@@ -313,7 +319,7 @@ public class AvroColumnDecoder
         throw new TrinoException(DECODER_CONVERSION_NOT_SUPPORTED, format("cannot decode object of '%s' as '%s' for column '%s'", value.getClass(), type, columnName));
     }
 
-    private static Block serializeMap(BlockBuilder parentBlockBuilder, Object value, MapType type, String columnName)
+    private static SqlMap serializeMap(BlockBuilder parentBlockBuilder, Object value, MapType type, String columnName)
     {
         if (value == null) {
             checkState(parentBlockBuilder != null, "parentBlockBuilder is null");
@@ -325,30 +331,24 @@ public class AvroColumnDecoder
         Type keyType = type.getKeyType();
         Type valueType = type.getValueType();
 
-        MapBlockBuilder blockBuilder;
         if (parentBlockBuilder != null) {
-            blockBuilder = (MapBlockBuilder) parentBlockBuilder;
+            ((MapBlockBuilder) parentBlockBuilder).buildEntry((keyBuilder, valueBuilder) -> buildMap(columnName, map, keyType, valueType, keyBuilder, valueBuilder));
+            return null;
         }
-        else {
-            blockBuilder = type.createBlockBuilder(null, 1);
-        }
-
-        blockBuilder.buildEntry((keyBuilder, valueBuilder) -> {
-            for (Map.Entry<?, ?> entry : map.entrySet()) {
-                if (entry.getKey() != null) {
-                    keyType.writeSlice(keyBuilder, truncateToLength(utf8Slice(entry.getKey().toString()), keyType));
-                    serializeObject(valueBuilder, entry.getValue(), valueType, columnName);
-                }
-            }
-        });
-
-        if (parentBlockBuilder == null) {
-            return blockBuilder.getObject(0, Block.class);
-        }
-        return null;
+        return buildMapValue(type, map.size(), (keyBuilder, valueBuilder) -> buildMap(columnName, map, keyType, valueType, keyBuilder, valueBuilder));
     }
 
-    private static Block serializeRow(BlockBuilder blockBuilder, Object value, Type type, String columnName)
+    private static void buildMap(String columnName, Map<?, ?> map, Type keyType, Type valueType, BlockBuilder keyBuilder, BlockBuilder valueBuilder)
+    {
+        for (Map.Entry<?, ?> entry : map.entrySet()) {
+            if (entry.getKey() != null) {
+                keyType.writeSlice(keyBuilder, truncateToLength(utf8Slice(entry.getKey().toString()), keyType));
+                serializeObject(valueBuilder, entry.getValue(), valueType, columnName);
+            }
+        }
+    }
+
+    private static SqlRow serializeRow(BlockBuilder blockBuilder, Object value, Type type, String columnName)
     {
         if (value == null) {
             checkState(blockBuilder != null, "block builder is null");

@@ -15,13 +15,11 @@ package io.trino.plugin.kafka;
 
 import io.airlift.configuration.Config;
 import io.airlift.configuration.ConfigDescription;
-import jakarta.annotation.PostConstruct;
+import jakarta.validation.constraints.AssertTrue;
 import org.apache.kafka.common.security.auth.SecurityProtocol;
 
 import java.util.Optional;
 
-import static com.google.common.base.Preconditions.checkState;
-import static java.lang.String.format;
 import static org.apache.kafka.common.security.auth.SecurityProtocol.PLAINTEXT;
 import static org.apache.kafka.common.security.auth.SecurityProtocol.SASL_PLAINTEXT;
 import static org.apache.kafka.common.security.auth.SecurityProtocol.SSL;
@@ -77,5 +75,11 @@ public class KafkaSecurityConfig
     public String getSaslJaasConfig()
     {
         return saslJaasConfig;
+    }
+  
+    @AssertTrue(message = "Only PLAINTEXT and SSL security protocols are supported. See 'kafka.config.resources' if other security protocols are needed")
+    public boolean isValidSecurityProtocol()
+    {
+        return securityProtocol == null || securityProtocol.equals(PLAINTEXT) || securityProtocol.equals(SSL) || securityProtocol.equals(SASL_PLAINTEXT);
     }
 }

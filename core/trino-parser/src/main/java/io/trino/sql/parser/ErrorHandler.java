@@ -45,7 +45,6 @@ import java.util.logging.Logger;
 import java.util.stream.Collectors;
 
 import static com.google.common.base.MoreObjects.firstNonNull;
-import static java.lang.String.format;
 import static java.util.logging.Level.SEVERE;
 import static org.antlr.v4.runtime.atn.ATNState.RULE_START;
 
@@ -82,8 +81,8 @@ class ErrorHandler
                 currentToken = e.getOffendingToken();
                 context = e.getCtx();
 
-                if (e instanceof NoViableAltException) {
-                    currentToken = ((NoViableAltException) e).getStartToken();
+                if (e instanceof NoViableAltException noViableAltException) {
+                    currentToken = noViableAltException.getStartToken();
                 }
             }
             else {
@@ -100,7 +99,7 @@ class ErrorHandler
                     .sorted()
                     .collect(Collectors.joining(", "));
 
-            message = format("mismatched input '%s'. Expecting: %s", parser.getTokenStream().get(result.getErrorTokenIndex()).getText(), expected);
+            message = "mismatched input '%s'. Expecting: %s".formatted(parser.getTokenStream().get(result.getErrorTokenIndex()).getText(), expected);
         }
         catch (Exception exception) {
             LOG.log(SEVERE, "Unexpected failure when handling parsing error. This is likely a bug in the implementation", exception);
@@ -157,8 +156,7 @@ class ErrorHandler
                 text = text.replace("\t", "\\t");
             }
 
-            return format(
-                    "%s%s:%s @ %s:<%s>:%s",
+            return "%s%s:%s @ %s:<%s>:%s".formatted(
                     suppressed ? "-" : "+",
                     parser.getRuleNames()[state.ruleIndex],
                     state.stateNumber,
@@ -301,8 +299,8 @@ class ErrorHandler
                             activeStates.push(new ParsingState(ruleTransition.followState, endToken, suppressed && endToken == currentToken, parser));
                         }
                     }
-                    else if (transition instanceof PrecedencePredicateTransition) {
-                        if (precedence < ((PrecedencePredicateTransition) transition).precedence) {
+                    else if (transition instanceof PrecedencePredicateTransition precedencePredicateTransition) {
+                        if (precedence < precedencePredicateTransition.precedence) {
                             activeStates.push(new ParsingState(transition.target, tokenIndex, suppressed, parser));
                         }
                     }

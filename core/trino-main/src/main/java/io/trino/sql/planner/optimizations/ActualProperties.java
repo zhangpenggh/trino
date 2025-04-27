@@ -22,10 +22,10 @@ import io.trino.metadata.Metadata;
 import io.trino.spi.connector.ConstantProperty;
 import io.trino.spi.connector.LocalProperty;
 import io.trino.spi.predicate.NullableValue;
+import io.trino.sql.ir.Expression;
 import io.trino.sql.planner.Partitioning;
 import io.trino.sql.planner.PartitioningHandle;
 import io.trino.sql.planner.Symbol;
-import io.trino.sql.tree.Expression;
 
 import java.util.Collection;
 import java.util.HashMap;
@@ -369,7 +369,9 @@ public class ActualProperties
 
         private boolean isCompatibleTablePartitioningWith(Partitioning partitioning, boolean nullsAndAnyReplicated, Metadata metadata, Session session)
         {
-            return nodePartitioning.isPresent() && nodePartitioning.get().isCompatibleWith(partitioning, metadata, session) && this.nullsAndAnyReplicated == nullsAndAnyReplicated;
+            return this.nullsAndAnyReplicated == nullsAndAnyReplicated &&
+                    nodePartitioning.isPresent() &&
+                    nodePartitioning.get().isCompatibleWith(partitioning, metadata, session);
         }
 
         private boolean isCompatibleTablePartitioningWith(
@@ -380,7 +382,8 @@ public class ActualProperties
                 Metadata metadata,
                 Session session)
         {
-            return nodePartitioning.isPresent() &&
+            return nullsAndAnyReplicated == other.nullsAndAnyReplicated &&
+                    nodePartitioning.isPresent() &&
                     other.nodePartitioning.isPresent() &&
                     nodePartitioning.get().isCompatibleWith(
                             other.nodePartitioning.get(),
@@ -388,8 +391,7 @@ public class ActualProperties
                             leftConstantMapping,
                             rightConstantMapping,
                             metadata,
-                            session) &&
-                    nullsAndAnyReplicated == other.nullsAndAnyReplicated;
+                            session);
         }
 
         private Optional<Partitioning> getNodePartitioning()

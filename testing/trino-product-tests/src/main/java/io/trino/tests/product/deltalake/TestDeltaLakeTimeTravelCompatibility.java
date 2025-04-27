@@ -15,18 +15,14 @@ package io.trino.tests.product.deltalake;
 
 import com.google.common.collect.ImmutableList;
 import io.trino.tempto.assertions.QueryAssert;
-import io.trino.testng.services.Flaky;
 import org.testng.annotations.Test;
 
 import java.util.List;
 
 import static io.trino.tempto.assertions.QueryAssert.Row.row;
 import static io.trino.testing.TestingNames.randomNameSuffix;
-import static io.trino.tests.product.TestGroups.DELTA_LAKE_DATABRICKS;
 import static io.trino.tests.product.TestGroups.DELTA_LAKE_OSS;
 import static io.trino.tests.product.TestGroups.PROFILE_SPECIFIC_TESTS;
-import static io.trino.tests.product.deltalake.util.DeltaLakeTestUtils.DATABRICKS_COMMUNICATION_FAILURE_ISSUE;
-import static io.trino.tests.product.deltalake.util.DeltaLakeTestUtils.DATABRICKS_COMMUNICATION_FAILURE_MATCH;
 import static io.trino.tests.product.deltalake.util.DeltaLakeTestUtils.dropDeltaTableWithRetry;
 import static io.trino.tests.product.utils.QueryExecutors.onDelta;
 import static io.trino.tests.product.utils.QueryExecutors.onTrino;
@@ -36,8 +32,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 public class TestDeltaLakeTimeTravelCompatibility
         extends BaseTestDeltaLakeS3Storage
 {
-    @Test(groups = {DELTA_LAKE_DATABRICKS, DELTA_LAKE_OSS, PROFILE_SPECIFIC_TESTS})
-    @Flaky(issue = DATABRICKS_COMMUNICATION_FAILURE_ISSUE, match = DATABRICKS_COMMUNICATION_FAILURE_MATCH)
+    @Test(groups = {DELTA_LAKE_OSS, PROFILE_SPECIFIC_TESTS})
     public void testReadFromTableRestoredToPreviousVersion()
     {
         String tableName = "test_dl_time_travel_restore_" + randomNameSuffix();
@@ -71,6 +66,40 @@ public class TestDeltaLakeTimeTravelCompatibility
             assertThat(onDelta().executeQuery("SELECT * FROM default." + tableName))
                     .containsOnly(expectedRows);
             assertThat(onTrino().executeQuery("SELECT * FROM delta.default." + tableName))
+                    .containsOnly(expectedRows);
+        }
+        finally {
+            dropDeltaTableWithRetry("default." + tableName);
+        }
+    }
+
+    @Test(groups = {DELTA_LAKE_OSS, PROFILE_SPECIFIC_TESTS})
+    public void testSelectForVersionAsOf()
+    {
+        String tableName = "test_dl_select_version" + randomNameSuffix();
+
+        onDelta().executeQuery("" +
+                "CREATE TABLE default." + tableName +
+                " (id INT, part STRING)" +
+                "USING delta " +
+                "PARTITIONED BY (part)" +
+                "LOCATION 's3://" + bucketName + "/databricks-compatibility-test-" + tableName + "'");
+        try {
+            onDelta().executeQuery("INSERT INTO default." + tableName + " VALUES (1, 'spark')");
+            onDelta().executeQuery("ALTER TABLE default." + tableName + " ADD COLUMN new_column INT");
+
+            // Both Spark and Trino Delta Lake connector use the old table definition for the versioned query
+            List<QueryAssert.Row> expectedRows = ImmutableList.of(row(1, "spark"));
+            assertThat(onDelta().executeQuery("SELECT * FROM default." + tableName + " VERSION AS OF 1"))
+                    .containsOnly(expectedRows);
+            assertThat(onTrino().executeQuery("SELECT * FROM delta.default." + tableName + " FOR VERSION AS OF 1"))
+                    .containsOnly(expectedRows);
+
+            // Do time travel after table replacement
+            onDelta().executeQuery("CREATE OR REPLACE TABLE " + tableName + " USING DELTA AS SELECT id + 1 AS id, part, new_column FROM " + tableName);
+            assertThat(onDelta().executeQuery("SELECT * FROM default." + tableName + " VERSION AS OF 1"))
+                    .containsOnly(expectedRows);
+            assertThat(onTrino().executeQuery("SELECT * FROM delta.default." + tableName + " FOR VERSION AS OF 1"))
                     .containsOnly(expectedRows);
         }
         finally {

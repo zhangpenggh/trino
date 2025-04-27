@@ -18,7 +18,7 @@ import io.trino.plugin.deltalake.transactionlog.MetadataEntry;
 import io.trino.plugin.deltalake.transactionlog.ProtocolEntry;
 import io.trino.plugin.deltalake.transactionlog.RemoveFileEntry;
 import io.trino.plugin.deltalake.transactionlog.TransactionEntry;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
@@ -30,7 +30,7 @@ import static io.trino.plugin.deltalake.transactionlog.DeltaLakeTransactionLogEn
 import static io.trino.plugin.deltalake.transactionlog.DeltaLakeTransactionLogEntry.protocolEntry;
 import static io.trino.plugin.deltalake.transactionlog.DeltaLakeTransactionLogEntry.removeFileEntry;
 import static io.trino.plugin.deltalake.transactionlog.DeltaLakeTransactionLogEntry.transactionEntry;
-import static org.testng.Assert.assertEquals;
+import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestCheckpointBuilder
 {
@@ -58,12 +58,12 @@ public class TestCheckpointBuilder
         builder.addLogEntry(transactionEntry(app1TransactionV1));
         builder.addLogEntry(transactionEntry(app2TransactionV5));
 
-        AddFileEntry addA1 = new AddFileEntry("a", Map.of(), 1, 1, true, Optional.empty(), Optional.empty(), Map.of());
-        RemoveFileEntry removeA1 = new RemoveFileEntry("a", 1, true);
-        AddFileEntry addA2 = new AddFileEntry("a", Map.of(), 2, 1, true, Optional.empty(), Optional.empty(), Map.of());
-        AddFileEntry addB = new AddFileEntry("b", Map.of(), 1, 1, true, Optional.empty(), Optional.empty(), Map.of());
-        RemoveFileEntry removeB = new RemoveFileEntry("b", 1, true);
-        RemoveFileEntry removeC = new RemoveFileEntry("c", 1, true);
+        AddFileEntry addA1 = new AddFileEntry("a", Map.of(), 1, 1, true, Optional.empty(), Optional.empty(), Map.of(), Optional.empty());
+        RemoveFileEntry removeA1 = new RemoveFileEntry("a", Map.of(), 1, true, Optional.empty());
+        AddFileEntry addA2 = new AddFileEntry("a", Map.of(), 2, 1, true, Optional.empty(), Optional.empty(), Map.of(), Optional.empty());
+        AddFileEntry addB = new AddFileEntry("b", Map.of(), 1, 1, true, Optional.empty(), Optional.empty(), Map.of(), Optional.empty());
+        RemoveFileEntry removeB = new RemoveFileEntry("b", Map.of(), 1, true, Optional.empty());
+        RemoveFileEntry removeC = new RemoveFileEntry("c", Map.of(), 1, true, Optional.empty());
         builder.addLogEntry(addFileEntry(addA1));
         builder.addLogEntry(removeFileEntry(removeA1));
         builder.addLogEntry(addFileEntry(addA2));
@@ -77,6 +77,6 @@ public class TestCheckpointBuilder
                 Set.of(app1TransactionV3, app2TransactionV5),
                 Set.of(addA2),
                 Set.of(removeB, removeC));
-        assertEquals(expectedCheckpoint, builder.build());
+        assertThat(expectedCheckpoint).isEqualTo(builder.build());
     }
 }

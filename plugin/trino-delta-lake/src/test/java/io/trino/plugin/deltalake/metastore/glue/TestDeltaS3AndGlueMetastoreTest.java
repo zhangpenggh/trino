@@ -16,17 +16,16 @@ package io.trino.plugin.deltalake.metastore.glue;
 import com.google.common.collect.ImmutableMap;
 import io.trino.plugin.deltalake.DeltaLakeQueryRunner;
 import io.trino.plugin.hive.BaseS3AndGlueMetastoreTest;
-import io.trino.testing.DistributedQueryRunner;
 import io.trino.testing.QueryRunner;
 
-import java.nio.file.Path;
+import java.net.URI;
 import java.util.Set;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 import static com.google.common.collect.Iterables.getOnlyElement;
-import static io.trino.plugin.deltalake.DeltaLakeQueryRunner.DELTA_CATALOG;
-import static io.trino.plugin.hive.metastore.glue.GlueHiveMetastore.createTestingGlueHiveMetastore;
-import static java.util.Objects.requireNonNull;
+import static io.trino.plugin.hive.metastore.glue.TestingGlueHiveMetastore.createTestingGlueHiveMetastore;
+import static io.trino.testing.SystemEnvironmentUtils.requireEnv;
 import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestDeltaS3AndGlueMetastoreTest
@@ -34,24 +33,23 @@ public class TestDeltaS3AndGlueMetastoreTest
 {
     public TestDeltaS3AndGlueMetastoreTest()
     {
-        super("partitioned_by", "location", requireNonNull(System.getenv("S3_BUCKET"), "Environment variable not set: S3_BUCKET"));
+        super("partitioned_by", "location", requireEnv("S3_BUCKET"));
     }
 
     @Override
     protected QueryRunner createQueryRunner()
             throws Exception
     {
-        metastore = createTestingGlueHiveMetastore(Path.of(schemaPath()));
-        DistributedQueryRunner queryRunner = DeltaLakeQueryRunner.builder()
-                .setCatalogName(DELTA_CATALOG)
+        metastore = createTestingGlueHiveMetastore(URI.create(schemaPath()), this::closeAfterClass);
+        return DeltaLakeQueryRunner.builder(schemaName)
                 .setDeltaProperties(ImmutableMap.<String, String>builder()
                         .put("hive.metastore", "glue")
                         .put("hive.metastore.glue.default-warehouse-dir", schemaPath())
+                        .put("fs.native-s3.enabled", "true")
                         .put("delta.enable-non-concurrent-writes", "true")
                         .buildOrThrow())
+                .setSchemaLocation(schemaPath())
                 .build();
-        queryRunner.execute("CREATE SCHEMA " + schemaName + " WITH (location = '" + schemaPath() + "')");
-        return queryRunner;
     }
 
     @Override
@@ -61,7 +59,7 @@ public class TestDeltaS3AndGlueMetastoreTest
         {
             String locationDirectory = location.endsWith("/") ? location : location + "/";
             String partitionPart = partitionColumn.isEmpty() ? "" : partitionColumn + "=[a-z0-9]+/";
-            assertThat(dataFile).matches("^" + locationDirectory + partitionPart + "[a-zA-Z0-9_-]+$");
+            assertThat(dataFile).matches("^" + Pattern.quote(locationDirectory) + partitionPart + "[a-zA-Z0-9_-]+$");
             verifyPathExist(dataFile);
         });
     }
@@ -72,11 +70,11 @@ public class TestDeltaS3AndGlueMetastoreTest
         String locationDirectory = location.endsWith("/") ? location : location + "/";
         getAllMetadataDataFilesFromTableDirectory(location).forEach(metadataFile ->
         {
-            assertThat(metadataFile).matches("^" + locationDirectory + "_delta_log/[0-9]+.json$");
+            assertThat(metadataFile).matches("^" + Pattern.quote(locationDirectory) + "_delta_log/[0-9]+.json$");
             verifyPathExist(metadataFile);
         });
 
-        assertThat(getExtendedStatisticsFileFromTableDirectory(location)).matches("^" + locationDirectory + "_delta_log/_trino_meta/extended_stats.json$");
+        assertThat(getExtendedStatisticsFileFromTableDirectory(location)).matches("^" + Pattern.quote(locationDirectory) + "_delta_log/_trino_meta/extended_stats.json$");
     }
 
     @Override

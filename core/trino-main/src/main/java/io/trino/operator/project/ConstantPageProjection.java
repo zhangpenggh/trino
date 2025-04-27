@@ -17,11 +17,10 @@ import com.google.common.collect.ImmutableList;
 import io.trino.operator.CompletedWork;
 import io.trino.operator.DriverYieldSignal;
 import io.trino.operator.Work;
-import io.trino.spi.Page;
 import io.trino.spi.block.Block;
-import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.block.RunLengthEncodedBlock;
 import io.trino.spi.connector.ConnectorSession;
+import io.trino.spi.connector.SourcePage;
 import io.trino.spi.type.Type;
 
 import static io.trino.spi.type.TypeUtils.writeNativeValue;
@@ -37,9 +36,7 @@ public class ConstantPageProjection
     public ConstantPageProjection(Object value, Type type)
     {
         this.type = type;
-        BlockBuilder blockBuilder = type.createBlockBuilder(null, 1);
-        writeNativeValue(type, blockBuilder, value);
-        this.value = blockBuilder.build();
+        this.value = writeNativeValue(type, value);
     }
 
     @Override
@@ -61,7 +58,7 @@ public class ConstantPageProjection
     }
 
     @Override
-    public Work<Block> project(ConnectorSession session, DriverYieldSignal yieldSignal, Page page, SelectedPositions selectedPositions)
+    public Work<Block> project(ConnectorSession session, DriverYieldSignal yieldSignal, SourcePage page, SelectedPositions selectedPositions)
     {
         return new CompletedWork<>(RunLengthEncodedBlock.create(value, selectedPositions.size()));
     }

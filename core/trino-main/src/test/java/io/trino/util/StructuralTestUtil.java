@@ -21,6 +21,9 @@ import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.block.MapBlockBuilder;
 import io.trino.spi.block.RowBlockBuilder;
+import io.trino.spi.block.RowValueBuilder;
+import io.trino.spi.block.SqlMap;
+import io.trino.spi.block.SqlRow;
 import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.Decimals;
 import io.trino.spi.type.Int128;
@@ -52,7 +55,7 @@ public final class StructuralTestUtil
         return blockBuilder.build();
     }
 
-    public static Block mapBlockOf(Type keyType, Type valueType, Map<?, ?> map)
+    public static SqlMap sqlMapOf(Type keyType, Type valueType, Map<?, ?> map)
     {
         return buildMapValue(
                 mapType(keyType, valueType),
@@ -70,6 +73,15 @@ public final class StructuralTestUtil
         return (MapType) TESTING_TYPE_MANAGER.getParameterizedType(StandardTypes.MAP, ImmutableList.of(
                 TypeSignatureParameter.typeParameter(keyType.getTypeSignature()),
                 TypeSignatureParameter.typeParameter(valueType.getTypeSignature())));
+    }
+
+    public static SqlRow sqlRowOf(RowType rowType, Object... values)
+    {
+        return RowValueBuilder.buildRowValue(rowType, fieldBuilders -> {
+            for (int i = 0; i < values.length; i++) {
+                appendToBlockBuilder(rowType.getTypeParameters().get(i), values[i], fieldBuilders.get(i));
+            }
+        });
     }
 
     public static void appendToBlockBuilder(Type type, Object element, BlockBuilder blockBuilder)
@@ -106,8 +118,8 @@ public final class StructuralTestUtil
             type.writeBoolean(blockBuilder, (Boolean) element);
         }
         else if (javaType == long.class) {
-            if (element instanceof SqlDecimal) {
-                type.writeLong(blockBuilder, ((SqlDecimal) element).getUnscaledValue().longValue());
+            if (element instanceof SqlDecimal sqlDecimal) {
+                type.writeLong(blockBuilder, sqlDecimal.getUnscaledValue().longValue());
             }
             else if (REAL.equals(type)) {
                 type.writeLong(blockBuilder, floatToRawIntBits(((Number) element).floatValue()));
@@ -123,19 +135,19 @@ public final class StructuralTestUtil
             if (element instanceof String) {
                 type.writeSlice(blockBuilder, Slices.utf8Slice(element.toString()));
             }
-            else if (element instanceof byte[]) {
-                type.writeSlice(blockBuilder, Slices.wrappedBuffer((byte[]) element));
+            else if (element instanceof byte[] bytes) {
+                type.writeSlice(blockBuilder, Slices.wrappedBuffer(bytes));
             }
             else {
                 type.writeSlice(blockBuilder, (Slice) element);
             }
         }
         else {
-            if (element instanceof SqlDecimal) {
-                type.writeObject(blockBuilder, Int128.valueOf(((SqlDecimal) element).getUnscaledValue()));
+            if (element instanceof SqlDecimal sqlDecimal) {
+                type.writeObject(blockBuilder, Int128.valueOf(sqlDecimal.getUnscaledValue()));
             }
-            else if (element instanceof BigDecimal) {
-                type.writeObject(blockBuilder, Decimals.valueOf((BigDecimal) element));
+            else if (element instanceof BigDecimal bigDecimal) {
+                type.writeObject(blockBuilder, Decimals.valueOf(bigDecimal));
             }
             else {
                 type.writeObject(blockBuilder, element);

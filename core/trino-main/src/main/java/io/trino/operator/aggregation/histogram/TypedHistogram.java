@@ -14,12 +14,11 @@
 package io.trino.operator.aggregation.histogram;
 
 import com.google.common.base.Throwables;
-import com.google.common.primitives.Ints;
-import io.trino.operator.VariableWidthData;
+import io.trino.operator.AppendOnlyVariableWidthData;
 import io.trino.spi.TrinoException;
-import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.block.MapBlockBuilder;
+import io.trino.spi.block.ValueBlock;
 import io.trino.spi.type.Type;
 import jakarta.annotation.Nullable;
 
@@ -32,10 +31,11 @@ import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 import static io.airlift.slice.SizeOf.instanceSize;
 import static io.airlift.slice.SizeOf.sizeOf;
-import static io.trino.operator.VariableWidthData.EMPTY_CHUNK;
-import static io.trino.operator.VariableWidthData.POINTER_SIZE;
+import static io.trino.operator.AppendOnlyVariableWidthData.POINTER_SIZE;
+import static io.trino.operator.AppendOnlyVariableWidthData.getChunkOffset;
 import static io.trino.spi.StandardErrorCode.GENERIC_INSUFFICIENT_RESOURCES;
 import static io.trino.spi.type.BigintType.BIGINT;
+import static java.lang.Math.clamp;
 import static java.lang.Math.multiplyExact;
 import static java.nio.ByteOrder.LITTLE_ENDIAN;
 import static java.util.Objects.checkIndex;
@@ -71,7 +71,7 @@ public final class TypedHistogram
     private final MethodHandle readFlat;
     private final MethodHandle writeFlat;
     private final MethodHandle hashFlat;
-    private final MethodHandle distinctFlatBlock;
+    private final MethodHandle identicalFlatBlock;
     private final MethodHandle hashBlock;
 
     private final int recordSize;
@@ -85,7 +85,7 @@ public final class TypedHistogram
 
     private byte[] control;
     private byte[][] recordGroups;
-    private final VariableWidthData variableWidthData;
+    private final AppendOnlyVariableWidthData variableWidthData;
 
     // head position of each group in the hash table
     @Nullable
@@ -99,7 +99,7 @@ public final class TypedHistogram
             MethodHandle readFlat,
             MethodHandle writeFlat,
             MethodHandle hashFlat,
-            MethodHandle distinctFlatBlock,
+            MethodHandle identicalFlatBlock,
             MethodHandle hashBlock,
             boolean grouped)
     {
@@ -108,7 +108,7 @@ public final class TypedHistogram
         this.readFlat = requireNonNull(readFlat, "readFlat is null");
         this.writeFlat = requireNonNull(writeFlat, "writeFlat is null");
         this.hashFlat = requireNonNull(hashFlat, "hashFlat is null");
-        this.distinctFlatBlock = requireNonNull(distinctFlatBlock, "distinctFlatBlock is null");
+        this.identicalFlatBlock = requireNonNull(identicalFlatBlock, "identicalFlatBlock is null");
         this.hashBlock = requireNonNull(hashBlock, "hashBlock is null");
 
         capacity = INITIAL_CAPACITY;
@@ -119,7 +119,7 @@ public final class TypedHistogram
         groupRecordIndex = grouped ? new int[0] : null;
 
         boolean variableWidth = type.isFlatVariableWidth();
-        variableWidthData = variableWidth ? new VariableWidthData() : null;
+        variableWidthData = variableWidth ? new AppendOnlyVariableWidthData() : null;
         if (grouped) {
             recordGroupIdOffset = (variableWidth ? POINTER_SIZE : 0);
             recordNextIndexOffset = recordGroupIdOffset + Integer.BYTES;
@@ -139,7 +139,7 @@ public final class TypedHistogram
     private static byte[][] createRecordGroups(int capacity, int recordSize)
     {
         if (capacity < RECORDS_PER_GROUP) {
-            return new byte[][]{new byte[multiplyExact(capacity, recordSize)]};
+            return new byte[][] {new byte[multiplyExact(capacity, recordSize)]};
         }
 
         byte[][] groups = new byte[(capacity + 1) >> RECORDS_PER_GROUP_SHIFT][];
@@ -155,7 +155,7 @@ public final class TypedHistogram
                 sizeOf(control) +
                 (sizeOf(recordGroups[0]) * recordGroups.length) +
                 (variableWidthData == null ? 0 : variableWidthData.getRetainedSizeBytes()) +
-                (groupRecordIndex == null ? 0 : sizeOf(groupRecordIndex));
+                sizeOf(groupRecordIndex);
     }
 
     public void setMaxGroupId(int maxGroupId)
@@ -167,7 +167,7 @@ public final class TypedHistogram
 
         int currentSize = groupRecordIndex.length;
         if (requiredSize > currentSize) {
-            groupRecordIndex = Arrays.copyOf(groupRecordIndex, Ints.constrainToRange(requiredSize * 2, 1024, MAX_ARRAY_SIZE));
+            groupRecordIndex = Arrays.copyOf(groupRecordIndex, clamp(requiredSize * 2L, 1024, MAX_ARRAY_SIZE));
             Arrays.fill(groupRecordIndex, currentSize, groupRecordIndex.length, -1);
         }
     }
@@ -222,13 +222,15 @@ public final class TypedHistogram
 
     private void serializeEntry(BlockBuilder keyBuilder, BlockBuilder valueBuilder, byte[] records, int recordOffset)
     {
-        byte[] variableWidthChunk = EMPTY_CHUNK;
+        byte[] variableWidthChunk = null;
+        int variableWidthChunkOffset = 0;
         if (variableWidthData != null) {
             variableWidthChunk = variableWidthData.getChunk(records, recordOffset);
+            variableWidthChunkOffset = getChunkOffset(records, recordOffset);
         }
 
         try {
-            readFlat.invokeExact(records, recordOffset + recordValueOffset, variableWidthChunk, keyBuilder);
+            readFlat.invokeExact(records, recordOffset + recordValueOffset, variableWidthChunk, variableWidthChunkOffset, keyBuilder);
         }
         catch (Throwable throwable) {
             Throwables.throwIfUnchecked(throwable);
@@ -237,7 +239,7 @@ public final class TypedHistogram
         BIGINT.writeLong(valueBuilder, (long) LONG_HANDLE.get(records, recordOffset + recordCountOffset));
     }
 
-    public void add(int groupId, Block block, int position, long count)
+    public void add(int groupId, ValueBlock block, int position, long count)
     {
         checkArgument(!block.isNull(position), "value must not be null");
         checkArgument(groupId == 0 || groupRecordIndex != null, "groupId must be zero when grouping is not enabled");
@@ -275,12 +277,12 @@ public final class TypedHistogram
         }
     }
 
-    private int matchInVector(int groupId, Block block, int position, int vectorStartBucket, long repeated, long controlVector)
+    private int matchInVector(int groupId, ValueBlock block, int position, int vectorStartBucket, long repeated, long controlVector)
     {
         long controlMatches = match(controlVector, repeated);
         while (controlMatches != 0) {
             int bucket = bucket(vectorStartBucket + (Long.numberOfTrailingZeros(controlMatches) >>> 3));
-            if (valueNotDistinctFrom(bucket, block, position, groupId)) {
+            if (valueIdentical(bucket, block, position, groupId)) {
                 return bucket;
             }
 
@@ -306,7 +308,7 @@ public final class TypedHistogram
         LONG_HANDLE.set(records, countOffset, (long) LONG_HANDLE.get(records, countOffset) + increment);
     }
 
-    private void insert(int index, int groupId, Block block, int position, long count, byte hashPrefix)
+    private void insert(int index, int groupId, ValueBlock block, int position, long count, byte hashPrefix)
     {
         setControl(index, hashPrefix);
 
@@ -327,12 +329,12 @@ public final class TypedHistogram
         LONG_HANDLE.set(records, recordOffset + recordCountOffset, count);
 
         // write value
-        byte[] variableWidthChunk = EMPTY_CHUNK;
+        byte[] variableWidthChunk = null;
         int variableWidthChunkOffset = 0;
         if (variableWidthData != null) {
             int variableWidthLength = type.getFlatVariableWidthSize(block, position);
             variableWidthChunk = variableWidthData.allocate(records, recordOffset, variableWidthLength);
-            variableWidthChunkOffset = VariableWidthData.getChunkOffset(records, recordOffset);
+            variableWidthChunkOffset = getChunkOffset(records, recordOffset);
         }
 
         try {
@@ -438,15 +440,18 @@ public final class TypedHistogram
         int recordOffset = getRecordOffset(index);
 
         try {
-            byte[] variableWidthChunk = EMPTY_CHUNK;
+            byte[] variableWidthChunk = null;
+            int variableWidthChunkOffset = 0;
             if (variableWidthData != null) {
                 variableWidthChunk = variableWidthData.getChunk(records, recordOffset);
+                variableWidthChunkOffset = getChunkOffset(records, recordOffset);
             }
 
             long valueHash = (long) hashFlat.invokeExact(
                     records,
                     recordOffset + recordValueOffset,
-                    variableWidthChunk);
+                    variableWidthChunk,
+                    variableWidthChunkOffset);
             return groupId * HASH_COMBINE_PRIME + valueHash;
         }
         catch (Throwable throwable) {
@@ -455,7 +460,7 @@ public final class TypedHistogram
         }
     }
 
-    private long valueHashCode(int groupId, Block right, int rightPosition)
+    private long valueHashCode(int groupId, ValueBlock right, int rightPosition)
     {
         try {
             long valueHash = (long) hashBlock.invokeExact(right, rightPosition);
@@ -467,7 +472,7 @@ public final class TypedHistogram
         }
     }
 
-    private boolean valueNotDistinctFrom(int leftPosition, Block right, int rightPosition, int rightGroupId)
+    private boolean valueIdentical(int leftPosition, ValueBlock right, int rightPosition, int rightGroupId)
     {
         byte[] leftRecords = getRecords(leftPosition);
         int leftRecordOffset = getRecordOffset(leftPosition);
@@ -479,16 +484,19 @@ public final class TypedHistogram
             }
         }
 
-        byte[] leftVariableWidthChunk = EMPTY_CHUNK;
+        byte[] leftVariableWidthChunk = null;
+        int variableWidthChunkOffset = 0;
         if (variableWidthData != null) {
             leftVariableWidthChunk = variableWidthData.getChunk(leftRecords, leftRecordOffset);
+            variableWidthChunkOffset = getChunkOffset(leftRecords, leftRecordOffset);
         }
 
         try {
-            return !(boolean) distinctFlatBlock.invokeExact(
+            return (boolean) identicalFlatBlock.invokeExact(
                     leftRecords,
                     leftRecordOffset + recordValueOffset,
                     leftVariableWidthChunk,
+                    variableWidthChunkOffset,
                     right,
                     rightPosition);
         }

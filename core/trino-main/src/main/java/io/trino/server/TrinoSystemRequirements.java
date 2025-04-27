@@ -15,6 +15,7 @@ package io.trino.server;
 
 import com.google.common.base.StandardSystemProperty;
 import com.google.common.collect.ImmutableSet;
+import com.google.errorprone.annotations.FormatMethod;
 import com.sun.management.UnixOperatingSystemMXBean;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
@@ -41,7 +42,13 @@ final class TrinoSystemRequirements
 
     private TrinoSystemRequirements() {}
 
-    public static void verifyJvmRequirements()
+    public static void verifySystemRequirements()
+    {
+        verifyJvmRequirements();
+        verifySystemTimeIsReasonable();
+    }
+
+    private static void verifyJvmRequirements()
     {
         verifyJavaVersion();
         verify64BitJvm();
@@ -93,8 +100,7 @@ final class TrinoSystemRequirements
 
     private static void verifyJavaVersion()
     {
-        Version required = Version.parse("17.0.3");
-
+        Version required = Version.parse("23");
         if (Runtime.version().compareTo(required) < 0) {
             failRequirement("Trino requires Java %s at minimum (found %s)", required, Runtime.version());
         }
@@ -165,20 +171,22 @@ final class TrinoSystemRequirements
      * Perform a sanity check to make sure that the year is reasonably current, to guard against
      * issues in third party libraries.
      */
-    public static void verifySystemTimeIsReasonable()
+    private static void verifySystemTimeIsReasonable()
     {
         int currentYear = DateTime.now().year().get();
-        if (currentYear < 2022) {
+        if (currentYear < 2024) {
             failRequirement("Trino requires the system time to be current (found year %s)", currentYear);
         }
     }
 
+    @FormatMethod
     private static void failRequirement(String format, Object... args)
     {
         System.err.println("ERROR: " + format(format, args));
         System.exit(100);
     }
 
+    @FormatMethod
     private static void warnRequirement(String format, Object... args)
     {
         System.err.println("WARNING: " + format(format, args));

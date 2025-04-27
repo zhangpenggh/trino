@@ -23,6 +23,7 @@ import java.util.OptionalInt;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.collect.Iterables.getLast;
+import static io.trino.filesystem.Locations.isS3Tables;
 import static java.lang.Integer.parseInt;
 import static java.util.Objects.requireNonNull;
 import static java.util.function.Predicate.not;
@@ -61,9 +62,6 @@ public final class Location
         checkArgument(!location.isEmpty(), "location is empty");
         checkArgument(!location.isBlank(), "location is blank");
 
-        checkArgument(location.indexOf('#') < 0, "Fragment is not allowed in a file system location: %s", location);
-        checkArgument(location.indexOf('?') < 0, "URI query component is not allowed in a file system location: %s", location);
-
         // legacy HDFS location that is just a path
         if (location.startsWith("/")) {
             return new Location(location, Optional.empty(), Optional.empty(), Optional.empty(), OptionalInt.empty(), location.substring(1));
@@ -95,7 +93,10 @@ public final class Location
                 }
             }
 
-            checkArgument((userInfo.isEmpty() && host.isEmpty() && port.isEmpty()) || authoritySplit.size() == 2, "Path missing in file system location: %s", location);
+            if (!isS3Tables(location)) {
+                // S3 Tables create tables under the bucket like 's3://e97725d9-dbfb-4334-784sox7edps35ncq16arh546frqa1use2b--table-s3'
+                checkArgument((userInfo.isEmpty() && host.isEmpty() && port.isEmpty()) || authoritySplit.size() == 2, "Path missing in file system location: %s", location);
+            }
             String path = (authoritySplit.size() == 2) ? authoritySplit.get(1) : "";
 
             return new Location(location, Optional.of(scheme), userInfo, host, port, path);

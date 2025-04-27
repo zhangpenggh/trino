@@ -52,15 +52,15 @@ public class TpcdsTableStatisticsFactory
 
     private TableStatistics toTableStatistics(Map<String, ColumnHandle> columnHandles, TableStatisticsData statisticsData)
     {
-        long rowCount = statisticsData.getRowCount();
+        long rowCount = statisticsData.rowCount();
         TableStatistics.Builder tableStatistics = TableStatistics.builder()
                 .setRowCount(Estimate.of(rowCount));
 
         if (rowCount > 0) {
-            Map<String, ColumnStatisticsData> columnsData = statisticsData.getColumns();
+            Map<String, ColumnStatisticsData> columnsData = statisticsData.columns();
             for (Map.Entry<String, ColumnHandle> entry : columnHandles.entrySet()) {
                 TpcdsColumnHandle columnHandle = (TpcdsColumnHandle) entry.getValue();
-                tableStatistics.setColumnStatistics(entry.getValue(), toColumnStatistics(columnsData.get(entry.getKey()), columnHandle.getType(), rowCount));
+                tableStatistics.setColumnStatistics(entry.getValue(), toColumnStatistics(columnsData.get(entry.getKey()), columnHandle.type(), rowCount));
             }
         }
 
@@ -70,11 +70,11 @@ public class TpcdsTableStatisticsFactory
     private ColumnStatistics toColumnStatistics(ColumnStatisticsData columnStatisticsData, Type type, long rowCount)
     {
         ColumnStatistics.Builder columnStatistics = ColumnStatistics.builder();
-        long nullCount = columnStatisticsData.getNullsCount();
+        long nullCount = columnStatisticsData.nullsCount();
         columnStatistics.setNullsFraction(Estimate.of((double) nullCount / rowCount));
-        columnStatistics.setRange(toRange(columnStatisticsData.getMin(), columnStatisticsData.getMax(), type));
-        columnStatistics.setDistinctValuesCount(Estimate.of(columnStatisticsData.getDistinctValuesCount()));
-        columnStatistics.setDataSize(columnStatisticsData.getDataSize().map(Estimate::of).orElse(Estimate.unknown()));
+        columnStatistics.setRange(toRange(columnStatisticsData.min(), columnStatisticsData.max(), type));
+        columnStatistics.setDistinctValuesCount(Estimate.of(columnStatisticsData.distinctValuesCount()));
+        columnStatistics.setDataSize(columnStatisticsData.dataSize().map(Estimate::of).orElse(Estimate.unknown()));
         return columnStatistics.build();
     }
 
@@ -91,8 +91,8 @@ public class TpcdsTableStatisticsFactory
 
     private static double toDouble(Object value, Type type)
     {
-        if (value instanceof String && type.equals(DATE)) {
-            return LocalDate.parse((CharSequence) value).toEpochDay();
+        if (value instanceof String string && type.equals(DATE)) {
+            return LocalDate.parse(string).toEpochDay();
         }
         if (type.equals(BIGINT) || type.equals(INTEGER) || type.equals(DATE)) {
             return ((Number) value).doubleValue();

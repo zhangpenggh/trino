@@ -17,6 +17,8 @@ import com.google.common.collect.ImmutableList;
 import io.airlift.units.DataSize;
 import io.trino.memory.context.AggregatedMemoryContext;
 import io.trino.memory.context.LocalMemoryContext;
+import io.trino.operator.AggregationMetrics;
+import io.trino.operator.FlatHashStrategyCompiler;
 import io.trino.operator.OperatorContext;
 import io.trino.operator.WorkProcessor;
 import io.trino.operator.WorkProcessor.Transformation;
@@ -24,8 +26,6 @@ import io.trino.operator.WorkProcessor.TransformationState;
 import io.trino.operator.aggregation.AggregatorFactory;
 import io.trino.spi.Page;
 import io.trino.spi.type.Type;
-import io.trino.spi.type.TypeOperators;
-import io.trino.sql.gen.JoinCompiler;
 import io.trino.sql.planner.plan.AggregationNode;
 
 import java.io.Closeable;
@@ -33,6 +33,7 @@ import java.util.List;
 import java.util.Optional;
 
 import static com.google.common.base.Verify.verify;
+import static java.util.Objects.requireNonNull;
 
 public class MergingHashAggregationBuilder
         implements Closeable
@@ -49,8 +50,8 @@ public class MergingHashAggregationBuilder
     private final LocalMemoryContext memoryContext;
     private final long memoryLimitForMerge;
     private final int overwriteIntermediateChannelOffset;
-    private final JoinCompiler joinCompiler;
-    private final TypeOperators typeOperators;
+    private final FlatHashStrategyCompiler hashStrategyCompiler;
+    private final AggregationMetrics aggregationMetrics;
 
     public MergingHashAggregationBuilder(
             List<AggregatorFactory> aggregatorFactories,
@@ -63,10 +64,10 @@ public class MergingHashAggregationBuilder
             AggregatedMemoryContext aggregatedMemoryContext,
             long memoryLimitForMerge,
             int overwriteIntermediateChannelOffset,
-            JoinCompiler joinCompiler,
-            TypeOperators typeOperators)
+            FlatHashStrategyCompiler hashStrategyCompiler,
+            AggregationMetrics aggregationMetrics)
     {
-        ImmutableList.Builder<Integer> groupByPartialChannels = ImmutableList.builder();
+        ImmutableList.Builder<Integer> groupByPartialChannels = ImmutableList.builderWithExpectedSize(groupByTypes.size());
         for (int i = 0; i < groupByTypes.size(); i++) {
             groupByPartialChannels.add(i);
         }
@@ -82,8 +83,8 @@ public class MergingHashAggregationBuilder
         this.memoryContext = aggregatedMemoryContext.newLocalMemoryContext(MergingHashAggregationBuilder.class.getSimpleName());
         this.memoryLimitForMerge = memoryLimitForMerge;
         this.overwriteIntermediateChannelOffset = overwriteIntermediateChannelOffset;
-        this.joinCompiler = joinCompiler;
-        this.typeOperators = typeOperators;
+        this.hashStrategyCompiler = hashStrategyCompiler;
+        this.aggregationMetrics = requireNonNull(aggregationMetrics, "aggregationMetrics is null");
 
         rebuildHashAggregationBuilder();
     }
@@ -150,12 +151,13 @@ public class MergingHashAggregationBuilder
                 groupByTypes,
                 groupByPartialChannels,
                 hashChannel,
+                false, // spillable
                 operatorContext,
                 Optional.of(DataSize.succinctBytes(0)),
                 Optional.of(overwriteIntermediateChannelOffset),
-                joinCompiler,
-                typeOperators,
+                hashStrategyCompiler,
                 // TODO: merging should also yield on memory reservations
-                () -> true);
+                () -> true,
+                aggregationMetrics);
     }
 }

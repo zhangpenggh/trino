@@ -23,13 +23,14 @@ import io.trino.operator.project.PageProcessor;
 import io.trino.spi.Page;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.MapBlockBuilder;
+import io.trino.spi.connector.SourcePage;
 import io.trino.spi.type.MapType;
 import io.trino.spi.type.Type;
 import io.trino.sql.gen.ExpressionCompiler;
+import io.trino.sql.planner.Symbol;
 import io.trino.sql.relational.LambdaDefinitionExpression;
 import io.trino.sql.relational.RowExpression;
 import io.trino.sql.relational.VariableReferenceExpression;
-import io.trino.sql.tree.QualifiedName;
 import io.trino.type.FunctionType;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
@@ -83,7 +84,7 @@ public class BenchmarkTransformKey
                         SESSION,
                         new DriverYieldSignal(),
                         newSimpleAggregatedMemoryContext().newLocalMemoryContext(PageProcessor.class.getSimpleName()),
-                        data.getPage()));
+                        SourcePage.create(data.getPage())));
     }
 
     @SuppressWarnings("FieldMayBeFinal")
@@ -119,14 +120,13 @@ public class BenchmarkTransformKey
             }
             MapType mapType = mapType(elementType, elementType);
             ResolvedFunction resolvedFunction = functionResolution.resolveFunction(
-                    QualifiedName.of(name),
+                    name,
                     fromTypes(mapType, new FunctionType(ImmutableList.of(elementType, elementType), elementType)));
             ResolvedFunction add = functionResolution.resolveOperator(ADD, ImmutableList.of(elementType, elementType));
             projectionsBuilder.add(call(resolvedFunction, ImmutableList.of(
                     field(0, mapType),
                     new LambdaDefinitionExpression(
-                            ImmutableList.of(elementType, elementType),
-                            ImmutableList.of("x", "y"),
+                            ImmutableList.of(new Symbol(elementType, "x"), new Symbol(elementType, "y")),
                             call(add, ImmutableList.of(
                                     new VariableReferenceExpression("x", elementType),
                                     constant(increment, elementType)))))));

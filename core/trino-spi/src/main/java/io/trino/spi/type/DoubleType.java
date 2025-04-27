@@ -17,11 +17,15 @@ import io.airlift.slice.XxHash64;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.block.BlockBuilderStatus;
+import io.trino.spi.block.LongArrayBlock;
 import io.trino.spi.block.LongArrayBlockBuilder;
 import io.trino.spi.block.PageBuilderStatus;
 import io.trino.spi.connector.ConnectorSession;
+import io.trino.spi.function.BlockIndex;
+import io.trino.spi.function.BlockPosition;
 import io.trino.spi.function.FlatFixed;
 import io.trino.spi.function.FlatFixedOffset;
+import io.trino.spi.function.FlatVariableOffset;
 import io.trino.spi.function.FlatVariableWidth;
 import io.trino.spi.function.IsNull;
 import io.trino.spi.function.ScalarOperator;
@@ -35,7 +39,7 @@ import static io.trino.spi.function.OperatorType.COMPARISON_UNORDERED_FIRST;
 import static io.trino.spi.function.OperatorType.COMPARISON_UNORDERED_LAST;
 import static io.trino.spi.function.OperatorType.EQUAL;
 import static io.trino.spi.function.OperatorType.HASH_CODE;
-import static io.trino.spi.function.OperatorType.IS_DISTINCT_FROM;
+import static io.trino.spi.function.OperatorType.IDENTICAL;
 import static io.trino.spi.function.OperatorType.LESS_THAN;
 import static io.trino.spi.function.OperatorType.LESS_THAN_OR_EQUAL;
 import static io.trino.spi.function.OperatorType.READ_VALUE;
@@ -56,7 +60,7 @@ public final class DoubleType
 
     private DoubleType()
     {
-        super(new TypeSignature(StandardTypes.DOUBLE), double.class);
+        super(new TypeSignature(StandardTypes.DOUBLE), double.class, LongArrayBlock.class);
     }
 
     @Override
@@ -89,7 +93,7 @@ public final class DoubleType
         if (block.isNull(position)) {
             return null;
         }
-        return longBitsToDouble(block.getLong(position, 0));
+        return getDouble(block, position);
     }
 
     @Override
@@ -99,14 +103,16 @@ public final class DoubleType
             blockBuilder.appendNull();
         }
         else {
-            ((LongArrayBlockBuilder) blockBuilder).writeLong(block.getLong(position, 0));
+            LongArrayBlock valueBlock = (LongArrayBlock) block.getUnderlyingValueBlock();
+            int valuePosition = block.getUnderlyingValuePosition(position);
+            ((LongArrayBlockBuilder) blockBuilder).writeLong(valueBlock.getLong(valuePosition));
         }
     }
 
     @Override
     public double getDouble(Block block, int position)
     {
-        return longBitsToDouble(block.getLong(position, 0));
+        return read((LongArrayBlock) block.getUnderlyingValueBlock(), block.getUnderlyingValuePosition(position));
     }
 
     @Override
@@ -116,7 +122,7 @@ public final class DoubleType
     }
 
     @Override
-    public BlockBuilder createBlockBuilder(BlockBuilderStatus blockBuilderStatus, int expectedEntries, int expectedBytesPerEntry)
+    public BlockBuilder createBlockBuilder(BlockBuilderStatus blockBuilderStatus, int expectedEntries)
     {
         int maxBlockSizeInBytes;
         if (blockBuilderStatus == null) {
@@ -128,12 +134,6 @@ public final class DoubleType
         return new LongArrayBlockBuilder(
                 blockBuilderStatus,
                 Math.min(expectedEntries, maxBlockSizeInBytes / Double.BYTES));
-    }
-
-    @Override
-    public BlockBuilder createBlockBuilder(BlockBuilderStatus blockBuilderStatus, int expectedEntries)
-    {
-        return createBlockBuilder(blockBuilderStatus, expectedEntries, Double.BYTES);
     }
 
     @Override
@@ -170,10 +170,17 @@ public final class DoubleType
     }
 
     @ScalarOperator(READ_VALUE)
+    private static double read(@BlockPosition LongArrayBlock block, @BlockIndex int position)
+    {
+        return longBitsToDouble(block.getLong(position));
+    }
+
+    @ScalarOperator(READ_VALUE)
     private static double readFlat(
             @FlatFixed byte[] fixedSizeSlice,
             @FlatFixedOffset int fixedSizeOffset,
-            @FlatVariableWidth byte[] unusedVariableSizeSlice)
+            @FlatVariableWidth byte[] unusedVariableSizeSlice,
+            @FlatVariableOffset int unusedVariableSizeOffset)
     {
         return (double) DOUBLE_HANDLE.get(fixedSizeSlice, fixedSizeOffset);
     }
@@ -189,6 +196,7 @@ public final class DoubleType
         DOUBLE_HANDLE.set(fixedSizeSlice, fixedSizeOffset, value);
     }
 
+    @SuppressWarnings("FloatingPointEquality")
     @ScalarOperator(EQUAL)
     private static boolean equalOperator(double left, double right)
     {
@@ -213,23 +221,24 @@ public final class DoubleType
         return XxHash64.hash(doubleToLongBits(value));
     }
 
-    @ScalarOperator(IS_DISTINCT_FROM)
-    private static boolean distinctFromOperator(double left, @IsNull boolean leftNull, double right, @IsNull boolean rightNull)
+    @SuppressWarnings("FloatingPointEquality")
+    @ScalarOperator(IDENTICAL)
+    private static boolean identical(double left, @IsNull boolean leftNull, double right, @IsNull boolean rightNull)
     {
         if (leftNull || rightNull) {
-            return leftNull != rightNull;
+            return leftNull == rightNull;
         }
 
         if (Double.isNaN(left) && Double.isNaN(right)) {
-            return false;
+            return true;
         }
-        return left != right;
+        return left == right;
     }
 
     @ScalarOperator(COMPARISON_UNORDERED_LAST)
     private static long comparisonUnorderedLastOperator(double left, double right)
     {
-        return Double.compare(left, right);
+        return compare(left, right);
     }
 
     @ScalarOperator(COMPARISON_UNORDERED_FIRST)
@@ -245,7 +254,8 @@ public final class DoubleType
         if (Double.isNaN(right)) {
             return 1;
         }
-        return Double.compare(left, right);
+
+        return compare(left, right);
     }
 
     @ScalarOperator(LESS_THAN)
@@ -258,5 +268,14 @@ public final class DoubleType
     private static boolean lessThanOrEqualOperator(double left, double right)
     {
         return left <= right;
+    }
+
+    private static int compare(double left, double right)
+    {
+        if (left == right) { // Double.compare considers 0.0 and -0.0 different from each other
+            return 0;
+        }
+
+        return Double.compare(left, right);
     }
 }

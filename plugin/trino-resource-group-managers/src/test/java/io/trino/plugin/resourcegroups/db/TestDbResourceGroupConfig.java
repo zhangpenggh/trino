@@ -16,7 +16,7 @@ package io.trino.plugin.resourcegroups.db;
 import com.google.common.collect.ImmutableMap;
 import io.airlift.units.Duration;
 import jakarta.validation.constraints.AssertTrue;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.Map;
 
@@ -27,7 +27,7 @@ import static io.airlift.testing.ValidationAssertions.assertFailsValidation;
 import static java.util.concurrent.TimeUnit.HOURS;
 import static java.util.concurrent.TimeUnit.MINUTES;
 import static java.util.concurrent.TimeUnit.SECONDS;
-import static org.testng.Assert.assertTrue;
+import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestDbResourceGroupConfig
 {
@@ -40,7 +40,8 @@ public class TestDbResourceGroupConfig
                 .setConfigDbPassword(null)
                 .setMaxRefreshInterval(new Duration(1, HOURS))
                 .setRefreshInterval(new Duration(1, SECONDS))
-                .setExactMatchSelectorEnabled(false));
+                .setExactMatchSelectorEnabled(false)
+                .setRunMigrationsEnabled(true));
     }
 
     @Test
@@ -53,6 +54,7 @@ public class TestDbResourceGroupConfig
                 .put("resource-groups.max-refresh-interval", "1m")
                 .put("resource-groups.refresh-interval", "2s")
                 .put("resource-groups.exact-match-selector-enabled", "true")
+                .put("resource-groups.db-migrations-enabled", "false")
                 .buildOrThrow();
         DbResourceGroupConfig expected = new DbResourceGroupConfig()
                 .setConfigDbUrl("jdbc:mysql://localhost:3306/config")
@@ -60,10 +62,11 @@ public class TestDbResourceGroupConfig
                 .setConfigDbPassword("trino_admin_pass")
                 .setMaxRefreshInterval(new Duration(1, MINUTES))
                 .setRefreshInterval(new Duration(2, SECONDS))
-                .setExactMatchSelectorEnabled(true);
+                .setExactMatchSelectorEnabled(true)
+                .setRunMigrationsEnabled(false);
 
         assertFullMapping(properties, expected);
-        assertTrue(expected.isRefreshIntervalValid());
+        assertThat(expected.isRefreshIntervalValid()).isTrue();
     }
 
     @Test

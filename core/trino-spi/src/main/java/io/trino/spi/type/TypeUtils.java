@@ -18,6 +18,7 @@ import io.airlift.slice.Slices;
 import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.block.ValueBlock;
 import jakarta.annotation.Nullable;
 
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
@@ -31,9 +32,7 @@ public final class TypeUtils
 {
     public static final int NULL_HASH_CODE = 0;
 
-    private TypeUtils()
-    {
-    }
+    private TypeUtils() {}
 
     /**
      * Get the native value as an object in the value at {@code position} of {@code block}.
@@ -60,6 +59,13 @@ public final class TypeUtils
         return type.getObject(block, position);
     }
 
+    public static ValueBlock writeNativeValue(Type type, @Nullable Object value)
+    {
+        BlockBuilder blockBuilder = type.createBlockBuilder(null, 1);
+        writeNativeValue(type, blockBuilder, value);
+        return blockBuilder.buildValueBlock();
+    }
+
     /**
      * Write a native value object to the current entry of {@code blockBuilder}.
      */
@@ -79,11 +85,11 @@ public final class TypeUtils
         }
         else if (type.getJavaType() == Slice.class) {
             Slice slice;
-            if (value instanceof byte[]) {
-                slice = Slices.wrappedBuffer((byte[]) value);
+            if (value instanceof byte[] bytes) {
+                slice = Slices.wrappedBuffer(bytes);
             }
-            else if (value instanceof String) {
-                slice = Slices.utf8Slice((String) value);
+            else if (value instanceof String string) {
+                slice = Slices.utf8Slice(string);
             }
             else {
                 slice = (Slice) value;

@@ -49,6 +49,7 @@ import java.util.stream.IntStream;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.collect.ImmutableList.toImmutableList;
+import static io.trino.SystemSessionProperties.getQueryMaxMemoryPerNode;
 import static io.trino.SystemSessionProperties.getSkewedPartitionMinDataProcessedRebalanceThreshold;
 import static io.trino.operator.InterpretedHashGenerator.createChannelsHashGenerator;
 import static io.trino.operator.exchange.LocalExchangeSink.finishedLocalExchangeSink;
@@ -65,7 +66,7 @@ import static java.util.function.Function.identity;
 @ThreadSafe
 public class LocalExchange
 {
-    private static final int SCALE_WRITERS_MAX_PARTITIONS_PER_WRITER = 128;
+    public static final int SCALE_WRITERS_MAX_PARTITIONS_PER_WRITER = 128;
 
     private final Supplier<LocalExchanger> exchangerSupplier;
 
@@ -96,7 +97,8 @@ public class LocalExchange
             Optional<Integer> partitionHashChannel,
             DataSize maxBufferedBytes,
             TypeOperators typeOperators,
-            DataSize writerScalingMinDataProcessed)
+            DataSize writerScalingMinDataProcessed,
+            Supplier<Long> totalMemoryUsed)
     {
         int bufferCount = computeBufferCount(partitioning, defaultConcurrency, partitionChannels);
 
@@ -132,7 +134,9 @@ public class LocalExchange
                     memoryManager,
                     maxBufferedBytes.toBytes(),
                     dataProcessed,
-                    writerScalingMinDataProcessed);
+                    writerScalingMinDataProcessed,
+                    totalMemoryUsed,
+                    getQueryMaxMemoryPerNode(session).toBytes());
         }
         else if (isScaledWriterHashDistribution(partitioning)) {
             int partitionCount = bufferCount * SCALE_WRITERS_MAX_PARTITIONS_PER_WRITER;
@@ -164,7 +168,9 @@ public class LocalExchange
                         createPartitionPagePreparer(partitioning, partitionChannels),
                         partitionFunction,
                         partitionCount,
-                        skewedPartitionRebalancer);
+                        skewedPartitionRebalancer,
+                        totalMemoryUsed,
+                        getQueryMaxMemoryPerNode(session).toBytes());
             };
         }
         else if (partitioning.equals(FIXED_HASH_DISTRIBUTION) || partitioning.getCatalogHandle().isPresent() ||
@@ -281,9 +287,9 @@ public class LocalExchange
     {
         if (partitioning.getConnectorHandle() instanceof MergePartitioningHandle) {
             // TODO: can we always use this code path?
-            return nodePartitioningManager.getNodePartitioningMap(session, partitioning).getBucketToPartition().length;
+            return nodePartitioningManager.getNodePartitioningMap(session, partitioning, 1000).getBucketToPartition().length;
         }
-        return nodePartitioningManager.getBucketNodeMap(session, partitioning).getBucketCount();
+        return nodePartitioningManager.getBucketCount(session, partitioning);
     }
 
     private static boolean isSystemPartitioning(PartitioningHandle partitioning)

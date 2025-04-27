@@ -16,6 +16,9 @@ package io.trino.metadata;
 import io.trino.Session;
 import io.trino.spi.connector.CatalogSchemaName;
 import io.trino.spi.connector.CatalogSchemaTableName;
+import io.trino.spi.connector.EntityKindAndName;
+import io.trino.spi.connector.EntityPrivilege;
+import io.trino.spi.function.CatalogSchemaFunctionName;
 import io.trino.spi.security.GrantInfo;
 import io.trino.spi.security.Identity;
 import io.trino.spi.security.Privilege;
@@ -113,20 +116,48 @@ public interface SystemSecurityMetadata
      */
     Set<GrantInfo> listTablePrivileges(Session session, QualifiedTablePrefix prefix);
 
+    default Set<EntityPrivilege> getAllEntityKindPrivileges(String entityKind)
+    {
+        throw new UnsupportedOperationException();
+    }
+
+    /**
+     * Grants the specified privilege to the specified user on the specified entity
+     */
+    default void grantEntityPrivileges(Session session, EntityKindAndName entity, Set<EntityPrivilege> privileges, TrinoPrincipal grantee, boolean grantOption)
+    {
+        throw new UnsupportedOperationException();
+    }
+
+    /**
+     * Deny the specified privilege to the specified principal on the specified entity
+     */
+    default void denyEntityPrivileges(Session session, EntityKindAndName entity, Set<EntityPrivilege> privileges, TrinoPrincipal grantee)
+    {
+        throw new UnsupportedOperationException();
+    }
+
+    /**
+     * Revokes the specified privilege on the specified entity from the specified user
+     */
+    default void revokeEntityPrivileges(Session session, EntityKindAndName entity, Set<EntityPrivilege> privileges, TrinoPrincipal grantee, boolean grantOption)
+    {
+        throw new UnsupportedOperationException();
+    }
+
+    /**
+     * Throws an exception if the entityKind is not supported, or if the privileges
+     * are not supported for the entityKind
+     */
+    default void validateEntityKindAndPrivileges(Session session, String entityKind, Set<String> privileges)
+    {
+        throw new UnsupportedOperationException();
+    }
+
     /**
      * Set the owner of the specified schema
      */
     Optional<TrinoPrincipal> getSchemaOwner(Session session, CatalogSchemaName schema);
-
-    /**
-     * Set the owner of the specified schema
-     */
-    void setSchemaOwner(Session session, CatalogSchemaName schema, TrinoPrincipal principal);
-
-    /**
-     * Set the owner of the specified table
-     */
-    void setTableOwner(Session session, CatalogSchemaTableName table, TrinoPrincipal principal);
 
     /**
      * Get the identity to run the view as
@@ -134,9 +165,19 @@ public interface SystemSecurityMetadata
     Optional<Identity> getViewRunAsIdentity(Session session, CatalogSchemaTableName viewName);
 
     /**
-     * Set the owner of the specified view
+     * Get the identity to run the function as
      */
-    void setViewOwner(Session session, CatalogSchemaTableName view, TrinoPrincipal principal);
+    Optional<Identity> getFunctionRunAsIdentity(Session session, CatalogSchemaFunctionName functionName);
+
+    /**
+     * A function is created
+     */
+    void functionCreated(Session session, CatalogSchemaFunctionName function);
+
+    /**
+     * A function is dropped
+     */
+    void functionDropped(Session session, CatalogSchemaFunctionName function);
 
     /**
      * A schema was created
@@ -182,4 +223,21 @@ public interface SystemSecurityMetadata
      * A column was dropped
      */
     void columnDropped(Session session, CatalogSchemaTableName table, String column);
+
+    /**
+     * Column type was changed
+     */
+    void columnTypeChanged(Session session, CatalogSchemaTableName table, String column, String oldType, String newType);
+
+    /**
+     * Column's NOT NULL constraint was dropped
+     */
+    void columnNotNullConstraintDropped(Session session, CatalogSchemaTableName table, String column);
+
+    /**
+     * Set the owner of the entity of entity kind ownedKind, with dotted name from the components of the name list,
+     * to the supplied principal.  The ownedKind string is guaranteed to be uppercase, and the name is guaranteed
+     * to be fully qualified, i.e., if the entity is a table, the name is of size three.
+     */
+    void setEntityOwner(Session session, EntityKindAndName entityKindAndName, TrinoPrincipal principal);
 }

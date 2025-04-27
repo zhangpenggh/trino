@@ -21,8 +21,11 @@ import io.trino.spi.block.ByteArrayBlock;
 import io.trino.spi.block.ByteArrayBlockBuilder;
 import io.trino.spi.block.PageBuilderStatus;
 import io.trino.spi.connector.ConnectorSession;
+import io.trino.spi.function.BlockIndex;
+import io.trino.spi.function.BlockPosition;
 import io.trino.spi.function.FlatFixed;
 import io.trino.spi.function.FlatFixedOffset;
+import io.trino.spi.function.FlatVariableOffset;
 import io.trino.spi.function.FlatVariableWidth;
 import io.trino.spi.function.ScalarOperator;
 
@@ -62,12 +65,12 @@ public final class BooleanType
     public static Block createBlockForSingleNonNullValue(boolean value)
     {
         byte byteValue = value ? (byte) 1 : 0;
-        return new ByteArrayBlock(1, Optional.empty(), new byte[]{byteValue});
+        return new ByteArrayBlock(1, Optional.empty(), new byte[] {byteValue});
     }
 
     private BooleanType()
     {
-        super(new TypeSignature(StandardTypes.BOOLEAN), boolean.class);
+        super(new TypeSignature(StandardTypes.BOOLEAN), boolean.class, ByteArrayBlock.class);
     }
 
     @Override
@@ -77,7 +80,7 @@ public final class BooleanType
     }
 
     @Override
-    public BlockBuilder createBlockBuilder(BlockBuilderStatus blockBuilderStatus, int expectedEntries, int expectedBytesPerEntry)
+    public BlockBuilder createBlockBuilder(BlockBuilderStatus blockBuilderStatus, int expectedEntries)
     {
         int maxBlockSizeInBytes;
         if (blockBuilderStatus == null) {
@@ -89,12 +92,6 @@ public final class BooleanType
         return new ByteArrayBlockBuilder(
                 blockBuilderStatus,
                 Math.min(expectedEntries, maxBlockSizeInBytes / Byte.BYTES));
-    }
-
-    @Override
-    public BlockBuilder createBlockBuilder(BlockBuilderStatus blockBuilderStatus, int expectedEntries)
-    {
-        return createBlockBuilder(blockBuilderStatus, expectedEntries, Byte.BYTES);
     }
 
     @Override
@@ -128,7 +125,7 @@ public final class BooleanType
             return null;
         }
 
-        return block.getByte(position, 0) != 0;
+        return getBoolean(block, position);
     }
 
     @Override
@@ -138,14 +135,14 @@ public final class BooleanType
             blockBuilder.appendNull();
         }
         else {
-            ((ByteArrayBlockBuilder) blockBuilder).writeByte(block.getByte(position, 0));
+            ((ByteArrayBlockBuilder) blockBuilder).writeByte(getBoolean(block, position) ? (byte) 1 : 0);
         }
     }
 
     @Override
     public boolean getBoolean(Block block, int position)
     {
-        return block.getByte(position, 0) != 0;
+        return read((ByteArrayBlock) block.getUnderlyingValueBlock(), block.getUnderlyingValuePosition(position));
     }
 
     @Override
@@ -173,10 +170,17 @@ public final class BooleanType
     }
 
     @ScalarOperator(READ_VALUE)
+    private static boolean read(@BlockPosition ByteArrayBlock block, @BlockIndex int position)
+    {
+        return block.getByte(position) != 0;
+    }
+
+    @ScalarOperator(READ_VALUE)
     private static boolean readFlat(
             @FlatFixed byte[] fixedSizeSlice,
             @FlatFixedOffset int fixedSizeOffset,
-            @FlatVariableWidth byte[] unusedVariableSizeSlice)
+            @FlatVariableWidth byte[] unusedVariableSizeSlice,
+            @FlatVariableOffset int unusedVariableSizeOffset)
     {
         return fixedSizeSlice[fixedSizeOffset] != 0;
     }

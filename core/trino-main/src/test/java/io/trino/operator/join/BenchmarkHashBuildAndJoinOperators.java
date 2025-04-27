@@ -34,6 +34,7 @@ import io.trino.spi.type.TypeOperators;
 import io.trino.spiller.SingleStreamSpillerFactory;
 import io.trino.sql.planner.plan.PlanNodeId;
 import io.trino.testing.TestingTaskContext;
+import org.junit.jupiter.api.Test;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
 import org.openjdk.jmh.annotations.Fork;
@@ -46,7 +47,6 @@ import org.openjdk.jmh.annotations.State;
 import org.openjdk.jmh.annotations.Threads;
 import org.openjdk.jmh.annotations.Warmup;
 import org.openjdk.jmh.runner.RunnerException;
-import org.testng.annotations.Test;
 
 import java.util.Arrays;
 import java.util.Iterator;
@@ -238,7 +238,6 @@ public class BenchmarkHashBuildAndJoinOperators
                     HASH_JOIN_OPERATOR_ID,
                     TEST_PLAN_NODE_ID,
                     lookupSourceFactory,
-                    false,
                     types,
                     hashChannels,
                     hashChannel,
@@ -351,7 +350,7 @@ public class BenchmarkHashBuildAndJoinOperators
                 incrementalLoadFactorHashArraySizeSupplier(buildContext.getSession()));
 
         Operator[] operators = IntStream.range(0, partitionCount)
-                .mapToObj(i -> buildContext.createTaskContext()
+                .mapToObj(_ -> buildContext.createTaskContext()
                         .addPipelineContext(0, true, true, partitionCount > 1)
                         .addDriverContext())
                 .map(hashBuilderOperatorFactory::createOperator)

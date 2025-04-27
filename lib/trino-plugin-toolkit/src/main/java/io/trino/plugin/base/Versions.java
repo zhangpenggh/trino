@@ -17,7 +17,6 @@ import io.trino.spi.connector.ConnectorContext;
 import io.trino.spi.connector.ConnectorFactory;
 
 import static com.google.common.base.Preconditions.checkState;
-import static java.lang.String.format;
 
 public final class Versions
 {
@@ -29,7 +28,7 @@ public final class Versions
      * chooses not to maintain compatibility with older SPI versions, as happens for plugins maintained together with
      * the Trino project.
      *
-     * @implNote This method is designed only for plugins distributed with Trino
+     * Note: This method is designed only for plugins distributed with Trino
      */
     public static void checkStrictSpiVersionMatch(ConnectorContext context, ConnectorFactory connectorFactory)
     {
@@ -38,6 +37,9 @@ public final class Versions
 
         checkState(
                 spiVersion.equals(compileTimeSpiVersion),
-                format("Trino SPI version %s does not match the version %s connector %s was compiled for", spiVersion, compileTimeSpiVersion, connectorFactory.getName()));
+                "Trino SPI version %s does not match the version %s connector %s was compiled for",
+                spiVersion,
+                compileTimeSpiVersion,
+                connectorFactory.getName());
     }
 }

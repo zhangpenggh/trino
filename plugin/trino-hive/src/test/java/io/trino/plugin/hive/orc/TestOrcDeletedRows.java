@@ -16,16 +16,16 @@ package io.trino.plugin.hive.orc;
 import com.google.common.collect.ImmutableSet;
 import io.trino.filesystem.Location;
 import io.trino.orc.OrcReaderOptions;
+import io.trino.plugin.base.metrics.FileFormatDataSourceStats;
 import io.trino.plugin.hive.AcidInfo;
-import io.trino.plugin.hive.FileFormatDataSourceStats;
 import io.trino.spi.Page;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.block.RunLengthEncodedBlock;
+import io.trino.spi.connector.SourcePage;
 import io.trino.spi.security.ConnectorIdentity;
 import org.apache.hadoop.hive.ql.io.AcidUtils;
-import org.testng.annotations.BeforeClass;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.OptionalInt;
 import java.util.OptionalLong;
@@ -38,16 +38,15 @@ import static io.trino.plugin.hive.HiveTestUtils.SESSION;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.testing.MaterializedResult.resultBuilder;
-import static org.testng.Assert.assertEquals;
+import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestOrcDeletedRows
 {
-    private Location partitionDirectory;
-    private Block rowIdBlock;
-    private Block bucketBlock;
+    private final Location partitionDirectory;
+    private final Block rowIdBlock;
+    private final Block bucketBlock;
 
-    @BeforeClass
-    public void setUp()
+    public TestOrcDeletedRows()
     {
         partitionDirectory = Location.of(getResource("fullacid_delete_delta_test").toString());
 
@@ -71,19 +70,19 @@ public class TestOrcDeletedRows
 
         // page with deleted rows
         Page testPage = createTestPage(0, 10);
-        Block block = deletedRows.getMaskDeletedRowsFunction(testPage, OptionalLong.empty()).apply(testPage.getBlock(0));
+        Block block = deletedRows.maskPage(SourcePage.create(testPage), OptionalLong.empty()).getBlock(0);
         Set<Object> validRows = resultBuilder(SESSION, BIGINT)
                 .page(new Page(block))
                 .build()
                 .getOnlyColumnAsSet();
 
-        assertEquals(validRows.size(), 8);
-        assertEquals(validRows, ImmutableSet.of(0L, 1L, 3L, 4L, 5L, 7L, 8L, 9L));
+        assertThat(validRows).hasSize(8);
+        assertThat(validRows).isEqualTo(ImmutableSet.of(0L, 1L, 3L, 4L, 5L, 7L, 8L, 9L));
 
         // page with no deleted rows
         testPage = createTestPage(10, 20);
-        block = deletedRows.getMaskDeletedRowsFunction(testPage, OptionalLong.empty()).apply(testPage.getBlock(1));
-        assertEquals(block.getPositionCount(), 10);
+        block = deletedRows.maskPage(SourcePage.create(testPage), OptionalLong.empty()).getBlock(1);
+        assertThat(block.getPositionCount()).isEqualTo(10);
     }
 
     @Test
@@ -100,19 +99,19 @@ public class TestOrcDeletedRows
 
         // page with deleted rows
         Page testPage = createTestPage(0, 8);
-        Block block = deletedRows.getMaskDeletedRowsFunction(testPage, OptionalLong.of(0L)).apply(testPage.getBlock(0));
+        Block block = deletedRows.maskPage(SourcePage.create(testPage), OptionalLong.of(0L)).getBlock(0);
         Set<Object> validRows = resultBuilder(SESSION, BIGINT)
                 .page(new Page(block))
                 .build()
                 .getOnlyColumnAsSet();
 
-        assertEquals(validRows.size(), 7);
-        assertEquals(validRows, ImmutableSet.of(0L, 1L, 3L, 4L, 5L, 6L, 7L));
+        assertThat(validRows).hasSize(7);
+        assertThat(validRows).isEqualTo(ImmutableSet.of(0L, 1L, 3L, 4L, 5L, 6L, 7L));
 
         // page with no deleted rows
         testPage = createTestPage(5, 9);
-        block = deletedRows.getMaskDeletedRowsFunction(testPage, OptionalLong.empty()).apply(testPage.getBlock(1));
-        assertEquals(block.getPositionCount(), 4);
+        block = deletedRows.maskPage(SourcePage.create(testPage), OptionalLong.empty()).getBlock(1);
+        assertThat(block.getPositionCount()).isEqualTo(4);
     }
 
     @Test
@@ -125,19 +124,19 @@ public class TestOrcDeletedRows
 
         // page with deleted rows
         Page testPage = createTestPage(0, 10);
-        Block block = deletedRows.getMaskDeletedRowsFunction(testPage, OptionalLong.empty()).apply(testPage.getBlock(0));
+        Block block = deletedRows.maskPage(SourcePage.create(testPage), OptionalLong.empty()).getBlock(0);
         Set<Object> validRows = resultBuilder(SESSION, BIGINT)
                 .page(new Page(block))
                 .build()
                 .getOnlyColumnAsSet();
 
-        assertEquals(validRows.size(), 9);
-        assertEquals(validRows, ImmutableSet.of(0L, 1L, 3L, 4L, 5L, 6L, 7L, 8L, 9L));
+        assertThat(validRows).hasSize(9);
+        assertThat(validRows).isEqualTo(ImmutableSet.of(0L, 1L, 3L, 4L, 5L, 6L, 7L, 8L, 9L));
 
         // page with no deleted rows
         testPage = createTestPage(10, 20);
-        block = deletedRows.getMaskDeletedRowsFunction(testPage, OptionalLong.empty()).apply(testPage.getBlock(1));
-        assertEquals(block.getPositionCount(), 10);
+        block = deletedRows.maskPage(SourcePage.create(testPage), OptionalLong.empty()).getBlock(1);
+        assertThat(block.getPositionCount()).isEqualTo(10);
     }
 
     private static void addDeleteDelta(AcidInfo.Builder acidInfoBuilder, long minWriteId, long maxWriteId, OptionalInt statementId, Location path)

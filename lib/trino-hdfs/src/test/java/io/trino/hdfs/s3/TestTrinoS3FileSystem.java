@@ -22,6 +22,7 @@ import com.amazonaws.auth.AWSSessionCredentials;
 import com.amazonaws.auth.AWSStaticCredentialsProvider;
 import com.amazonaws.auth.DefaultAWSCredentialsProviderChain;
 import com.amazonaws.auth.STSAssumeRoleSessionCredentialsProvider;
+import com.amazonaws.auth.WebIdentityTokenCredentialsProvider;
 import com.amazonaws.services.s3.AmazonS3Client;
 import com.amazonaws.services.s3.AmazonS3EncryptionClient;
 import com.amazonaws.services.s3.S3ClientOptions;
@@ -51,8 +52,7 @@ import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.LocatedFileStatus;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.RemoteIterator;
-import org.testng.SkipException;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import javax.crypto.spec.SecretKeySpec;
 
@@ -74,11 +74,8 @@ import java.util.List;
 import java.util.Map;
 
 import static com.google.common.base.Preconditions.checkArgument;
-import static com.google.common.io.ByteStreams.toByteArray;
 import static com.google.common.io.MoreFiles.deleteRecursively;
 import static com.google.common.io.RecursiveDeleteOption.ALLOW_INSECURE;
-import static io.airlift.testing.Assertions.assertInstanceOf;
-import static io.trino.hadoop.ConfigurationInstantiator.newEmptyConfiguration;
 import static io.trino.hdfs.s3.TrinoS3FileSystem.NO_SUCH_BUCKET_ERROR_CODE;
 import static io.trino.hdfs.s3.TrinoS3FileSystem.NO_SUCH_KEY_ERROR_CODE;
 import static io.trino.hdfs.s3.TrinoS3FileSystem.S3_ACCESS_KEY;
@@ -102,6 +99,7 @@ import static io.trino.hdfs.s3.TrinoS3FileSystem.S3_STAGING_DIRECTORY;
 import static io.trino.hdfs.s3.TrinoS3FileSystem.S3_STREAMING_UPLOAD_ENABLED;
 import static io.trino.hdfs.s3.TrinoS3FileSystem.S3_STREAMING_UPLOAD_PART_SIZE;
 import static io.trino.hdfs.s3.TrinoS3FileSystem.S3_USER_AGENT_PREFIX;
+import static io.trino.hdfs.s3.TrinoS3FileSystem.S3_USE_WEB_IDENTITY_TOKEN_CREDENTIALS_PROVIDER;
 import static io.trino.memory.context.AggregatedMemoryContext.newRootAggregatedMemoryContext;
 import static java.net.HttpURLConnection.HTTP_FORBIDDEN;
 import static java.net.HttpURLConnection.HTTP_INTERNAL_ERROR;
@@ -111,10 +109,7 @@ import static java.nio.file.Files.createTempDirectory;
 import static java.nio.file.Files.createTempFile;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.testng.Assert.assertEquals;
-import static org.testng.Assert.assertFalse;
-import static org.testng.Assert.assertNull;
-import static org.testng.Assert.assertTrue;
+import static org.junit.jupiter.api.Assumptions.abort;
 
 public class TestTrinoS3FileSystem
 {
@@ -125,11 +120,11 @@ public class TestTrinoS3FileSystem
     public void testEmbeddedCredentials()
             throws Exception
     {
-        Configuration config = newEmptyConfiguration();
+        Configuration config = new Configuration(false);
         try (TrinoS3FileSystem fs = new TrinoS3FileSystem()) {
             AWSCredentials credentials = getStaticCredentials(config, fs, "s3n://testAccess:testSecret@test-bucket/");
-            assertEquals(credentials.getAWSAccessKeyId(), "testAccess");
-            assertEquals(credentials.getAWSSecretKey(), "testSecret");
+            assertThat(credentials.getAWSAccessKeyId()).isEqualTo("testAccess");
+            assertThat(credentials.getAWSSecretKey()).isEqualTo("testSecret");
             assertThat(credentials).isNotInstanceOf(AWSSessionCredentials.class);
         }
     }
@@ -138,24 +133,24 @@ public class TestTrinoS3FileSystem
     public void testStaticCredentials()
             throws Exception
     {
-        Configuration config = newEmptyConfiguration();
+        Configuration config = new Configuration(false);
         config.set(S3_ACCESS_KEY, "test_access_key");
         config.set(S3_SECRET_KEY, "test_secret_key");
 
         try (TrinoS3FileSystem fs = new TrinoS3FileSystem()) {
             AWSCredentials credentials = getStaticCredentials(config, fs, "s3n://test-bucket/");
-            assertEquals(credentials.getAWSAccessKeyId(), "test_access_key");
-            assertEquals(credentials.getAWSSecretKey(), "test_secret_key");
+            assertThat(credentials.getAWSAccessKeyId()).isEqualTo("test_access_key");
+            assertThat(credentials.getAWSSecretKey()).isEqualTo("test_secret_key");
             assertThat(credentials).isNotInstanceOf(AWSSessionCredentials.class);
         }
 
         config.set(S3_SESSION_TOKEN, "test_token");
         try (TrinoS3FileSystem fs = new TrinoS3FileSystem()) {
             AWSCredentials credentials = getStaticCredentials(config, fs, "s3n://test-bucket/");
-            assertEquals(credentials.getAWSAccessKeyId(), "test_access_key");
-            assertEquals(credentials.getAWSSecretKey(), "test_secret_key");
+            assertThat(credentials.getAWSAccessKeyId()).isEqualTo("test_access_key");
+            assertThat(credentials.getAWSSecretKey()).isEqualTo("test_secret_key");
             assertThat(credentials).isInstanceOfSatisfying(AWSSessionCredentials.class, sessionCredentials ->
-                    assertEquals(sessionCredentials.getSessionToken(), "test_token"));
+                    assertThat(sessionCredentials.getSessionToken()).isEqualTo("test_token"));
         }
     }
 
@@ -164,7 +159,7 @@ public class TestTrinoS3FileSystem
     {
         fileSystem.initialize(new URI(uri), config);
         AWSCredentialsProvider awsCredentialsProvider = getAwsCredentialsProvider(fileSystem);
-        assertInstanceOf(awsCredentialsProvider, AWSStaticCredentialsProvider.class);
+        assertThat(awsCredentialsProvider).isInstanceOf(AWSStaticCredentialsProvider.class);
         return awsCredentialsProvider.getCredentials();
     }
 
@@ -172,7 +167,7 @@ public class TestTrinoS3FileSystem
     public void testEndpointWithPinToCurrentRegionConfiguration()
             throws Exception
     {
-        Configuration config = newEmptyConfiguration();
+        Configuration config = new Configuration(false);
         config.set(S3_ENDPOINT, "test.example.endpoint.com");
         config.set(S3_PIN_CLIENT_TO_CURRENT_REGION, "true");
         try (TrinoS3FileSystem fs = new TrinoS3FileSystem()) {
@@ -186,7 +181,7 @@ public class TestTrinoS3FileSystem
     public void testEndpointWithExplicitRegionConfiguration()
             throws Exception
     {
-        Configuration config = newEmptyConfiguration();
+        Configuration config = new Configuration(false);
 
         // Only endpoint set
         config.set(S3_ENDPOINT, "test.example.endpoint.com");
@@ -215,13 +210,13 @@ public class TestTrinoS3FileSystem
     public void testAssumeRoleDefaultCredentials()
             throws Exception
     {
-        Configuration config = newEmptyConfiguration();
+        Configuration config = new Configuration(false);
         config.set(S3_IAM_ROLE, "test_role");
 
         try (TrinoS3FileSystem fs = new TrinoS3FileSystem()) {
             fs.initialize(new URI("s3n://test-bucket/"), config);
             AWSCredentialsProvider tokenService = getStsCredentialsProvider(fs, "test_role");
-            assertInstanceOf(tokenService, DefaultAWSCredentialsProviderChain.class);
+            assertThat(tokenService).isInstanceOf(DefaultAWSCredentialsProviderChain.class);
         }
     }
 
@@ -229,7 +224,7 @@ public class TestTrinoS3FileSystem
     public void testAssumeRoleStaticCredentials()
             throws Exception
     {
-        Configuration config = newEmptyConfiguration();
+        Configuration config = new Configuration(false);
         config.set(S3_ACCESS_KEY, "test_access_key");
         config.set(S3_SECRET_KEY, "test_secret_key");
         config.set(S3_IAM_ROLE, "test_role");
@@ -237,23 +232,23 @@ public class TestTrinoS3FileSystem
         try (TrinoS3FileSystem fs = new TrinoS3FileSystem()) {
             fs.initialize(new URI("s3n://test-bucket/"), config);
             AWSCredentialsProvider tokenService = getStsCredentialsProvider(fs, "test_role");
-            assertInstanceOf(tokenService, AWSStaticCredentialsProvider.class);
+            assertThat(tokenService).isInstanceOf(AWSStaticCredentialsProvider.class);
 
             AWSCredentials credentials = tokenService.getCredentials();
-            assertEquals(credentials.getAWSAccessKeyId(), "test_access_key");
-            assertEquals(credentials.getAWSSecretKey(), "test_secret_key");
+            assertThat(credentials.getAWSAccessKeyId()).isEqualTo("test_access_key");
+            assertThat(credentials.getAWSSecretKey()).isEqualTo("test_secret_key");
         }
     }
 
     private static AWSCredentialsProvider getStsCredentialsProvider(TrinoS3FileSystem fs, String expectedRole)
     {
         AWSCredentialsProvider awsCredentialsProvider = getAwsCredentialsProvider(fs);
-        assertInstanceOf(awsCredentialsProvider, STSAssumeRoleSessionCredentialsProvider.class);
+        assertThat(awsCredentialsProvider).isInstanceOf(STSAssumeRoleSessionCredentialsProvider.class);
 
-        assertEquals(getFieldValue(awsCredentialsProvider, "roleArn", String.class), expectedRole);
+        assertThat(getFieldValue(awsCredentialsProvider, "roleArn", String.class)).isEqualTo(expectedRole);
 
         AWSSecurityTokenService tokenService = getFieldValue(awsCredentialsProvider, "securityTokenService", AWSSecurityTokenService.class);
-        assertInstanceOf(tokenService, AWSSecurityTokenServiceClient.class);
+        assertThat(tokenService).isInstanceOf(AWSSecurityTokenServiceClient.class);
         return getFieldValue(tokenService, "awsCredentialsProvider", AWSCredentialsProvider.class);
     }
 
@@ -261,16 +256,16 @@ public class TestTrinoS3FileSystem
     public void testAssumeRoleCredentialsWithExternalId()
             throws Exception
     {
-        Configuration config = newEmptyConfiguration();
+        Configuration config = new Configuration(false);
         config.set(S3_IAM_ROLE, "role");
         config.set(S3_EXTERNAL_ID, "externalId");
 
         try (TrinoS3FileSystem fs = new TrinoS3FileSystem()) {
             fs.initialize(new URI("s3n://test-bucket/"), config);
             AWSCredentialsProvider awsCredentialsProvider = getAwsCredentialsProvider(fs);
-            assertInstanceOf(awsCredentialsProvider, STSAssumeRoleSessionCredentialsProvider.class);
-            assertEquals(getFieldValue(awsCredentialsProvider, "roleArn", String.class), "role");
-            assertEquals(getFieldValue(awsCredentialsProvider, "roleExternalId", String.class), "externalId");
+            assertThat(awsCredentialsProvider).isInstanceOf(STSAssumeRoleSessionCredentialsProvider.class);
+            assertThat(getFieldValue(awsCredentialsProvider, "roleArn", String.class)).isEqualTo("role");
+            assertThat(getFieldValue(awsCredentialsProvider, "roleExternalId", String.class)).isEqualTo("externalId");
         }
     }
 
@@ -278,11 +273,11 @@ public class TestTrinoS3FileSystem
     public void testDefaultCredentials()
             throws Exception
     {
-        Configuration config = newEmptyConfiguration();
+        Configuration config = new Configuration(false);
 
         try (TrinoS3FileSystem fs = new TrinoS3FileSystem()) {
             fs.initialize(new URI("s3n://test-bucket/"), config);
-            assertInstanceOf(getAwsCredentialsProvider(fs), DefaultAWSCredentialsProviderChain.class);
+            assertThat(getAwsCredentialsProvider(fs)).isInstanceOf(DefaultAWSCredentialsProviderChain.class);
         }
     }
 
@@ -290,13 +285,13 @@ public class TestTrinoS3FileSystem
     public void testPathStyleAccess()
             throws Exception
     {
-        Configuration config = newEmptyConfiguration();
+        Configuration config = new Configuration(false);
         config.setBoolean(S3_PATH_STYLE_ACCESS, true);
 
         try (TrinoS3FileSystem fs = new TrinoS3FileSystem()) {
             fs.initialize(new URI("s3n://test-bucket/"), config);
             S3ClientOptions clientOptions = getFieldValue(fs.getS3Client(), AmazonS3Client.class, "clientOptions", S3ClientOptions.class);
-            assertTrue(clientOptions.isPathStyleAccess());
+            assertThat(clientOptions.isPathStyleAccess()).isTrue();
         }
     }
 
@@ -304,18 +299,18 @@ public class TestTrinoS3FileSystem
     public void testUnderscoreBucket()
             throws Exception
     {
-        Configuration config = newEmptyConfiguration();
+        Configuration config = new Configuration(false);
         config.setBoolean(S3_PATH_STYLE_ACCESS, true);
 
         try (TrinoS3FileSystem fs = new TrinoS3FileSystem()) {
             MockAmazonS3 s3 = new MockAmazonS3();
             String expectedBucketName = "test-bucket_underscore";
             URI uri = new URI("s3n://" + expectedBucketName + "/");
-            assertEquals(fs.getBucketName(uri), expectedBucketName);
+            assertThat(fs.getBucketName(uri)).isEqualTo(expectedBucketName);
             fs.initialize(uri, config);
             fs.setS3Client(s3);
             fs.getS3ObjectMetadata(new Path("/test/path"));
-            assertEquals(expectedBucketName, s3.getGetObjectMetadataRequest().getBucketName());
+            assertThat(expectedBucketName).isEqualTo(s3.getGetObjectMetadataRequest().getBucketName());
         }
     }
 
@@ -328,7 +323,7 @@ public class TestTrinoS3FileSystem
             int maxRetries = 2;
             MockAmazonS3 s3 = new MockAmazonS3();
             s3.setGetObjectHttpErrorCode(HTTP_INTERNAL_ERROR);
-            Configuration configuration = newEmptyConfiguration();
+            Configuration configuration = new Configuration(false);
             configuration.set(S3_MAX_BACKOFF_TIME, "1ms");
             configuration.set(S3_MAX_RETRY_TIME, "5s");
             configuration.setInt(S3_MAX_CLIENT_RETRIES, maxRetries);
@@ -338,10 +333,10 @@ public class TestTrinoS3FileSystem
                 inputStream.read();
             }
             catch (Throwable expected) {
-                assertInstanceOf(expected, AmazonS3Exception.class);
-                assertEquals(((AmazonS3Exception) expected).getStatusCode(), HTTP_INTERNAL_ERROR);
-                assertEquals(TrinoS3FileSystem.getFileSystemStats().getReadRetries().getTotalCount(), maxRetries);
-                assertEquals(TrinoS3FileSystem.getFileSystemStats().getGetObjectRetries().getTotalCount(), (maxRetries + 1L) * maxRetries);
+                assertThat(expected).isInstanceOf(AmazonS3Exception.class);
+                assertThat(((AmazonS3Exception) expected).getStatusCode()).isEqualTo(HTTP_INTERNAL_ERROR);
+                assertThat(TrinoS3FileSystem.getFileSystemStats().getReadRetries().getTotalCount()).isEqualTo(maxRetries);
+                assertThat(TrinoS3FileSystem.getFileSystemStats().getGetObjectRetries().getTotalCount()).isEqualTo((maxRetries + 1L) * maxRetries);
             }
         }
     }
@@ -354,7 +349,7 @@ public class TestTrinoS3FileSystem
         try (TrinoS3FileSystem fs = new TrinoS3FileSystem()) {
             MockAmazonS3 s3 = new MockAmazonS3();
             s3.setGetObjectMetadataHttpCode(HTTP_INTERNAL_ERROR);
-            Configuration configuration = newEmptyConfiguration();
+            Configuration configuration = new Configuration(false);
             configuration.set(S3_MAX_BACKOFF_TIME, "1ms");
             configuration.set(S3_MAX_RETRY_TIME, "5s");
             configuration.setInt(S3_MAX_CLIENT_RETRIES, maxRetries);
@@ -363,9 +358,9 @@ public class TestTrinoS3FileSystem
             fs.getS3ObjectMetadata(new Path("s3n://test-bucket/test"));
         }
         catch (Throwable expected) {
-            assertInstanceOf(expected, AmazonS3Exception.class);
-            assertEquals(((AmazonS3Exception) expected).getStatusCode(), HTTP_INTERNAL_ERROR);
-            assertEquals(TrinoS3FileSystem.getFileSystemStats().getGetMetadataRetries().getTotalCount(), maxRetries);
+            assertThat(expected).isInstanceOf(AmazonS3Exception.class);
+            assertThat(((AmazonS3Exception) expected).getStatusCode()).isEqualTo(HTTP_INTERNAL_ERROR);
+            assertThat(TrinoS3FileSystem.getFileSystemStats().getGetMetadataRetries().getTotalCount()).isEqualTo(maxRetries);
         }
     }
 
@@ -405,7 +400,7 @@ public class TestTrinoS3FileSystem
             MockAmazonS3 s3 = new MockAmazonS3();
             s3.setGetObjectHttpErrorCode(httpErrorCode);
             s3.setGetObjectS3ErrorCode(s3ErrorCode);
-            fs.initialize(new URI("s3n://test-bucket/"), newEmptyConfiguration());
+            fs.initialize(new URI("s3n://test-bucket/"), new Configuration(false));
             fs.setS3Client(s3);
             try (FSDataInputStream inputStream = fs.open(new Path("s3n://test-bucket/test"))) {
                 assertThatThrownBy(inputStream::read)
@@ -426,14 +421,14 @@ public class TestTrinoS3FileSystem
 
         try (TrinoS3FileSystem fs = new TrinoS3FileSystem()) {
             MockAmazonS3 s3 = new MockAmazonS3();
-            Configuration conf = newEmptyConfiguration();
+            Configuration conf = new Configuration(false);
             conf.set(S3_STAGING_DIRECTORY, staging.toString());
             conf.set(S3_STREAMING_UPLOAD_ENABLED, "false");
             fs.initialize(new URI("s3n://test-bucket/"), conf);
             fs.setS3Client(s3);
             FSDataOutputStream stream = fs.create(new Path("s3n://test-bucket/test"));
             stream.close();
-            assertTrue(Files.exists(staging));
+            assertThat(Files.exists(staging)).isTrue();
         }
         finally {
             deleteRecursively(stagingParent, ALLOW_INSECURE);
@@ -449,7 +444,7 @@ public class TestTrinoS3FileSystem
 
         try (TrinoS3FileSystem fs = new TrinoS3FileSystem()) {
             MockAmazonS3 s3 = new MockAmazonS3();
-            Configuration conf = newEmptyConfiguration();
+            Configuration conf = new Configuration(false);
             conf.set(S3_STAGING_DIRECTORY, staging.toString());
             conf.set(S3_STREAMING_UPLOAD_ENABLED, "false");
             fs.initialize(new URI("s3n://test-bucket/"), conf);
@@ -477,18 +472,18 @@ public class TestTrinoS3FileSystem
                 Files.createSymbolicLink(link, staging);
             }
             catch (UnsupportedOperationException e) {
-                throw new SkipException("Filesystem does not support symlinks", e);
+                abort("Filesystem does not support symlinks");
             }
 
             try (TrinoS3FileSystem fs = new TrinoS3FileSystem()) {
                 MockAmazonS3 s3 = new MockAmazonS3();
-                Configuration conf = newEmptyConfiguration();
+                Configuration conf = new Configuration(false);
                 conf.set(S3_STAGING_DIRECTORY, link.toString());
                 fs.initialize(new URI("s3n://test-bucket/"), conf);
                 fs.setS3Client(s3);
                 FSDataOutputStream stream = fs.create(new Path("s3n://test-bucket/test"));
                 stream.close();
-                assertTrue(Files.exists(link));
+                assertThat(Files.exists(link)).isTrue();
             }
         }
         finally {
@@ -504,10 +499,10 @@ public class TestTrinoS3FileSystem
         try (TrinoS3FileSystem fs = new TrinoS3FileSystem()) {
             MockAmazonS3 s3 = new MockAmazonS3();
             s3.setGetObjectHttpErrorCode(HTTP_RANGE_NOT_SATISFIABLE);
-            fs.initialize(new URI("s3n://test-bucket/"), newEmptyConfiguration());
+            fs.initialize(new URI("s3n://test-bucket/"), new Configuration(false));
             fs.setS3Client(s3);
             try (FSDataInputStream inputStream = fs.open(new Path("s3n://test-bucket/test"))) {
-                assertEquals(inputStream.read(), -1);
+                assertThat(inputStream.read()).isEqualTo(-1);
             }
         }
     }
@@ -519,7 +514,7 @@ public class TestTrinoS3FileSystem
         try (TrinoS3FileSystem fs = new TrinoS3FileSystem()) {
             MockAmazonS3 s3 = new MockAmazonS3();
             s3.setGetObjectMetadataHttpCode(HTTP_FORBIDDEN);
-            fs.initialize(new URI("s3n://test-bucket/"), newEmptyConfiguration());
+            fs.initialize(new URI("s3n://test-bucket/"), new Configuration(false));
             fs.setS3Client(s3);
             assertThatThrownBy(() -> fs.getS3ObjectMetadata(new Path("s3n://test-bucket/test")))
                     .isInstanceOf(IOException.class)
@@ -534,9 +529,9 @@ public class TestTrinoS3FileSystem
         try (TrinoS3FileSystem fs = new TrinoS3FileSystem()) {
             MockAmazonS3 s3 = new MockAmazonS3();
             s3.setGetObjectMetadataHttpCode(HTTP_NOT_FOUND);
-            fs.initialize(new URI("s3n://test-bucket/"), newEmptyConfiguration());
+            fs.initialize(new URI("s3n://test-bucket/"), new Configuration(false));
             fs.setS3Client(s3);
-            assertNull(fs.getS3ObjectMetadata(new Path("s3n://test-bucket/test")));
+            assertThat(fs.getS3ObjectMetadata(new Path("s3n://test-bucket/test"))).isNull();
         }
     }
 
@@ -544,12 +539,12 @@ public class TestTrinoS3FileSystem
     public void testEncryptionMaterialsProvider()
             throws Exception
     {
-        Configuration config = newEmptyConfiguration();
+        Configuration config = new Configuration(false);
         config.set(S3_ENCRYPTION_MATERIALS_PROVIDER, TestEncryptionMaterialsProvider.class.getName());
 
         try (TrinoS3FileSystem fs = new TrinoS3FileSystem()) {
             fs.initialize(new URI("s3n://test-bucket/"), config);
-            assertInstanceOf(fs.getS3Client(), AmazonS3EncryptionClient.class);
+            assertThat(fs.getS3Client()).isInstanceOf(AmazonS3EncryptionClient.class);
         }
     }
 
@@ -557,12 +552,12 @@ public class TestTrinoS3FileSystem
     public void testKMSEncryptionMaterialsProvider()
             throws Exception
     {
-        Configuration config = newEmptyConfiguration();
+        Configuration config = new Configuration(false);
         config.set(S3_KMS_KEY_ID, "test-key-id");
 
         try (TrinoS3FileSystem fs = new TrinoS3FileSystem()) {
             fs.initialize(new URI("s3n://test-bucket/"), config);
-            assertInstanceOf(fs.getS3Client(), AmazonS3EncryptionClient.class);
+            assertThat(fs.getS3Client()).isInstanceOf(AmazonS3EncryptionClient.class);
         }
     }
 
@@ -574,14 +569,26 @@ public class TestTrinoS3FileSystem
     }
 
     @Test
+    public void testWebIdentityTokenCredentialsProvider()
+            throws Exception
+    {
+        Configuration config = new Configuration(false);
+        config.setBoolean(S3_USE_WEB_IDENTITY_TOKEN_CREDENTIALS_PROVIDER, true);
+        try (TrinoS3FileSystem fs = new TrinoS3FileSystem()) {
+            fs.initialize(new URI("s3n://test-bucket/"), config);
+            assertThat(getAwsCredentialsProvider(fs)).isInstanceOf(WebIdentityTokenCredentialsProvider.class);
+        }
+    }
+
+    @Test
     public void testCustomCredentialsProvider()
             throws Exception
     {
-        Configuration config = newEmptyConfiguration();
+        Configuration config = new Configuration(false);
         config.set(S3_CREDENTIALS_PROVIDER, TestCredentialsProvider.class.getName());
         try (TrinoS3FileSystem fs = new TrinoS3FileSystem()) {
             fs.initialize(new URI("s3n://test-bucket/"), config);
-            assertInstanceOf(getAwsCredentialsProvider(fs), TestCredentialsProvider.class);
+            assertThat(getAwsCredentialsProvider(fs)).isInstanceOf(TestCredentialsProvider.class);
         }
     }
 
@@ -589,7 +596,7 @@ public class TestTrinoS3FileSystem
     public void testCustomCredentialsClassCannotBeFound()
             throws Exception
     {
-        Configuration config = newEmptyConfiguration();
+        Configuration config = new Configuration(false);
         config.set(S3_CREDENTIALS_PROVIDER, "com.example.DoesNotExist");
         try (TrinoS3FileSystem fs = new TrinoS3FileSystem()) {
             assertThatThrownBy(() -> fs.initialize(new URI("s3n://test-bucket/"), config))
@@ -606,13 +613,13 @@ public class TestTrinoS3FileSystem
             throws Exception
     {
         String userAgentPrefix = "agent_prefix";
-        Configuration config = newEmptyConfiguration();
+        Configuration config = new Configuration(false);
         config.set(S3_USER_AGENT_PREFIX, userAgentPrefix);
         try (TrinoS3FileSystem fs = new TrinoS3FileSystem()) {
             fs.initialize(new URI("s3n://test-bucket/"), config);
             ClientConfiguration clientConfig = getFieldValue(fs.getS3Client(), AmazonWebServiceClient.class, "clientConfiguration", ClientConfiguration.class);
-            assertEquals(clientConfig.getUserAgentSuffix(), "Trino");
-            assertEquals(clientConfig.getUserAgentPrefix(), userAgentPrefix);
+            assertThat(clientConfig.getUserAgentSuffix()).isEqualTo("Trino");
+            assertThat(clientConfig.getUserAgentPrefix()).isEqualTo(userAgentPrefix);
         }
     }
 
@@ -622,14 +629,14 @@ public class TestTrinoS3FileSystem
     {
         HiveS3Config defaults = new HiveS3Config();
         try (TrinoS3FileSystem fs = new TrinoS3FileSystem()) {
-            fs.initialize(new URI("s3n://test-bucket/"), newEmptyConfiguration());
+            fs.initialize(new URI("s3n://test-bucket/"), new Configuration(false));
             ClientConfiguration config = getFieldValue(fs.getS3Client(), AmazonWebServiceClient.class, "clientConfiguration", ClientConfiguration.class);
-            assertEquals(config.getMaxErrorRetry(), defaults.getS3MaxErrorRetries());
-            assertEquals(config.getConnectionTimeout(), defaults.getS3ConnectTimeout().toMillis());
-            assertEquals(config.getSocketTimeout(), defaults.getS3SocketTimeout().toMillis());
-            assertEquals(config.getMaxConnections(), defaults.getS3MaxConnections());
-            assertEquals(config.getUserAgentSuffix(), "Trino");
-            assertEquals(config.getUserAgentPrefix(), "");
+            assertThat(config.getMaxErrorRetry()).isEqualTo(defaults.getS3MaxErrorRetries());
+            assertThat(config.getConnectionTimeout()).isEqualTo(defaults.getS3ConnectTimeout().toMillis());
+            assertThat(config.getSocketTimeout()).isEqualTo(defaults.getS3SocketTimeout().toMillis());
+            assertThat(config.getMaxConnections()).isEqualTo(defaults.getS3MaxConnections());
+            assertThat(config.getUserAgentSuffix()).isEqualTo("Trino");
+            assertThat(config.getUserAgentPrefix()).isEqualTo("");
         }
     }
 
@@ -648,19 +655,19 @@ public class TestTrinoS3FileSystem
         HiveS3Config hiveS3Config = new HiveS3Config();
 
         TrinoS3ConfigurationInitializer configurationInitializer = new TrinoS3ConfigurationInitializer(hiveS3Config);
-        Configuration trinoFsConfiguration = newEmptyConfiguration();
+        Configuration trinoFsConfiguration = new Configuration(false);
         configurationInitializer.initializeConfiguration(trinoFsConfiguration);
 
         try (TrinoS3FileSystem fs = new TrinoS3FileSystem()) {
             fs.initialize(new URI("s3n://test-bucket/"), trinoFsConfiguration);
             ClientConfiguration config = getFieldValue(fs.getS3Client(), AmazonWebServiceClient.class, "clientConfiguration", ClientConfiguration.class);
-            assertNull(config.getProxyHost());
-            assertEquals(config.getProxyPort(), -1);
-            assertEquals(config.getProxyProtocol(), Protocol.HTTP);
-            assertEquals(config.getNonProxyHosts(), System.getProperty("http.nonProxyHosts"));
-            assertNull(config.getProxyUsername());
-            assertNull(config.getProxyPassword());
-            assertFalse(config.isPreemptiveBasicProxyAuth());
+            assertThat(config.getProxyHost()).isNull();
+            assertThat(config.getProxyPort()).isEqualTo(-1);
+            assertThat(config.getProxyProtocol()).isEqualTo(Protocol.HTTP);
+            assertThat(config.getNonProxyHosts()).isEqualTo(System.getProperty("http.nonProxyHosts"));
+            assertThat(config.getProxyUsername()).isNull();
+            assertThat(config.getProxyPassword()).isNull();
+            assertThat(config.isPreemptiveBasicProxyAuth()).isFalse();
         }
     }
 
@@ -678,19 +685,19 @@ public class TestTrinoS3FileSystem
         hiveS3Config.setS3PreemptiveBasicProxyAuth(true);
 
         TrinoS3ConfigurationInitializer configurationInitializer = new TrinoS3ConfigurationInitializer(hiveS3Config);
-        Configuration trinoFsConfiguration = newEmptyConfiguration();
+        Configuration trinoFsConfiguration = new Configuration(false);
         configurationInitializer.initializeConfiguration(trinoFsConfiguration);
 
         try (TrinoS3FileSystem fs = new TrinoS3FileSystem()) {
             fs.initialize(new URI("s3n://test-bucket/"), trinoFsConfiguration);
             ClientConfiguration config = getFieldValue(fs.getS3Client(), AmazonWebServiceClient.class, "clientConfiguration", ClientConfiguration.class);
-            assertNull(config.getProxyHost());
-            assertEquals(config.getProxyPort(), -1);
-            assertEquals(config.getProxyProtocol(), Protocol.HTTP);
-            assertEquals(config.getNonProxyHosts(), System.getProperty("http.nonProxyHosts"));
-            assertNull(config.getProxyUsername());
-            assertNull(config.getProxyPassword());
-            assertFalse(config.isPreemptiveBasicProxyAuth());
+            assertThat(config.getProxyHost()).isNull();
+            assertThat(config.getProxyPort()).isEqualTo(-1);
+            assertThat(config.getProxyProtocol()).isEqualTo(Protocol.HTTP);
+            assertThat(config.getNonProxyHosts()).isEqualTo(System.getProperty("http.nonProxyHosts"));
+            assertThat(config.getProxyUsername()).isNull();
+            assertThat(config.getProxyPassword()).isNull();
+            assertThat(config.isPreemptiveBasicProxyAuth()).isFalse();
         }
     }
 
@@ -708,26 +715,26 @@ public class TestTrinoS3FileSystem
         hiveS3Config.setS3PreemptiveBasicProxyAuth(true);
 
         TrinoS3ConfigurationInitializer configurationInitializer = new TrinoS3ConfigurationInitializer(hiveS3Config);
-        Configuration trinoFsConfiguration = newEmptyConfiguration();
+        Configuration trinoFsConfiguration = new Configuration(false);
         configurationInitializer.initializeConfiguration(trinoFsConfiguration);
 
         try (TrinoS3FileSystem fs = new TrinoS3FileSystem()) {
             fs.initialize(new URI("s3n://test-bucket/"), trinoFsConfiguration);
             ClientConfiguration config = getFieldValue(fs.getS3Client(), AmazonWebServiceClient.class, "clientConfiguration", ClientConfiguration.class);
-            assertEquals(config.getProxyHost(), "dummy.com");
-            assertEquals(config.getProxyPort(), 40000);
-            assertEquals(config.getProxyProtocol(), Protocol.HTTPS);
-            assertEquals(config.getNonProxyHosts(), "firsthost.com|secondhost.com");
-            assertEquals(config.getProxyUsername(), "dummy_username");
-            assertEquals(config.getProxyPassword(), "dummy_password");
-            assertTrue(config.isPreemptiveBasicProxyAuth());
+            assertThat(config.getProxyHost()).isEqualTo("dummy.com");
+            assertThat(config.getProxyPort()).isEqualTo(40000);
+            assertThat(config.getProxyProtocol()).isEqualTo(Protocol.HTTPS);
+            assertThat(config.getNonProxyHosts()).isEqualTo("firsthost.com|secondhost.com");
+            assertThat(config.getProxyUsername()).isEqualTo("dummy_username");
+            assertThat(config.getProxyPassword()).isEqualTo("dummy_password");
+            assertThat(config.isPreemptiveBasicProxyAuth()).isTrue();
         }
     }
 
     private static void assertSkipGlacierObjects(boolean skipGlacierObjects)
             throws Exception
     {
-        Configuration config = newEmptyConfiguration();
+        Configuration config = new Configuration(false);
         config.set(S3_SKIP_GLACIER_OBJECTS, String.valueOf(skipGlacierObjects));
 
         try (TrinoS3FileSystem fs = new TrinoS3FileSystem()) {
@@ -736,7 +743,7 @@ public class TestTrinoS3FileSystem
             fs.initialize(new URI("s3n://test-bucket/"), config);
             fs.setS3Client(s3);
             FileStatus[] statuses = fs.listStatus(new Path("s3n://test-bucket/test"));
-            assertEquals(statuses.length, skipGlacierObjects ? 2 : 4);
+            assertThat(statuses.length).isEqualTo(skipGlacierObjects ? 2 : 4);
         }
     }
 
@@ -744,7 +751,7 @@ public class TestTrinoS3FileSystem
     public void testSkipHadoopFolderMarkerObjectsEnabled()
             throws Exception
     {
-        Configuration config = newEmptyConfiguration();
+        Configuration config = new Configuration(false);
 
         try (TrinoS3FileSystem fs = new TrinoS3FileSystem()) {
             MockAmazonS3 s3 = new MockAmazonS3();
@@ -752,7 +759,7 @@ public class TestTrinoS3FileSystem
             fs.initialize(new URI("s3n://test-bucket/"), config);
             fs.setS3Client(s3);
             FileStatus[] statuses = fs.listStatus(new Path("s3n://test-bucket/test"));
-            assertEquals(statuses.length, 2);
+            assertThat(statuses.length).isEqualTo(2);
         }
     }
 
@@ -791,9 +798,7 @@ public class TestTrinoS3FileSystem
         }
 
         @Override
-        public void refresh()
-        {
-        }
+        public void refresh() {}
 
         @Override
         public EncryptionMaterials getEncryptionMaterials(Map<String, String> materialsDescription)
@@ -828,7 +833,7 @@ public class TestTrinoS3FileSystem
     public void testDefaultAcl()
             throws Exception
     {
-        Configuration config = newEmptyConfiguration();
+        Configuration config = new Configuration(false);
 
         try (TrinoS3FileSystem fs = new TrinoS3FileSystem()) {
             MockAmazonS3 s3 = new MockAmazonS3();
@@ -838,7 +843,7 @@ public class TestTrinoS3FileSystem
             try (FSDataOutputStream stream = fs.create(new Path("s3n://test-bucket/test"))) {
                 // initiate an upload by creating a stream & closing it immediately
             }
-            assertEquals(CannedAccessControlList.Private, s3.getAcl());
+            assertThat(CannedAccessControlList.Private).isEqualTo(s3.getAcl());
         }
     }
 
@@ -846,7 +851,7 @@ public class TestTrinoS3FileSystem
     public void testFullBucketOwnerControlAcl()
             throws Exception
     {
-        Configuration config = newEmptyConfiguration();
+        Configuration config = new Configuration(false);
         config.set(S3_ACL_TYPE, "BUCKET_OWNER_FULL_CONTROL");
 
         try (TrinoS3FileSystem fs = new TrinoS3FileSystem()) {
@@ -857,7 +862,7 @@ public class TestTrinoS3FileSystem
             try (FSDataOutputStream stream = fs.create(new Path("s3n://test-bucket/test"))) {
                 // initiate an upload by creating a stream & closing it immediately
             }
-            assertEquals(CannedAccessControlList.BucketOwnerFullControl, s3.getAcl());
+            assertThat(CannedAccessControlList.BucketOwnerFullControl).isEqualTo(s3.getAcl());
         }
     }
 
@@ -865,7 +870,7 @@ public class TestTrinoS3FileSystem
     public void testStreamingUpload()
             throws Exception
     {
-        Configuration config = newEmptyConfiguration();
+        Configuration config = new Configuration(false);
         config.set(S3_STREAMING_UPLOAD_ENABLED, "true");
 
         try (TrinoS3FileSystem fs = new TrinoS3FileSystem()) {
@@ -888,8 +893,8 @@ public class TestTrinoS3FileSystem
             InputStream concatInputStream = parts.stream()
                     .map(UploadPartRequest::getInputStream)
                     .reduce(new ByteArrayInputStream(new byte[0]), SequenceInputStream::new);
-            String data = new String(toByteArray(concatInputStream), US_ASCII);
-            assertEquals(data, "a" + "foo".repeat(21) + "bar".repeat(44) + "orange".repeat(22));
+            String data = new String(concatInputStream.readAllBytes(), US_ASCII);
+            assertThat(data).isEqualTo("a" + "foo".repeat(21) + "bar".repeat(44) + "orange".repeat(22));
         }
     }
 
@@ -911,14 +916,14 @@ public class TestTrinoS3FileSystem
                     return super.getObjectMetadata(getObjectMetadataRequest);
                 }
             };
-            fs.initialize(new URI("s3n://test-bucket/"), newEmptyConfiguration());
+            fs.initialize(new URI("s3n://test-bucket/"), new Configuration(false));
             fs.setS3Client(s3);
 
             FileStatus fileStatus = fs.getFileStatus(new Path("s3n://test-bucket/empty-dir/"));
-            assertTrue(fileStatus.isDirectory());
+            assertThat(fileStatus.isDirectory()).isTrue();
 
             fileStatus = fs.getFileStatus(new Path("s3n://test-bucket/empty-dir"));
-            assertTrue(fileStatus.isDirectory());
+            assertThat(fileStatus.isDirectory()).isTrue();
         }
     }
 
@@ -955,27 +960,27 @@ public class TestTrinoS3FileSystem
                 }
             };
             Path rootPath = new Path("s3n://test-bucket/");
-            fs.initialize(rootPath.toUri(), newEmptyConfiguration());
+            fs.initialize(rootPath.toUri(), new Configuration(false));
             fs.setS3Client(s3);
 
             List<LocatedFileStatus> shallowAll = remoteIteratorToList(fs.listLocatedStatus(rootPath));
-            assertEquals(shallowAll.size(), 2);
-            assertTrue(shallowAll.get(0).isDirectory());
-            assertFalse(shallowAll.get(1).isDirectory());
-            assertEquals(shallowAll.get(0).getPath(), new Path(rootPath, "prefix"));
-            assertEquals(shallowAll.get(1).getPath(), new Path(rootPath, rootObject.getKey()));
+            assertThat(shallowAll).hasSize(2);
+            assertThat(shallowAll.get(0).isDirectory()).isTrue();
+            assertThat(shallowAll.get(1).isDirectory()).isFalse();
+            assertThat(shallowAll.get(0).getPath()).isEqualTo(new Path(rootPath, "prefix"));
+            assertThat(shallowAll.get(1).getPath()).isEqualTo(new Path(rootPath, rootObject.getKey()));
 
             List<LocatedFileStatus> shallowFiles = remoteIteratorToList(fs.listFiles(rootPath, false));
-            assertEquals(shallowFiles.size(), 1);
-            assertFalse(shallowFiles.get(0).isDirectory());
-            assertEquals(shallowFiles.get(0).getPath(), new Path(rootPath, rootObject.getKey()));
+            assertThat(shallowFiles).hasSize(1);
+            assertThat(shallowFiles.get(0).isDirectory()).isFalse();
+            assertThat(shallowFiles.get(0).getPath()).isEqualTo(new Path(rootPath, rootObject.getKey()));
 
             List<LocatedFileStatus> recursiveFiles = remoteIteratorToList(fs.listFiles(rootPath, true));
-            assertEquals(recursiveFiles.size(), 2);
-            assertFalse(recursiveFiles.get(0).isDirectory());
-            assertFalse(recursiveFiles.get(1).isDirectory());
-            assertEquals(recursiveFiles.get(0).getPath(), new Path(rootPath, childObject.getKey()));
-            assertEquals(recursiveFiles.get(1).getPath(), new Path(rootPath, rootObject.getKey()));
+            assertThat(recursiveFiles).hasSize(2);
+            assertThat(recursiveFiles.get(0).isDirectory()).isFalse();
+            assertThat(recursiveFiles.get(1).isDirectory()).isFalse();
+            assertThat(recursiveFiles.get(0).getPath()).isEqualTo(new Path(rootPath, childObject.getKey()));
+            assertThat(recursiveFiles.get(1).getPath()).isEqualTo(new Path(rootPath, rootObject.getKey()));
         }
     }
 
@@ -988,7 +993,7 @@ public class TestTrinoS3FileSystem
         try (TrinoS3FileSystem fs = new TrinoS3FileSystem()) {
             MockAmazonS3 s3 = new MockAmazonS3();
             Path rootPath = new Path("s3n://test-bucket/");
-            fs.initialize(rootPath.toUri(), newEmptyConfiguration());
+            fs.initialize(rootPath.toUri(), new Configuration(false));
             fs.setS3Client(s3);
             OutputStream outputStream = fs.create(new Path("s3n://test-bucket/test1"), memoryContext);
             outputStream.write(new byte[] {1, 2, 3, 4, 5, 6}, 0, 6);

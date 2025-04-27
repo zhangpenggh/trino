@@ -14,6 +14,7 @@
 package io.trino.plugin.mysql;
 
 import com.google.common.collect.ImmutableMap;
+import com.mysql.cj.jdbc.exceptions.MysqlDataTruncation;
 import io.trino.Session;
 import io.trino.plugin.jdbc.BaseJdbcConnectorTest;
 import io.trino.plugin.jdbc.JdbcTableHandle;
@@ -23,19 +24,20 @@ import io.trino.testing.MaterializedResult;
 import io.trino.testing.TestingConnectorBehavior;
 import io.trino.testing.sql.SqlExecutor;
 import io.trino.testing.sql.TestTable;
-import org.testng.annotations.DataProvider;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.sql.Connection;
 import java.sql.PreparedStatement;
-import java.sql.ResultSet;
 import java.time.LocalDate;
 import java.util.List;
+import java.util.Locale;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import static com.google.common.base.Strings.nullToEmpty;
-import static io.trino.spi.connector.ConnectorMetadata.MODIFYING_ROWS_MESSAGE;
+import static io.trino.plugin.jdbc.JdbcWriteSessionProperties.NON_TRANSACTIONAL_MERGE;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.node;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.tableScan;
@@ -46,9 +48,6 @@ import static java.util.stream.Collectors.joining;
 import static java.util.stream.IntStream.range;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.testng.Assert.assertEquals;
-import static org.testng.Assert.assertFalse;
-import static org.testng.Assert.assertTrue;
 
 public abstract class BaseMySqlConnectorTest
         extends BaseJdbcConnectorTest
@@ -59,26 +58,40 @@ public abstract class BaseMySqlConnectorTest
     protected boolean hasBehavior(TestingConnectorBehavior connectorBehavior)
     {
         return switch (connectorBehavior) {
-            case SUPPORTS_AGGREGATION_PUSHDOWN,
-                    SUPPORTS_JOIN_PUSHDOWN -> true;
+            case SUPPORTS_ADD_COLUMN_WITH_POSITION,
+                 SUPPORTS_AGGREGATION_PUSHDOWN,
+                 SUPPORTS_JOIN_PUSHDOWN,
+                 SUPPORTS_MERGE,
+                 SUPPORTS_ROW_LEVEL_UPDATE -> true;
             case SUPPORTS_ADD_COLUMN_WITH_COMMENT,
-                    SUPPORTS_AGGREGATION_PUSHDOWN_CORRELATION,
-                    SUPPORTS_AGGREGATION_PUSHDOWN_COUNT_DISTINCT,
-                    SUPPORTS_AGGREGATION_PUSHDOWN_COVARIANCE,
-                    SUPPORTS_AGGREGATION_PUSHDOWN_REGRESSION,
-                    SUPPORTS_ARRAY,
-                    SUPPORTS_COMMENT_ON_COLUMN,
-                    SUPPORTS_CREATE_TABLE_WITH_COLUMN_COMMENT,
-                    SUPPORTS_JOIN_PUSHDOWN_WITH_DISTINCT_FROM,
-                    SUPPORTS_JOIN_PUSHDOWN_WITH_FULL_JOIN,
-                    SUPPORTS_NEGATIVE_DATE,
-                    SUPPORTS_PREDICATE_PUSHDOWN_WITH_VARCHAR_EQUALITY,
-                    SUPPORTS_PREDICATE_PUSHDOWN_WITH_VARCHAR_INEQUALITY,
-                    SUPPORTS_RENAME_SCHEMA,
-                    SUPPORTS_ROW_TYPE,
-                    SUPPORTS_SET_COLUMN_TYPE -> false;
+                 SUPPORTS_AGGREGATION_PUSHDOWN_CORRELATION,
+                 SUPPORTS_AGGREGATION_PUSHDOWN_COUNT_DISTINCT,
+                 SUPPORTS_AGGREGATION_PUSHDOWN_COVARIANCE,
+                 SUPPORTS_AGGREGATION_PUSHDOWN_REGRESSION,
+                 SUPPORTS_ARRAY,
+                 SUPPORTS_COMMENT_ON_COLUMN,
+                 SUPPORTS_CREATE_TABLE_WITH_COLUMN_COMMENT,
+                 SUPPORTS_DROP_NOT_NULL_CONSTRAINT,
+                 SUPPORTS_JOIN_PUSHDOWN_WITH_DISTINCT_FROM,
+                 SUPPORTS_JOIN_PUSHDOWN_WITH_FULL_JOIN,
+                 SUPPORTS_MAP_TYPE,
+                 SUPPORTS_NEGATIVE_DATE,
+                 SUPPORTS_PREDICATE_PUSHDOWN_WITH_VARCHAR_EQUALITY,
+                 SUPPORTS_PREDICATE_PUSHDOWN_WITH_VARCHAR_INEQUALITY,
+                 SUPPORTS_RENAME_SCHEMA,
+                 SUPPORTS_ROW_TYPE,
+                 SUPPORTS_SET_COLUMN_TYPE -> false;
             default -> super.hasBehavior(connectorBehavior);
         };
+    }
+
+    @Override
+    protected Session getSession()
+    {
+        Session session = super.getSession();
+        return Session.builder(session)
+                .setCatalogSessionProperty(session.getCatalog().orElseThrow(), NON_TRANSACTIONAL_MERGE, "true")
+                .build();
     }
 
     @Override
@@ -103,10 +116,11 @@ public abstract class BaseMySqlConnectorTest
                 "(one bigint, two decimal(50,0), three varchar(10))");
     }
 
+    @Test
     @Override
     public void testShowColumns()
     {
-        assertThat(query("SHOW COLUMNS FROM orders")).matches(getDescribeOrdersResult());
+        assertThat(query("SHOW COLUMNS FROM orders")).result().matches(getDescribeOrdersResult());
     }
 
     @Override
@@ -119,9 +133,19 @@ public abstract class BaseMySqlConnectorTest
     protected Optional<DataMappingTestSetup> filterDataMappingSmokeTestData(DataMappingTestSetup dataMappingTestSetup)
     {
         String typeName = dataMappingTestSetup.getTrinoTypeName();
-        if (typeName.equals("timestamp(3) with time zone") ||
-                typeName.equals("timestamp(6) with time zone")) {
-            return Optional.of(dataMappingTestSetup.asUnsupported());
+
+        // MySQL TIMESTAMP has a range of '1970-01-01 00:00:01' UTC to '2038-01-19 03:14:07' UTC.
+        if (typeName.equals("timestamp(3) with time zone")) {
+            if (dataMappingTestSetup.getSampleValueLiteral().contains("1969")) {
+                return Optional.of(new DataMappingTestSetup("timestamp(3) with time zone", "TIMESTAMP '1970-01-01 15:03:00.123 +01:00'", "TIMESTAMP '1970-01-31 17:03:00.456 +01:00'"));
+            }
+            return Optional.of(new DataMappingTestSetup("timestamp(3) with time zone", "TIMESTAMP '2020-02-12 15:03:00 +01:00'", "TIMESTAMP '2038-01-19 03:14:07.000 UTC'"));
+        }
+        else if (typeName.equals("timestamp(6) with time zone")) {
+            if (dataMappingTestSetup.getSampleValueLiteral().contains("1969")) {
+                return Optional.of(new DataMappingTestSetup("timestamp(6) with time zone", "TIMESTAMP '1970-01-01 15:03:00.123456 +01:00'", "TIMESTAMP '1970-01-31 17:03:00.123456 +01:00'"));
+            }
+            return Optional.of(new DataMappingTestSetup("timestamp(6) with time zone", "TIMESTAMP '2020-02-12 15:03:00 +01:00'", "TIMESTAMP '2038-01-19 03:14:07.000 UTC'"));
         }
 
         if (typeName.equals("timestamp")) {
@@ -154,6 +178,7 @@ public abstract class BaseMySqlConnectorTest
                 .build();
     }
 
+    @Test
     @Override
     public void testShowCreateTable()
     {
@@ -171,11 +196,163 @@ public abstract class BaseMySqlConnectorTest
                         ")");
     }
 
-    @Override
-    public void testDeleteWithLike()
+    @Test
+    public void testCreateTableWithPrimaryKey()
     {
-        assertThatThrownBy(super::testDeleteWithLike)
-                .hasStackTraceContaining("TrinoException: " + MODIFYING_ROWS_MESSAGE);
+        verifyCreateTableDefinition(
+                "(a bigint NOT NULL, b bigint, c bigint) WITH (primary_key = ARRAY['a'])",
+                """
+                CREATE TABLE %s.%s.%s (
+                   a bigint NOT NULL,
+                   b bigint,
+                   c bigint
+                )
+                WITH (
+                   primary_key = ARRAY['a']
+                )\
+                """
+        );
+
+        verifyCreateTableDefinition(
+                "(a bigint NOT NULL, b bigint NOT NULL, c bigint) WITH (primary_key = ARRAY['a', 'b'])",
+                """
+                CREATE TABLE %s.%s.%s (
+                   a bigint NOT NULL,
+                   b bigint NOT NULL,
+                   c bigint
+                )
+                WITH (
+                   primary_key = ARRAY['a','b']
+                )\
+                """
+        );
+
+        verifyCreateTableDefinition(
+                "(a bigint NOT NULL, b bigint NOT NULL, c bigint) WITH (primary_key = ARRAY['b', 'a'])",
+                """
+                CREATE TABLE %s.%s.%s (
+                   a bigint NOT NULL,
+                   b bigint NOT NULL,
+                   c bigint
+                )
+                WITH (
+                   primary_key = ARRAY['b','a']
+                )\
+                """
+        );
+
+        verifyCreateTableDefinition(
+                "(a bigint NOT NULL, b bigint NOT NULL, c bigint NOT NULL, d bigint) WITH (primary_key = ARRAY['b', 'c', 'a'])",
+                """
+                CREATE TABLE %s.%s.%s (
+                   a bigint NOT NULL,
+                   b bigint NOT NULL,
+                   c bigint NOT NULL,
+                   d bigint
+                )
+                WITH (
+                   primary_key = ARRAY['b','c','a']
+                )\
+                """
+        );
+    }
+
+    private void verifyCreateTableDefinition(String tableDefinition, String showCreateTableFormat)
+    {
+        try (TestTable table = newTrinoTable("test_create_with_primary_key_", tableDefinition)) {
+            assertThat(computeScalar("SHOW CREATE TABLE " + table.getName()))
+                    .isEqualTo(format(showCreateTableFormat, getSession().getCatalog().orElseThrow(), getSession().getSchema().orElseThrow(), table.getName()));
+        }
+    }
+
+    @Test
+    public void testCreateTableWithInvalidPrimaryKey()
+    {
+        String tableName = "test_create_with_invalid_primary_key";
+        // primary key must be not null
+        assertQueryFails("CREATE TABLE " + tableName + " (a bigint, b bigint, c bigint) WITH (primary_key = ARRAY['a'])",
+                "Primary key must be NOT NULL in MySQL");
+        // primary key must exist in column list
+        assertQueryFails("CREATE TABLE " + tableName + " (a bigint, b bigint, c bigint) WITH (primary_key = ARRAY['d'])",
+                "Column 'd' specified in property 'primary_key' doesn't exist in table");
+        assertQueryFails("CREATE TABLE " + tableName + " (a bigint, b bigint, c bigint) WITH (primary_key = ARRAY['A'])",
+                "Column 'A' specified in property 'primary_key' doesn't exist in table");
+    }
+
+    @Test
+    public void testCreateTableWithUnsupportedKey()
+    {
+        verifyTableDefinitionWithUnsupportedKey(
+                "(a decimal(50,0), b bigint, c bigint, PRIMARY KEY(a))",
+                """
+                CREATE TABLE %s.%s.%s (
+                   b bigint,
+                   c bigint
+                )\
+                """
+        );
+
+        verifyTableDefinitionWithUnsupportedKey(
+                "(a decimal(50,0), b bigint, c bigint, PRIMARY KEY(a, b))",
+                """
+                CREATE TABLE %s.%s.%s (
+                   b bigint NOT NULL,
+                   c bigint
+                )
+                WITH (
+                   primary_key = ARRAY['b']
+                )\
+                """
+        );
+
+        verifyTableDefinitionWithUnsupportedKey(
+                "(a decimal(50,0), b bigint, c bigint, d bigint, PRIMARY KEY(a, b, c))",
+                """
+                CREATE TABLE %s.%s.%s (
+                   b bigint NOT NULL,
+                   c bigint NOT NULL,
+                   d bigint
+                )
+                WITH (
+                   primary_key = ARRAY['b','c']
+                )\
+                """
+        );
+
+        verifyTableDefinitionWithUnsupportedKey(
+                "(a decimal(50,0), b bigint, c bigint, d bigint, PRIMARY KEY(a, c, b))",
+                """
+                CREATE TABLE %s.%s.%s (
+                   b bigint NOT NULL,
+                   c bigint NOT NULL,
+                   d bigint
+                )
+                WITH (
+                   primary_key = ARRAY['c','b']
+                )\
+                """
+        );
+
+        verifyTableDefinitionWithUnsupportedKey(
+                "(a decimal(50,0), b bigint, c decimal(50,0), d bigint, PRIMARY KEY(a, b, c))",
+                """
+                CREATE TABLE %s.%s.%s (
+                   b bigint NOT NULL,
+                   d bigint
+                )
+                WITH (
+                   primary_key = ARRAY['b']
+                )\
+                """
+        );
+    }
+
+    private void verifyTableDefinitionWithUnsupportedKey(String tableDefinition, String showCreateTableFormat)
+    {
+        try (TestTable table = new TestTable(onRemoteDatabase(), "test_create_with_unsupported_key_", tableDefinition)) {
+            assertThat(computeScalar("SHOW CREATE TABLE " + table.getName()))
+                    .isEqualTo(format(showCreateTableFormat, getSession().getCatalog().orElseThrow(), getSession().getSchema().orElseThrow(), table.getName()));
+        }
     }
 
     @Test
@@ -194,15 +371,15 @@ public abstract class BaseMySqlConnectorTest
                 .setSchema(getSession().getSchema())
                 .build();
 
-        assertFalse(getQueryRunner().tableExists(session, "test_table"));
+        assertThat(getQueryRunner().tableExists(session, "test_table")).isFalse();
 
         assertUpdate(session, "CREATE TABLE test_table AS SELECT 123 x", 1);
-        assertTrue(getQueryRunner().tableExists(session, "test_table"));
+        assertThat(getQueryRunner().tableExists(session, "test_table")).isTrue();
 
         assertQuery(session, "SELECT * FROM test_table", "SELECT 123");
 
         assertUpdate(session, "DROP TABLE test_table");
-        assertFalse(getQueryRunner().tableExists(session, "test_table"));
+        assertThat(getQueryRunner().tableExists(session, "test_table")).isFalse();
     }
 
     @Test
@@ -214,7 +391,8 @@ public abstract class BaseMySqlConnectorTest
 
         onRemoteDatabase().execute("INSERT INTO tpch.mysql_test_tinyint1 VALUES (127), (-128)");
         MaterializedResult materializedRows = computeActual("SELECT * FROM tpch.mysql_test_tinyint1 WHERE c_tinyint = 127");
-        assertEquals(materializedRows.getOnlyValue(), (byte) 127);
+        assertThat(materializedRows.getOnlyValue())
+                .isEqualTo((byte) 127);
 
         assertUpdate("DROP TABLE mysql_test_tinyint1");
     }
@@ -251,6 +429,7 @@ public abstract class BaseMySqlConnectorTest
         assertUpdate("DROP TABLE test_column_comment");
     }
 
+    @Test
     @Override
     public void testAddNotNullColumn()
     {
@@ -258,7 +437,7 @@ public abstract class BaseMySqlConnectorTest
                 .isInstanceOf(AssertionError.class)
                 .hasMessage("Should fail to add not null column without a default value to a non-empty table");
 
-        try (TestTable table = new TestTable(getQueryRunner()::execute, "test_add_nn_col", "(a_varchar varchar)")) {
+        try (TestTable table = newTrinoTable("test_add_nn_col", "(a_varchar varchar)")) {
             String tableName = table.getName();
 
             assertUpdate("INSERT INTO " + tableName + " VALUES ('a')", 1);
@@ -368,16 +547,28 @@ public abstract class BaseMySqlConnectorTest
                 .isFullyPushedDown();
     }
 
-    @Test(dataProvider = "charsetAndCollation")
-    public void testPredicatePushdownWithCollationView(String charset, String collation)
+    @Test
+    public void testPredicatePushdownWithCollationView()
     {
-        onRemoteDatabase().execute(format("CREATE OR REPLACE VIEW tpch.test_view AS SELECT regionkey, nationkey, CONVERT(name USING %s) COLLATE %s AS name FROM tpch.nation;", charset, collation));
-        testNationCollationQueries("test_view");
-        onRemoteDatabase().execute("DROP VIEW tpch.test_view");
+        testPredicatePushdownWithCollationView("latin1", "latin1_general_cs");
+        testPredicatePushdownWithCollationView("utf8", "utf8_bin");
     }
 
-    @Test(dataProvider = "charsetAndCollation")
-    public void testPredicatePushdownWithCollation(String charset, String collation)
+    private void testPredicatePushdownWithCollationView(String charset, String collation)
+    {
+        onRemoteDatabase().execute(format("CREATE OR REPLACE VIEW tpch.test_view_pushdown AS SELECT regionkey, nationkey, CONVERT(name USING %s) COLLATE %s AS name FROM tpch.nation;", charset, collation));
+        testNationCollationQueries("test_view_pushdown");
+        onRemoteDatabase().execute("DROP VIEW tpch.test_view_pushdown");
+    }
+
+    @Test
+    public void testPredicatePushdownWithCollation()
+    {
+        testPredicatePushdownWithCollation("latin1", "latin1_general_cs");
+        testPredicatePushdownWithCollation("utf8", "utf8_bin");
+    }
+
+    private void testPredicatePushdownWithCollation(String charset, String collation)
     {
         try (TestTable testTable = new TestTable(
                 onRemoteDatabase(),
@@ -463,12 +654,6 @@ public abstract class BaseMySqlConnectorTest
                 .joinIsNotFullyPushedDown();
     }
 
-    @DataProvider
-    public static Object[][] charsetAndCollation()
-    {
-        return new Object[][] {{"latin1", "latin1_general_cs"}, {"utf8", "utf8_bin"}};
-    }
-
     /**
      * This test helps to tune TupleDomain simplification threshold.
      */
@@ -493,21 +678,23 @@ public abstract class BaseMySqlConnectorTest
         onRemoteDatabase().execute("SELECT count(*) FROM tpch.orders WHERE " + longInClauses);
     }
 
+    @Test
     @Override
     public void testNativeQueryInsertStatementTableDoesNotExist()
     {
         // override because MySQL succeeds in preparing query, and then fails because of no metadata available
-        assertFalse(getQueryRunner().tableExists(getSession(), "non_existent_table"));
-        assertThatThrownBy(() -> query("SELECT * FROM TABLE(system.query(query => 'INSERT INTO non_existent_table VALUES (1)'))"))
-                .hasMessageContaining("Query not supported: ResultSetMetaData not available for query: INSERT INTO non_existent_table VALUES (1)");
+        assertThat(getQueryRunner().tableExists(getSession(), "non_existent_table")).isFalse();
+        assertThat(query("SELECT * FROM TABLE(system.query(query => 'INSERT INTO non_existent_table VALUES (1)'))"))
+                .failure().hasMessageContaining("Query not supported: ResultSetMetaData not available for query: INSERT INTO non_existent_table VALUES (1)");
     }
 
+    @Test
     @Override
     public void testNativeQueryIncorrectSyntax()
     {
         // override because MySQL succeeds in preparing query, and then fails because of no metadata available
-        assertThatThrownBy(() -> query("SELECT * FROM TABLE(system.query(query => 'some wrong syntax'))"))
-                .hasMessageContaining("Query not supported: ResultSetMetaData not available for query: some wrong syntax");
+        assertThat(query("SELECT * FROM TABLE(system.query(query => 'some wrong syntax'))"))
+                .failure().hasMessageContaining("Query not supported: ResultSetMetaData not available for query: some wrong syntax");
     }
 
     @Test
@@ -580,7 +767,6 @@ public abstract class BaseMySqlConnectorTest
 
     @Test
     public void verifyMySqlJdbcDriverNegativeDateHandling()
-            throws Exception
     {
         LocalDate negativeDate = LocalDate.of(-1, 1, 1);
         try (TestTable table = new TestTable(onRemoteDatabase(), "tpch.verify_negative_date", "(dt DATE)")) {
@@ -589,22 +775,56 @@ public abstract class BaseMySqlConnectorTest
                     .isInstanceOf(RuntimeException.class)
                     .hasMessageMatching(".*\\QIncorrect DATE value: '" + negativeDate + "'\\E");
 
-            // Insert via prepared statement succeeds but writes incorrect value due to bug in driver
-            try (Connection connection = mySqlServer.createConnection();
-                    PreparedStatement insert = connection.prepareStatement("INSERT INTO " + table.getName() + " VALUES (?)")) {
-                insert.setObject(1, negativeDate);
-                int affectedRows = insert.executeUpdate();
-                assertThat(affectedRows).isEqualTo(1);
-            }
-
-            try (Connection connection = mySqlServer.createConnection();
-                    ResultSet resultSet = connection.createStatement().executeQuery("SELECT dt FROM " + table.getName())) {
-                while (resultSet.next()) {
-                    LocalDate dateReadBackFromMySql = resultSet.getObject(1, LocalDate.class);
-                    assertThat(dateReadBackFromMySql).isNotEqualTo(negativeDate);
-                    assertThat(dateReadBackFromMySql.toString()).isEqualTo("0002-01-01");
+            assertThatThrownBy(() -> {
+                // Insert via prepared statement fails too
+                try (Connection connection = mySqlServer.createConnection();
+                     PreparedStatement insert = connection.prepareStatement("INSERT INTO " + table.getName() + " VALUES (?)")) {
+                    insert.setObject(1, negativeDate);
+                    int affectedRows = insert.executeUpdate();
+                    assertThat(affectedRows).isEqualTo(1);
                 }
+            })
+            .isInstanceOf(MysqlDataTruncation.class)
+            .hasMessageContaining("Incorrect date value: '-0001-01-01'");
+        }
+    }
+
+    @Override
+    protected void createTableForWrites(String createTable, String tableName, Optional<String> primaryKey, OptionalInt updateCount)
+    {
+        super.createTableForWrites(createTable, tableName, primaryKey, updateCount);
+        primaryKey.ifPresent(key -> addPrimaryKey(createTable, tableName, key));
+    }
+
+    private void addPrimaryKey(String createTable, String tableName, String primaryKey)
+    {
+        Matcher matcher = Pattern.compile("CREATE TABLE .* \\(.*\\b" + primaryKey + "\\b\\s+([a-zA-Z0-9()]+).*", Pattern.CASE_INSENSITIVE).matcher(createTable);
+        if (matcher.matches()) {
+            String type = matcher.group(1).toLowerCase(Locale.ENGLISH);
+            if (type.contains("varchar") || type.contains("char")) {
+                // Mysql requires the primary keys must hava a fixed length, here use the 255 length that is just long enough for the test
+                onRemoteDatabase().execute(format("ALTER TABLE %s ADD PRIMARY KEY (%s(255))", tableName, primaryKey));
+                return;
             }
         }
+
+        // ctas or the type is not varchar/char
+        onRemoteDatabase().execute(format("ALTER TABLE %s ADD PRIMARY KEY (%s)", tableName, primaryKey));
+    }
+
+    @Override
+    protected TestTable createTestTableForWrites(String namePrefix, String tableDefinition, String primaryKey)
+    {
+        TestTable testTable = super.createTestTableForWrites(namePrefix, tableDefinition, primaryKey);
+        onRemoteDatabase().execute(format("ALTER TABLE %s ADD PRIMARY KEY (%s)", testTable.getName(), primaryKey));
+        return testTable;
+    }
+
+    @Override
+    protected TestTable createTestTableForWrites(String namePrefix, String tableDefinition, List<String> rowsToInsert, String primaryKey)
+    {
+        TestTable testTable = super.createTestTableForWrites(namePrefix, tableDefinition, rowsToInsert, primaryKey);
+        onRemoteDatabase().execute(format("ALTER TABLE %s ADD PRIMARY KEY (%s)", testTable.getName(), primaryKey));
+        return testTable;
     }
 }

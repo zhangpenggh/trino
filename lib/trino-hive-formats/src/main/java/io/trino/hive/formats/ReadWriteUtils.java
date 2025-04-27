@@ -296,14 +296,14 @@ public final class ReadWriteUtils
     public static int calculateTruncationLength(Type type, Slice slice, int offset, int length)
     {
         requireNonNull(type, "type is null");
-        if (type instanceof VarcharType) {
-            if (((VarcharType) type).isUnbounded()) {
+        if (type instanceof VarcharType varcharType) {
+            if (varcharType.isUnbounded()) {
                 return length;
             }
-            return calculateTruncationLength(((VarcharType) type).getBoundedLength(), slice, offset, length);
+            return calculateTruncationLength(varcharType.getBoundedLength(), slice, offset, length);
         }
-        if (type instanceof CharType) {
-            int truncationLength = calculateTruncationLength(((CharType) type).getLength(), slice, offset, length);
+        if (type instanceof CharType charType) {
+            int truncationLength = calculateTruncationLength(charType.getLength(), slice, offset, length);
             // At run-time char(x) is represented without trailing spaces
             while (truncationLength > 0 && slice.getByte(offset + truncationLength - 1) == ' ') {
                 truncationLength--;
@@ -327,6 +327,8 @@ public final class ReadWriteUtils
         if (indexEnd < 0) {
             return length;
         }
-        return indexEnd - offset;
+        // end index could run over length because of large code points (e.g., 4-byte code points)
+        // or within length because of small code points (e.g., 1-byte code points)
+        return min(indexEnd - offset, length);
     }
 }

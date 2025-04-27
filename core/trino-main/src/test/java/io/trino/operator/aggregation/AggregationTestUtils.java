@@ -17,6 +17,7 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.primitives.Ints;
 import io.trino.block.BlockAssertions;
 import io.trino.metadata.TestingFunctionResolution;
+import io.trino.operator.AggregationMetrics;
 import io.trino.spi.Page;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
@@ -24,7 +25,7 @@ import io.trino.spi.block.RunLengthEncodedBlock;
 import io.trino.spi.type.BooleanType;
 import io.trino.spi.type.Type;
 import io.trino.sql.analyzer.TypeSignatureProvider;
-import io.trino.sql.tree.QualifiedName;
+import io.trino.testing.assertions.TrinoExceptionAssert;
 import org.apache.commons.math3.util.Precision;
 
 import java.util.Arrays;
@@ -39,24 +40,30 @@ import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.sql.planner.plan.AggregationNode.Step.FINAL;
 import static io.trino.sql.planner.plan.AggregationNode.Step.PARTIAL;
 import static io.trino.sql.planner.plan.AggregationNode.Step.SINGLE;
+import static io.trino.testing.assertions.TrinoExceptionAssert.assertTrinoExceptionThrownBy;
 import static java.lang.String.format;
-import static org.testng.Assert.assertEquals;
-import static org.testng.Assert.fail;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Fail.fail;
 
 public final class AggregationTestUtils
 {
     private AggregationTestUtils() {}
 
-    public static void assertAggregation(TestingFunctionResolution functionResolution, QualifiedName name, List<TypeSignatureProvider> parameterTypes, Object expectedValue, Block... blocks)
+    public static void assertAggregation(TestingFunctionResolution functionResolution, String name, List<TypeSignatureProvider> parameterTypes, Object expectedValue, Block... blocks)
     {
         assertAggregation(functionResolution, name, parameterTypes, expectedValue, new Page(blocks));
     }
 
-    public static void assertAggregation(TestingFunctionResolution functionResolution, QualifiedName name, List<TypeSignatureProvider> parameterTypes, Object expectedValue, Page page)
+    public static void assertAggregation(TestingFunctionResolution functionResolution, String name, List<TypeSignatureProvider> parameterTypes, Object expectedValue, Page page)
     {
         BiFunction<Object, Object, Boolean> equalAssertion = makeValidityAssertion(expectedValue);
 
         assertAggregation(functionResolution, name, parameterTypes, equalAssertion, null, page, expectedValue);
+    }
+
+    public static TrinoExceptionAssert assertAggregationFails(TestingFunctionResolution functionResolution, String name, List<TypeSignatureProvider> parameterTypes, Block... blocks)
+    {
+        return assertTrinoExceptionThrownBy(() -> assertAggregation(functionResolution, name, parameterTypes, null, blocks));
     }
 
     public static BiFunction<Object, Object, Boolean> makeValidityAssertion(Object expectedValue)
@@ -70,13 +77,15 @@ public final class AggregationTestUtils
         return Objects::equals;
     }
 
-    public static void assertAggregation(TestingFunctionResolution functionResolution, QualifiedName name, List<TypeSignatureProvider> parameterTypes, BiFunction<Object, Object, Boolean> equalAssertion, String testDescription, Page page, Object expectedValue)
+    public static void assertAggregation(TestingFunctionResolution functionResolution, String name, List<TypeSignatureProvider> parameterTypes, BiFunction<Object, Object, Boolean> equalAssertion, String testDescription, Page page, Object expectedValue)
     {
         TestingAggregationFunction function = functionResolution.getAggregateFunction(name, parameterTypes);
 
         int positions = page.getPositionCount();
         for (int i = 1; i < page.getChannelCount(); i++) {
-            assertEquals(positions, page.getBlock(i).getPositionCount(), "input blocks provided are not equal in position count");
+            assertThat(positions)
+                    .describedAs("input blocks provided are not equal in position count")
+                    .isEqualTo(page.getBlock(i).getPositionCount());
         }
         if (positions == 0) {
             assertAggregationInternal(function, equalAssertion, testDescription, expectedValue);
@@ -156,14 +165,18 @@ public final class AggregationTestUtils
         // Execute with masked pages and assure equal to normal execution
         Object aggregationWithDupes = aggregation(function, createArgs(parameterCount), maskChannel, dupedPages);
 
-        assertEquals(aggregationWithDupes, aggregation, "Inconsistent results with mask");
+        assertThat(aggregationWithDupes)
+                .describedAs("Inconsistent results with mask")
+                .isEqualTo(aggregation);
 
         // Re-run the duplicated inputs with RLE masks
         System.arraycopy(maskPagesWithRle(true, pages), 0, dupedPages, 0, pages.length);
         System.arraycopy(maskPagesWithRle(false, pages), 0, dupedPages, pages.length, pages.length);
         Object aggregationWithRleMasks = aggregation(function, createArgs(parameterCount), maskChannel, dupedPages);
 
-        assertEquals(aggregationWithRleMasks, aggregation, "Inconsistent results with RLE mask");
+        assertThat(aggregationWithRleMasks)
+                .describedAs("Inconsistent results with RLE mask")
+                .isEqualTo(aggregation);
 
         return aggregation;
     }
@@ -185,7 +198,7 @@ public final class AggregationTestUtils
         Page[] maskedPages = new Page[pages.length];
         for (int i = 0; i < pages.length; i++) {
             Page page = pages[i];
-            BlockBuilder blockBuilder = BOOLEAN.createBlockBuilder(null, page.getPositionCount());
+            BlockBuilder blockBuilder = BOOLEAN.createFixedSizeBlockBuilder(page.getPositionCount());
             for (int j = 0; j < page.getPositionCount(); j++) {
                 BOOLEAN.writeBoolean(blockBuilder, maskValue);
             }
@@ -204,19 +217,23 @@ public final class AggregationTestUtils
         // execute with args in reverse order: arg2, arg1, arg0
         if (parameterCount > 1) {
             Object aggregationWithOffset = aggregation(function, reverseArgs(parameterCount), OptionalInt.empty(), reverseColumns(pages));
-            assertEquals(aggregationWithOffset, aggregation, "Inconsistent results with reversed channels");
+            assertThat(aggregationWithOffset)
+                    .describedAs("Inconsistent results with reversed channels")
+                    .isEqualTo(aggregation);
         }
 
         // execute with args at an offset (and possibly reversed): null, null, null, arg2, arg1, arg0
         Object aggregationWithOffset = aggregation(function, offsetArgs(parameterCount, 3), OptionalInt.empty(), offsetColumns(pages, 3));
-        assertEquals(aggregationWithOffset, aggregation, "Inconsistent results with channel offset");
+        assertThat(aggregationWithOffset)
+                .describedAs("Inconsistent results with channel offset")
+                .isEqualTo(aggregation);
 
         return aggregation;
     }
 
     private static Object aggregation(TestingAggregationFunction function, int[] args, OptionalInt maskChannel, Page... pages)
     {
-        Aggregator aggregator = function.createAggregatorFactory(SINGLE, Ints.asList(args), maskChannel).createAggregator();
+        Aggregator aggregator = function.createAggregatorFactory(SINGLE, Ints.asList(args), maskChannel).createAggregator(new AggregationMetrics());
         for (Page page : pages) {
             if (page.getPositionCount() > 0) {
                 aggregator.processPage(page);
@@ -236,12 +253,16 @@ public final class AggregationTestUtils
         // execute with args in reverse order: arg2, arg1, arg0
         if (parameterCount > 1) {
             Object aggregationWithOffset = partialAggregation(function, reverseArgs(parameterCount), reverseColumns(pages));
-            assertEquals(aggregationWithOffset, aggregation, "Inconsistent results with reversed channels");
+            assertThat(aggregationWithOffset)
+                    .describedAs("Inconsistent results with reversed channels")
+                    .isEqualTo(aggregation);
         }
 
         // execute with args at an offset (and possibly reversed): null, null, null, arg2, arg1, arg0
         Object aggregationWithOffset = partialAggregation(function, offsetArgs(parameterCount, 3), offsetColumns(pages, 3));
-        assertEquals(aggregationWithOffset, aggregation, "Inconsistent results with channel offset");
+        assertThat(aggregationWithOffset)
+                .describedAs("Inconsistent results with channel offset")
+                .isEqualTo(aggregation);
 
         return aggregation;
     }
@@ -249,16 +270,16 @@ public final class AggregationTestUtils
     private static Object partialAggregation(TestingAggregationFunction function, int[] args, Page... pages)
     {
         AggregatorFactory finalAggregatorFactory = function.createAggregatorFactory(FINAL, Ints.asList(0), OptionalInt.empty());
-        Aggregator finalAggregator = finalAggregatorFactory.createAggregator();
+        Aggregator finalAggregator = finalAggregatorFactory.createAggregator(new AggregationMetrics());
 
         // Test handling of empty intermediate blocks
         AggregatorFactory partialAggregatorFactory = function.createAggregatorFactory(PARTIAL, Ints.asList(args), OptionalInt.empty());
-        Block emptyBlock = getIntermediateBlock(function.getIntermediateType(), partialAggregatorFactory.createAggregator());
+        Block emptyBlock = getIntermediateBlock(function.getIntermediateType(), partialAggregatorFactory.createAggregator(new AggregationMetrics()));
 
         finalAggregator.processPage(new Page(emptyBlock));
 
         for (Page page : pages) {
-            Aggregator partialAggregation = partialAggregatorFactory.createAggregator();
+            Aggregator partialAggregation = partialAggregatorFactory.createAggregator(new AggregationMetrics());
             if (page.getPositionCount() > 0) {
                 partialAggregation.processPage(page);
             }
@@ -298,7 +319,7 @@ public final class AggregationTestUtils
 
     public static Object groupedAggregation(TestingAggregationFunction function, int[] args, Page... pages)
     {
-        GroupedAggregator groupedAggregator = function.createAggregatorFactory(SINGLE, Ints.asList(args), OptionalInt.empty()).createGroupedAggregator();
+        GroupedAggregator groupedAggregator = function.createAggregatorFactory(SINGLE, Ints.asList(args), OptionalInt.empty()).createGroupedAggregator(new AggregationMetrics());
         for (Page page : pages) {
             groupedAggregator.processPage(0, createGroupByIdBlock(0, page.getPositionCount()), page);
         }
@@ -308,7 +329,9 @@ public final class AggregationTestUtils
             groupedAggregator.processPage(4000, createGroupByIdBlock(4000, page.getPositionCount()), page);
         }
         Object largeGroupValue = getGroupValue(function.getFinalType(), groupedAggregator, 4000);
-        assertEquals(largeGroupValue, groupValue, "Inconsistent results with large group id");
+        assertThat(largeGroupValue)
+                .describedAs("Inconsistent results with large group id")
+                .isEqualTo(groupValue);
 
         return groupValue;
     }
@@ -335,16 +358,16 @@ public final class AggregationTestUtils
     private static Object groupedPartialAggregation(TestingAggregationFunction function, int[] args, Page... pages)
     {
         AggregatorFactory finalFactory = function.createAggregatorFactory(FINAL, ImmutableList.of(0), OptionalInt.empty());
-        GroupedAggregator finalAggregator = finalFactory.createGroupedAggregator();
+        GroupedAggregator finalAggregator = finalFactory.createGroupedAggregator(new AggregationMetrics());
 
         // Add an empty block to test the handling of empty intermediates
         AggregatorFactory partialFactory = function.createAggregatorFactory(PARTIAL, Ints.asList(args), OptionalInt.empty());
-        Block emptyBlock = getIntermediateBlock(function.getIntermediateType(), partialFactory.createGroupedAggregator());
+        Block emptyBlock = getIntermediateBlock(function.getIntermediateType(), partialFactory.createGroupedAggregator(new AggregationMetrics()));
 
         finalAggregator.processPage(0, createGroupByIdBlock(0, emptyBlock.getPositionCount()), new Page(emptyBlock));
 
         for (Page page : pages) {
-            GroupedAggregator partialAggregator = partialFactory.createGroupedAggregator();
+            GroupedAggregator partialAggregator = partialFactory.createGroupedAggregator(new AggregationMetrics());
             partialAggregator.processPage(0, createGroupByIdBlock(0, page.getPositionCount()), page);
             Block partialBlock = getIntermediateBlock(function.getIntermediateType(), partialAggregator);
             finalAggregator.processPage(0, createGroupByIdBlock(0, partialBlock.getPositionCount()), new Page(partialBlock));

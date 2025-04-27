@@ -30,10 +30,8 @@ import com.google.inject.Singleton;
 import com.google.inject.TypeLiteral;
 import io.airlift.bootstrap.Bootstrap;
 import io.airlift.bootstrap.LifeCycleManager;
-import io.airlift.event.client.EventClient;
 import io.airlift.json.JsonModule;
 import io.airlift.log.Logger;
-import io.trino.sql.parser.ParsingOptions;
 import io.trino.sql.parser.SqlParser;
 import io.trino.sql.tree.AddColumn;
 import io.trino.sql.tree.Comment;
@@ -96,7 +94,6 @@ import static com.google.common.base.MoreObjects.firstNonNull;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Throwables.throwIfUnchecked;
 import static com.google.common.collect.ImmutableList.toImmutableList;
-import static io.trino.sql.parser.ParsingOptions.DecimalLiteralTreatment.AS_DOUBLE;
 import static io.trino.verifier.QueryType.CREATE;
 import static io.trino.verifier.QueryType.MODIFY;
 import static io.trino.verifier.QueryType.READ;
@@ -151,12 +148,10 @@ public class VerifyCommand
         try {
             VerifierConfig config = injector.getInstance(VerifierConfig.class);
             injector.injectMembers(this);
-            Set<String> supportedEventClients = injector.getInstance(Key.get(new TypeLiteral<Set<String>>() {}, SupportedEventClients.class));
+            Set<String> supportedEventClients = injector.getInstance(Key.get(new TypeLiteral<>() {}, SupportedEventClients.class));
             for (String clientType : config.getEventClients()) {
                 checkArgument(supportedEventClients.contains(clientType), "Unsupported event client: %s", clientType);
             }
-            Set<EventClient> eventClients = injector.getInstance(Key.get(new TypeLiteral<Set<EventClient>>() {}));
-
             VerifierDao dao = injector.getInstance(VerifierDao.class);
 
             ImmutableList.Builder<QueryPair> queriesBuilder = ImmutableList.builder();
@@ -186,9 +181,9 @@ public class VerifyCommand
                     loadJdbcDriver(urls, config.getControlJdbcDriverName());
                 }
             }
-
             // TODO: construct this with Guice
-            int numFailedQueries = new Verifier(System.out, config, eventClients).run(queries);
+            int numFailedQueries = new Verifier(System.out, config, injector.getInstance(new Key<>(){}))
+                    .run(queries);
             System.exit((numFailedQueries > 0) ? 1 : 0);
         }
         catch (InterruptedException | MalformedURLException e) {
@@ -362,7 +357,7 @@ public class VerifyCommand
     static QueryType statementToQueryType(SqlParser parser, String sql)
     {
         try {
-            return statementToQueryType(parser.createStatement(sql, new ParsingOptions(AS_DOUBLE /* anything */)));
+            return statementToQueryType(parser.createStatement(sql));
         }
         catch (RuntimeException e) {
             throw new UnsupportedOperationException();
@@ -380,14 +375,14 @@ public class VerifyCommand
         if (statement instanceof CreateTableAsSelect) {
             return CREATE;
         }
-        if (statement instanceof CreateView) {
-            if (((CreateView) statement).isReplace()) {
+        if (statement instanceof CreateView createView) {
+            if (createView.isReplace()) {
                 return MODIFY;
             }
             return CREATE;
         }
-        if (statement instanceof CreateMaterializedView) {
-            if (((CreateMaterializedView) statement).isReplace()) {
+        if (statement instanceof CreateMaterializedView createMaterializedView) {
+            if (createMaterializedView.isReplace()) {
                 return MODIFY;
             }
             return CREATE;
@@ -410,8 +405,8 @@ public class VerifyCommand
         if (statement instanceof Explain) {
             return READ;
         }
-        if (statement instanceof ExplainAnalyze) {
-            return statementToQueryType(((ExplainAnalyze) statement).getStatement());
+        if (statement instanceof ExplainAnalyze explainAnalyze) {
+            return statementToQueryType(explainAnalyze.getStatement());
         }
         if (statement instanceof Insert) {
             return MODIFY;

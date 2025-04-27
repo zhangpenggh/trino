@@ -13,99 +13,149 @@
  */
 package io.trino.plugin.deltalake.transactionlog;
 
-import com.fasterxml.jackson.annotation.JsonCreator;
-import com.fasterxml.jackson.annotation.JsonProperty;
+import com.google.common.collect.ImmutableSet;
+import io.airlift.slice.SizeOf;
 
-import java.util.Objects;
+import java.util.HashSet;
 import java.util.Optional;
 import java.util.Set;
 
-import static java.lang.String.format;
+import static com.google.common.primitives.Ints.max;
+import static io.airlift.slice.SizeOf.SIZE_OF_INT;
+import static io.airlift.slice.SizeOf.estimatedSizeOf;
+import static io.airlift.slice.SizeOf.instanceSize;
+import static io.airlift.slice.SizeOf.sizeOf;
+import static io.trino.plugin.deltalake.DeltaLakeMetadata.CDF_SUPPORTED_WRITER_VERSION;
+import static io.trino.plugin.deltalake.DeltaLakeMetadata.COLUMN_MAPPING_MODE_SUPPORTED_READER_VERSION;
+import static io.trino.plugin.deltalake.DeltaLakeMetadata.COLUMN_MAPPING_MODE_SUPPORTED_WRITER_VERSION;
+import static io.trino.plugin.deltalake.DeltaLakeMetadata.DELETION_VECTORS_SUPPORTED_READER_VERSION;
+import static io.trino.plugin.deltalake.DeltaLakeMetadata.DELETION_VECTORS_SUPPORTED_WRITER_VERSION;
+import static io.trino.plugin.deltalake.DeltaLakeMetadata.TIMESTAMP_NTZ_SUPPORTED_READER_VERSION;
+import static io.trino.plugin.deltalake.DeltaLakeMetadata.TIMESTAMP_NTZ_SUPPORTED_WRITER_VERSION;
+import static io.trino.plugin.deltalake.transactionlog.DeltaLakeTableFeatures.CHANGE_DATA_FEED_FEATURE_NAME;
+import static io.trino.plugin.deltalake.transactionlog.DeltaLakeTableFeatures.COLUMN_MAPPING_FEATURE_NAME;
+import static io.trino.plugin.deltalake.transactionlog.DeltaLakeTableFeatures.DELETION_VECTORS_FEATURE_NAME;
+import static io.trino.plugin.deltalake.transactionlog.DeltaLakeTableFeatures.MIN_VERSION_SUPPORTS_READER_FEATURES;
+import static io.trino.plugin.deltalake.transactionlog.DeltaLakeTableFeatures.MIN_VERSION_SUPPORTS_WRITER_FEATURES;
+import static io.trino.plugin.deltalake.transactionlog.DeltaLakeTableFeatures.TIMESTAMP_NTZ_FEATURE_NAME;
+import static java.util.Objects.requireNonNull;
 
-public class ProtocolEntry
+public record ProtocolEntry(
+        int minReaderVersion,
+        int minWriterVersion,
+        // The delta protocol documentation mentions that readerFeatures & writerFeatures is Array[String], but their actual implementation is Set
+        Optional<Set<String>> readerFeatures,
+        Optional<Set<String>> writerFeatures)
 {
-    private static final int MIN_VERSION_SUPPORTS_READER_FEATURES = 3;
-    private static final int MIN_VERSION_SUPPORTS_WRITER_FEATURES = 7;
+    private static final int INSTANCE_SIZE = instanceSize(ProtocolEntry.class);
 
-    private final int minReaderVersion;
-    private final int minWriterVersion;
-    private final Optional<Set<String>> readerFeatures;
-    private final Optional<Set<String>> writerFeatures;
-
-    @JsonCreator
-    public ProtocolEntry(
-            @JsonProperty("minReaderVersion") int minReaderVersion,
-            @JsonProperty("minWriterVersion") int minWriterVersion,
-            // The delta protocol documentation mentions that readerFeatures & writerFeatures is Array[String], but their actual implementation is Set
-            @JsonProperty("readerFeatures") Optional<Set<String>> readerFeatures,
-            @JsonProperty("writerFeatures") Optional<Set<String>> writerFeatures)
+    public ProtocolEntry
     {
-        this.minReaderVersion = minReaderVersion;
-        this.minWriterVersion = minWriterVersion;
         if (minReaderVersion < MIN_VERSION_SUPPORTS_READER_FEATURES && readerFeatures.isPresent()) {
             throw new IllegalArgumentException("readerFeatures must not exist when minReaderVersion is less than " + MIN_VERSION_SUPPORTS_READER_FEATURES);
         }
         if (minWriterVersion < MIN_VERSION_SUPPORTS_WRITER_FEATURES && writerFeatures.isPresent()) {
             throw new IllegalArgumentException("writerFeatures must not exist when minWriterVersion is less than " + MIN_VERSION_SUPPORTS_WRITER_FEATURES);
         }
-        this.readerFeatures = readerFeatures;
-        this.writerFeatures = writerFeatures;
+        readerFeatures = requireNonNull(readerFeatures, "readerFeatures is null").map(ImmutableSet::copyOf);
+        writerFeatures = requireNonNull(writerFeatures, "writerFeatures is null").map(ImmutableSet::copyOf);
     }
 
-    @JsonProperty
-    public int getMinReaderVersion()
+    public boolean supportsReaderFeatures()
     {
-        return minReaderVersion;
+        return minReaderVersion >= MIN_VERSION_SUPPORTS_READER_FEATURES;
     }
 
-    @JsonProperty
-    public int getMinWriterVersion()
+    public boolean readerFeaturesContains(String featureName)
     {
-        return minWriterVersion;
+        return readerFeatures.map(features -> features.contains(featureName)).orElse(false);
     }
 
-    @JsonProperty
-    public Optional<Set<String>> getReaderFeatures()
+    public boolean supportsWriterFeatures()
     {
-        return readerFeatures;
+        return minWriterVersion >= MIN_VERSION_SUPPORTS_WRITER_FEATURES;
     }
 
-    @JsonProperty
-    public Optional<Set<String>> getWriterFeatures()
+    public boolean writerFeaturesContains(String featureName)
     {
-        return writerFeatures;
+        return writerFeatures.map(features -> features.contains(featureName)).orElse(false);
     }
 
-    @Override
-    public boolean equals(Object o)
+    public long getRetainedSizeInBytes()
     {
-        if (this == o) {
-            return true;
+        return INSTANCE_SIZE
+                + SIZE_OF_INT
+                + SIZE_OF_INT
+                + sizeOf(readerFeatures, features -> estimatedSizeOf(features, SizeOf::estimatedSizeOf))
+                + sizeOf(writerFeatures, features -> estimatedSizeOf(features, SizeOf::estimatedSizeOf));
+    }
+
+    public static Builder builder(ProtocolEntry protocolEntry)
+    {
+        return new Builder(protocolEntry.minReaderVersion, protocolEntry.minWriterVersion, protocolEntry.readerFeatures, protocolEntry.writerFeatures);
+    }
+
+    public static Builder builder(int readerVersion, int writerVersion)
+    {
+        return new Builder(readerVersion, writerVersion, Optional.empty(), Optional.empty());
+    }
+
+    public static class Builder
+    {
+        private int readerVersion;
+        private int writerVersion;
+        private final Set<String> readerFeatures = new HashSet<>();
+        private final Set<String> writerFeatures = new HashSet<>();
+
+        private Builder(int readerVersion, int writerVersion, Optional<Set<String>> readerFeatures, Optional<Set<String>> writerFeatures)
+        {
+            this.readerVersion = readerVersion;
+            this.writerVersion = writerVersion;
+            requireNonNull(readerFeatures, "readerFeatures is null").ifPresent(this.readerFeatures::addAll);
+            requireNonNull(writerFeatures, "writerFeatures is null").ifPresent(this.writerFeatures::addAll);
         }
-        if (o == null || getClass() != o.getClass()) {
-            return false;
+
+        public Builder enableChangeDataFeed()
+        {
+            writerVersion = max(writerVersion, CDF_SUPPORTED_WRITER_VERSION);
+            writerFeatures.add(CHANGE_DATA_FEED_FEATURE_NAME);
+            return this;
         }
-        ProtocolEntry that = (ProtocolEntry) o;
-        return minReaderVersion == that.minReaderVersion &&
-                minWriterVersion == that.minWriterVersion &&
-                readerFeatures.equals(that.readerFeatures) &&
-                writerFeatures.equals(that.writerFeatures);
-    }
 
-    @Override
-    public int hashCode()
-    {
-        return Objects.hash(minReaderVersion, minWriterVersion, readerFeatures, writerFeatures);
-    }
+        public Builder enableColumnMapping()
+        {
+            readerVersion = max(readerVersion, COLUMN_MAPPING_MODE_SUPPORTED_READER_VERSION);
+            writerVersion = max(writerVersion, COLUMN_MAPPING_MODE_SUPPORTED_WRITER_VERSION);
+            readerFeatures.add(COLUMN_MAPPING_FEATURE_NAME);
+            writerFeatures.add(COLUMN_MAPPING_FEATURE_NAME);
+            return this;
+        }
 
-    @Override
-    public String toString()
-    {
-        return format(
-                "ProtocolEntry{minReaderVersion=%d, minWriterVersion=%d, readerFeatures=%s, writerFeatures=%s}",
-                minReaderVersion,
-                minWriterVersion,
-                readerFeatures,
-                writerFeatures);
+        public Builder enableTimestampNtz()
+        {
+            readerVersion = max(readerVersion, TIMESTAMP_NTZ_SUPPORTED_READER_VERSION);
+            writerVersion = max(writerVersion, TIMESTAMP_NTZ_SUPPORTED_WRITER_VERSION);
+            readerFeatures.add(TIMESTAMP_NTZ_FEATURE_NAME);
+            writerFeatures.add(TIMESTAMP_NTZ_FEATURE_NAME);
+            return this;
+        }
+
+        public Builder enableDeletionVector()
+        {
+            readerVersion = max(readerVersion, DELETION_VECTORS_SUPPORTED_READER_VERSION);
+            writerVersion = max(writerVersion, DELETION_VECTORS_SUPPORTED_WRITER_VERSION);
+            readerFeatures.add(DELETION_VECTORS_FEATURE_NAME);
+            writerFeatures.add(DELETION_VECTORS_FEATURE_NAME);
+            return this;
+        }
+
+        public ProtocolEntry build()
+        {
+            return new ProtocolEntry(
+                    readerVersion,
+                    writerVersion,
+                    readerVersion < MIN_VERSION_SUPPORTS_READER_FEATURES || readerFeatures.isEmpty() ? Optional.empty() : Optional.of(readerFeatures),
+                    writerVersion < MIN_VERSION_SUPPORTS_WRITER_FEATURES || writerFeatures.isEmpty() ? Optional.empty() : Optional.of(writerFeatures));
+        }
     }
 }

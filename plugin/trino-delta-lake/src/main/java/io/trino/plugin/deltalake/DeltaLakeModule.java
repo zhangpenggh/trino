@@ -14,18 +14,18 @@
 package io.trino.plugin.deltalake;
 
 import com.google.inject.Binder;
-import com.google.inject.Key;
 import com.google.inject.Provider;
-import com.google.inject.Provides;
 import com.google.inject.Scopes;
-import com.google.inject.Singleton;
 import com.google.inject.multibindings.Multibinder;
 import io.airlift.configuration.AbstractConfigurationAwareModule;
-import io.trino.plugin.base.CatalogName;
+import io.trino.filesystem.cache.CacheKeyProvider;
+import io.trino.plugin.base.metrics.FileFormatDataSourceStats;
 import io.trino.plugin.base.security.ConnectorAccessControlModule;
 import io.trino.plugin.base.session.SessionPropertiesProvider;
+import io.trino.plugin.deltalake.cache.DeltaLakeCacheKeyProvider;
 import io.trino.plugin.deltalake.functions.tablechanges.TableChangesFunctionProvider;
 import io.trino.plugin.deltalake.functions.tablechanges.TableChangesProcessorProvider;
+import io.trino.plugin.deltalake.metastore.DeltaLakeTableMetadataScheduler;
 import io.trino.plugin.deltalake.procedure.DropExtendedStatsProcedure;
 import io.trino.plugin.deltalake.procedure.FlushMetadataCacheProcedure;
 import io.trino.plugin.deltalake.procedure.OptimizeTableProcedure;
@@ -45,16 +45,12 @@ import io.trino.plugin.deltalake.transactionlog.writer.NoIsolationSynchronizer;
 import io.trino.plugin.deltalake.transactionlog.writer.TransactionLogSynchronizer;
 import io.trino.plugin.deltalake.transactionlog.writer.TransactionLogSynchronizerManager;
 import io.trino.plugin.deltalake.transactionlog.writer.TransactionLogWriterFactory;
-import io.trino.plugin.hive.FileFormatDataSourceStats;
+import io.trino.plugin.hive.HideDeltaLakeTables;
 import io.trino.plugin.hive.PropertiesSystemTableProvider;
 import io.trino.plugin.hive.SystemTableProvider;
-import io.trino.plugin.hive.TransactionalMetadata;
-import io.trino.plugin.hive.TransactionalMetadataFactory;
-import io.trino.plugin.hive.fs.DirectoryLister;
-import io.trino.plugin.hive.metastore.SemiTransactionalHiveMetastore;
-import io.trino.plugin.hive.metastore.thrift.TranslateHiveViews;
 import io.trino.plugin.hive.parquet.ParquetReaderConfig;
 import io.trino.plugin.hive.parquet.ParquetWriterConfig;
+import io.trino.spi.catalog.CatalogName;
 import io.trino.spi.connector.ConnectorNodePartitioningProvider;
 import io.trino.spi.connector.ConnectorPageSinkProvider;
 import io.trino.spi.connector.ConnectorPageSourceProvider;
@@ -64,16 +60,11 @@ import io.trino.spi.function.FunctionProvider;
 import io.trino.spi.function.table.ConnectorTableFunction;
 import io.trino.spi.procedure.Procedure;
 
-import java.util.concurrent.ExecutorService;
-
 import static com.google.inject.multibindings.MapBinder.newMapBinder;
 import static com.google.inject.multibindings.Multibinder.newSetBinder;
 import static com.google.inject.multibindings.OptionalBinder.newOptionalBinder;
-import static io.airlift.concurrent.Threads.daemonThreadsNamed;
 import static io.airlift.configuration.ConfigBinder.configBinder;
 import static io.airlift.json.JsonCodecBinder.jsonCodecBinder;
-import static io.trino.plugin.deltalake.DeltaLakeAccessControlMetadataFactory.SYSTEM;
-import static java.util.concurrent.Executors.newCachedThreadPool;
 import static org.weakref.jmx.guice.ExportBinder.newExporter;
 
 public class DeltaLakeModule
@@ -85,12 +76,12 @@ public class DeltaLakeModule
         Provider<CatalogName> catalogName = binder.getProvider(CatalogName.class);
 
         configBinder(binder).bindConfig(DeltaLakeConfig.class);
-        binder.bind(Key.get(boolean.class, TranslateHiveViews.class)).toInstance(false);
         configBinder(binder).bindConfig(ParquetReaderConfig.class);
         configBinder(binder).bindConfig(ParquetWriterConfig.class);
 
+        binder.bind(boolean.class).annotatedWith(HideDeltaLakeTables.class).toInstance(false);
+
         install(new ConnectorAccessControlModule());
-        newOptionalBinder(binder, DeltaLakeAccessControlMetadataFactory.class).setDefault().toInstance(SYSTEM);
 
         Multibinder<SystemTableProvider> systemTableProviders = newSetBinder(binder, SystemTableProvider.class);
         systemTableProviders.addBinding().to(PropertiesSystemTableProvider.class).in(Scopes.SINGLETON);
@@ -118,17 +109,16 @@ public class DeltaLakeModule
         binder.bind(TransactionLogAccess.class).in(Scopes.SINGLETON);
         newExporter(binder).export(TransactionLogAccess.class)
                 .as(generator -> generator.generatedNameOf(TransactionLogAccess.class, catalogName.get().toString()));
+        binder.bind(DeltaLakeTableMetadataScheduler.class).in(Scopes.SINGLETON);
+        newExporter(binder).export(DeltaLakeTableMetadataScheduler.class)
+                .as(generator -> generator.generatedNameOf(DeltaLakeTableMetadataScheduler.class, catalogName.get().toString()));
 
         binder.bind(TransactionLogWriterFactory.class).in(Scopes.SINGLETON);
         binder.bind(TransactionLogSynchronizerManager.class).in(Scopes.SINGLETON);
         binder.bind(NoIsolationSynchronizer.class).in(Scopes.SINGLETON);
         newMapBinder(binder, String.class, TransactionLogSynchronizer.class);
 
-        newOptionalBinder(binder, DeltaLakeRedirectionsProvider.class)
-                .setDefault().toInstance(DeltaLakeRedirectionsProvider.NOOP);
-
         jsonCodecBinder(binder).bindJsonCodec(DataFileInfo.class);
-        jsonCodecBinder(binder).bindJsonCodec(DeltaLakeUpdateResult.class);
         jsonCodecBinder(binder).bindJsonCodec(DeltaLakeMergeResult.class);
         binder.bind(DeltaLakeWriterStats.class).in(Scopes.SINGLETON);
         binder.bind(FileFormatDataSourceStats.class).in(Scopes.SINGLETON);
@@ -148,40 +138,9 @@ public class DeltaLakeModule
         newSetBinder(binder, ConnectorTableFunction.class).addBinding().toProvider(TableChangesFunctionProvider.class).in(Scopes.SINGLETON);
         binder.bind(FunctionProvider.class).to(DeltaLakeFunctionProvider.class).in(Scopes.SINGLETON);
         binder.bind(TableChangesProcessorProvider.class).in(Scopes.SINGLETON);
-    }
 
-    @Singleton
-    @Provides
-    public TransactionalMetadataFactory createTransactionalMetadataFactory()
-    {
-        // fake implementation of TransactionalMetadataFactory used by HiveTransactionManager.
-        // not used in Delta lake connector.
-        return (identity, autoCommit) -> new TransactionalMetadata()
-        {
-            @Override
-            public SemiTransactionalHiveMetastore getMetastore()
-            {
-                throw new RuntimeException("SemiTransactionalHiveMetastore is not used by Delta");
-            }
+        newOptionalBinder(binder, CacheKeyProvider.class).setBinding().to(DeltaLakeCacheKeyProvider.class).in(Scopes.SINGLETON);
 
-            @Override
-            public DirectoryLister getDirectoryLister()
-            {
-                throw new RuntimeException("DirectoryLister is not used by Delta");
-            }
-
-            @Override
-            public void commit() {}
-
-            @Override
-            public void rollback() {}
-        };
-    }
-
-    @Singleton
-    @Provides
-    public ExecutorService createDeltaLakeExecutor(CatalogName catalogName)
-    {
-        return newCachedThreadPool(daemonThreadsNamed("delta-" + catalogName + "-%s"));
+        binder.install(new DeltaLakeExecutorModule());
     }
 }

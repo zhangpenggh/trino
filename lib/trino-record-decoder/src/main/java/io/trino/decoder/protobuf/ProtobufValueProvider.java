@@ -25,6 +25,8 @@ import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.block.MapBlockBuilder;
 import io.trino.spi.block.RowBlockBuilder;
+import io.trino.spi.block.SqlMap;
+import io.trino.spi.block.SqlRow;
 import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.BigintType;
 import io.trino.spi.type.BooleanType;
@@ -52,6 +54,7 @@ import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.trino.decoder.DecoderErrorCode.DECODER_CONVERSION_NOT_SUPPORTED;
+import static io.trino.spi.block.MapValueBuilder.buildMapValue;
 import static io.trino.spi.block.RowValueBuilder.buildRowValue;
 import static io.trino.spi.type.StandardTypes.JSON;
 import static io.trino.spi.type.TimestampType.MAX_SHORT_PRECISION;
@@ -101,8 +104,8 @@ public class ProtobufValueProvider
     public boolean getBoolean()
     {
         requireNonNull(value, "value is null");
-        if (value instanceof Boolean) {
-            return (Boolean) value;
+        if (value instanceof Boolean booleanValue) {
+            return booleanValue;
         }
         throw new TrinoException(DECODER_CONVERSION_NOT_SUPPORTED, format("cannot decode object of '%s' as '%s' for column '%s'", value.getClass(), columnType, columnName));
     }
@@ -111,15 +114,18 @@ public class ProtobufValueProvider
     public long getLong()
     {
         requireNonNull(value, "value is null");
-        if (value instanceof Long || value instanceof Integer) {
-            return ((Number) value).longValue();
+        if (value instanceof Long longValue) {
+            return longValue;
         }
-        if (value instanceof Float) {
-            return Float.floatToIntBits((Float) value);
+        if (value instanceof Integer intValue) {
+            return intValue.longValue();
         }
-        if (value instanceof DynamicMessage) {
+        if (value instanceof Float floatValue) {
+            return Float.floatToIntBits(floatValue);
+        }
+        if (value instanceof DynamicMessage dynamicMessage) {
             checkArgument(columnType instanceof TimestampType, "type should be an instance of Timestamp");
-            return parseTimestamp(((TimestampType) columnType).getPrecision(), (DynamicMessage) value);
+            return parseTimestamp(((TimestampType) columnType).getPrecision(), dynamicMessage);
         }
         throw new TrinoException(DECODER_CONVERSION_NOT_SUPPORTED, format("cannot decode object of '%s' as '%s' for column '%s'", value.getClass(), columnType, columnName));
     }
@@ -131,7 +137,7 @@ public class ProtobufValueProvider
     }
 
     @Override
-    public Block getBlock()
+    public Object getObject()
     {
         return serializeObject(null, value, columnType, columnName);
     }
@@ -143,8 +149,8 @@ public class ProtobufValueProvider
             return truncateToLength(utf8Slice(value.toString()), type);
         }
 
-        if (type instanceof VarbinaryType && value instanceof ByteString) {
-            return Slices.wrappedBuffer(((ByteString) value).toByteArray());
+        if (type instanceof VarbinaryType && value instanceof ByteString byteString) {
+            return Slices.wrappedBuffer(byteString.toByteArray());
         }
 
         if (type.equals(jsonType)) {
@@ -155,7 +161,7 @@ public class ProtobufValueProvider
     }
 
     @Nullable
-    private Block serializeObject(BlockBuilder builder, Object value, Type type, String columnName)
+    private Object serializeObject(BlockBuilder builder, Object value, Type type, String columnName)
     {
         if (type instanceof ArrayType) {
             return serializeList(builder, value, type, columnName);
@@ -217,13 +223,13 @@ public class ProtobufValueProvider
             return;
         }
 
-        if (type instanceof DoubleType && value instanceof Double) {
-            type.writeDouble(blockBuilder, (Double) value);
+        if (type instanceof DoubleType && value instanceof Double doubleValue) {
+            type.writeDouble(blockBuilder, doubleValue);
             return;
         }
 
-        if (type instanceof RealType && value instanceof Float) {
-            type.writeLong(blockBuilder, floatToIntBits((Float) value));
+        if (type instanceof RealType && value instanceof Float floatValue) {
+            type.writeLong(blockBuilder, floatToIntBits(floatValue));
             return;
         }
 
@@ -232,9 +238,9 @@ public class ProtobufValueProvider
             return;
         }
 
-        if (type instanceof TimestampType && ((TimestampType) type).isShort()) {
+        if (type instanceof TimestampType timestampType && timestampType.isShort()) {
             checkArgument(value instanceof DynamicMessage, "value should be an instance of DynamicMessage");
-            type.writeLong(blockBuilder, parseTimestamp(((TimestampType) type).getPrecision(), (DynamicMessage) value));
+            type.writeLong(blockBuilder, parseTimestamp(timestampType.getPrecision(), (DynamicMessage) value));
             return;
         }
 
@@ -242,7 +248,7 @@ public class ProtobufValueProvider
     }
 
     @Nullable
-    private Block serializeMap(BlockBuilder parentBlockBuilder, @Nullable Object value, MapType type, String columnName)
+    private SqlMap serializeMap(BlockBuilder parentBlockBuilder, @Nullable Object value, MapType type, String columnName)
     {
         if (value == null) {
             checkState(parentBlockBuilder != null, "parentBlockBuilder is null");
@@ -256,31 +262,25 @@ public class ProtobufValueProvider
         Type keyType = type.getKeyType();
         Type valueType = type.getValueType();
 
-        MapBlockBuilder blockBuilder;
         if (parentBlockBuilder != null) {
-            blockBuilder = (MapBlockBuilder) parentBlockBuilder;
+            ((MapBlockBuilder) parentBlockBuilder).buildEntry((keyBuilder, valueBuilder) -> buildMap(columnName, dynamicMessages, keyType, valueType, keyBuilder, valueBuilder));
+            return null;
         }
-        else {
-            blockBuilder = type.createBlockBuilder(null, 1);
-        }
+        return buildMapValue(type, dynamicMessages.size(), (keyBuilder, valueBuilder) -> buildMap(columnName, dynamicMessages, keyType, valueType, keyBuilder, valueBuilder));
+    }
 
-        blockBuilder.buildEntry((keyBuilder, valueBuilder) -> {
-            for (DynamicMessage dynamicMessage : dynamicMessages) {
-                if (dynamicMessage.getField(dynamicMessage.getDescriptorForType().findFieldByNumber(1)) != null) {
-                    serializeObject(keyBuilder, dynamicMessage.getField(getFieldDescriptor(dynamicMessage, 1)), keyType, columnName);
-                    serializeObject(valueBuilder, dynamicMessage.getField(getFieldDescriptor(dynamicMessage, 2)), valueType, columnName);
-                }
+    private void buildMap(String columnName, Collection<DynamicMessage> dynamicMessages, Type keyType, Type valueType, BlockBuilder keyBuilder, BlockBuilder valueBuilder)
+    {
+        for (DynamicMessage dynamicMessage : dynamicMessages) {
+            if (dynamicMessage.getField(dynamicMessage.getDescriptorForType().findFieldByNumber(1)) != null) {
+                serializeObject(keyBuilder, dynamicMessage.getField(getFieldDescriptor(dynamicMessage, 1)), keyType, columnName);
+                serializeObject(valueBuilder, dynamicMessage.getField(getFieldDescriptor(dynamicMessage, 2)), valueType, columnName);
             }
-        });
-
-        if (parentBlockBuilder == null) {
-            return blockBuilder.getObject(0, Block.class);
         }
-        return null;
     }
 
     @Nullable
-    private Block serializeRow(BlockBuilder blockBuilder, @Nullable Object value, Type type, String columnName)
+    private SqlRow serializeRow(BlockBuilder blockBuilder, @Nullable Object value, Type type, String columnName)
     {
         if (value == null) {
             checkState(blockBuilder != null, "parent block builder is null");
@@ -303,7 +303,7 @@ public class ProtobufValueProvider
             Field field = fields.get(i);
             checkState(field.getName().isPresent(), "field name not found");
             FieldDescriptor fieldDescriptor = getFieldDescriptor(record, field.getName().get());
-            checkState(fieldDescriptor != null, format("Unknown Field %s", field.getName().get()));
+            checkState(fieldDescriptor != null, "Unknown Field %s", field.getName().get());
             serializeObject(
                     fieldBuilders.get(i),
                     record.getField(fieldDescriptor),

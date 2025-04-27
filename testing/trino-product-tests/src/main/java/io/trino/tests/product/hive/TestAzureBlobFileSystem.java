@@ -14,6 +14,8 @@
 package io.trino.tests.product.hive;
 
 import com.google.common.collect.ImmutableList;
+import com.google.inject.Inject;
+import com.google.inject.name.Named;
 import io.trino.tempto.AfterMethodWithContext;
 import io.trino.tempto.BeforeMethodWithContext;
 import io.trino.tempto.ProductTest;
@@ -24,6 +26,7 @@ import org.testng.annotations.Test;
 import java.util.List;
 
 import static io.trino.tempto.assertions.QueryAssert.Row.row;
+import static io.trino.testing.SystemEnvironmentUtils.requireEnv;
 import static io.trino.testing.TestingNames.randomNameSuffix;
 import static io.trino.tests.product.TestGroups.AZURE;
 import static io.trino.tests.product.utils.HadoopTestUtils.RETRYABLE_FAILURES_ISSUES;
@@ -31,20 +34,22 @@ import static io.trino.tests.product.utils.HadoopTestUtils.RETRYABLE_FAILURES_MA
 import static io.trino.tests.product.utils.QueryExecutors.onHive;
 import static io.trino.tests.product.utils.QueryExecutors.onTrino;
 import static java.lang.String.format;
-import static java.util.Objects.requireNonNull;
 import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestAzureBlobFileSystem
         extends ProductTest
 {
+    @Inject
+    @Named("databases.trino.abfs_schema")
+    private String schema;
     private String schemaLocation;
 
     @BeforeMethodWithContext
     public void setUp()
     {
-        String container = requireNonNull(System.getenv("ABFS_CONTAINER"), "Environment variable not set: ABFS_CONTAINER");
-        String account = requireNonNull(System.getenv("ABFS_ACCOUNT"), "Environment variable not set: ABFS_ACCOUNT");
-        schemaLocation = format("abfs://%s@%s.dfs.core.windows.net/%s", container, account, "test_" + randomNameSuffix());
+        String container = requireEnv("ABFS_CONTAINER");
+        String account = requireEnv("ABFS_ACCOUNT");
+        schemaLocation = format("abfs://%s@%s.dfs.core.windows.net/%s", container, account, schema);
 
         onHive().executeQuery("dfs -rm -f -r " + schemaLocation);
         onHive().executeQuery("dfs -mkdir -p " + schemaLocation);

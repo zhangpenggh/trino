@@ -12,6 +12,7 @@ be quoted (using double quotes) in order to be used as an identifier.
 | `ALTER`             | reserved | reserved |
 | `AND`               | reserved | reserved |
 | `AS`                | reserved | reserved |
+| `AUTO`              |          |          |
 | `BETWEEN`           | reserved | reserved |
 | `BY`                | reserved | reserved |
 | `CASE`              | reserved | reserved |
@@ -37,7 +38,6 @@ be quoted (using double quotes) in order to be used as an identifier.
 | `END`               | reserved | reserved |
 | `ESCAPE`            | reserved | reserved |
 | `EXCEPT`            | reserved | reserved |
-| `EXECUTE`           | reserved | reserved |
 | `EXISTS`            | reserved | reserved |
 | `EXTRACT`           | reserved | reserved |
 | `FALSE`             | reserved | reserved |

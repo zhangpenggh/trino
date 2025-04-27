@@ -29,15 +29,16 @@ import io.trino.operator.project.PageProcessor;
 import io.trino.spi.Page;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.connector.SourcePage;
 import io.trino.spi.security.ConnectorIdentity;
 import io.trino.spi.type.Decimals;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeId;
 import io.trino.sql.relational.CallExpression;
 import io.trino.sql.relational.RowExpression;
-import io.trino.sql.tree.QualifiedName;
 import io.trino.testing.TestingSession;
 import io.trino.type.JsonPath2016Type;
+import org.junit.jupiter.api.Test;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
 import org.openjdk.jmh.annotations.Fork;
@@ -49,7 +50,6 @@ import org.openjdk.jmh.annotations.Scope;
 import org.openjdk.jmh.annotations.Setup;
 import org.openjdk.jmh.annotations.State;
 import org.openjdk.jmh.annotations.Warmup;
-import org.testng.annotations.Test;
 
 import java.util.List;
 import java.util.Optional;
@@ -93,7 +93,7 @@ public class BenchmarkJsonPathBinaryOperators
                         FULL_CONNECTOR_SESSION,
                         new DriverYieldSignal(),
                         newSimpleAggregatedMemoryContext().newLocalMemoryContext(PageProcessor.class.getSimpleName()),
-                        data.getPageConstantTypes()));
+                        SourcePage.create(data.getPageConstantTypes())));
     }
 
     @Benchmark
@@ -105,7 +105,7 @@ public class BenchmarkJsonPathBinaryOperators
                         FULL_CONNECTOR_SESSION,
                         new DriverYieldSignal(),
                         newSimpleAggregatedMemoryContext().newLocalMemoryContext(PageProcessor.class.getSimpleName()),
-                        data.getPageVaryingTypes()));
+                        SourcePage.create(data.getPageVaryingTypes())));
     }
 
     @Benchmark
@@ -117,7 +117,7 @@ public class BenchmarkJsonPathBinaryOperators
                         FULL_CONNECTOR_SESSION,
                         new DriverYieldSignal(),
                         newSimpleAggregatedMemoryContext().newLocalMemoryContext(PageProcessor.class.getSimpleName()),
-                        data.getPageMultipleVaryingTypes()));
+                        SourcePage.create(data.getPageMultipleVaryingTypes())));
     }
 
     @SuppressWarnings("FieldMayBeFinal")
@@ -150,7 +150,7 @@ public class BenchmarkJsonPathBinaryOperators
                     Optional.empty());
             List<RowExpression> jsonValueProjection = ImmutableList.of(new CallExpression(
                     functionResolution.resolveFunction(
-                            QualifiedName.of(JSON_VALUE_FUNCTION_NAME),
+                            JSON_VALUE_FUNCTION_NAME,
                             fromTypes(ImmutableList.of(
                                     JSON_2016,
                                     jsonPath2016Type,
@@ -161,7 +161,7 @@ public class BenchmarkJsonPathBinaryOperators
                                     VARCHAR))),
                     ImmutableList.of(
                             new CallExpression(
-                                    functionResolution.resolveFunction(QualifiedName.of(VARCHAR_TO_JSON), fromTypes(VARCHAR, BOOLEAN)),
+                                    functionResolution.resolveFunction(VARCHAR_TO_JSON, fromTypes(VARCHAR, BOOLEAN)),
                                     ImmutableList.of(field(0, VARCHAR), constant(true, BOOLEAN))),
                             constant(new IrJsonPath(false, path), jsonPath2016Type),
                             constantNull(JSON_NO_PARAMETERS_ROW_TYPE),
@@ -180,9 +180,9 @@ public class BenchmarkJsonPathBinaryOperators
             BlockBuilder blockBuilder = VARCHAR.createBlockBuilder(null, positionCount);
             for (int position = 0; position < positionCount; position++) {
                 SliceOutput slice = new DynamicSliceOutput(20);
-                slice.appendBytes(("{\"first\" : ").getBytes(UTF_8))
+                slice.appendBytes("{\"first\" : ".getBytes(UTF_8))
                         .appendBytes(format("%e", (double) position % 100).getBytes(UTF_8)) // real
-                        .appendBytes((", \"second\" : ").getBytes(UTF_8))
+                        .appendBytes(", \"second\" : ".getBytes(UTF_8))
                         .appendBytes(format("%s", position % 10).getBytes(UTF_8)) // int
                         .appendByte('}');
                 VARCHAR.writeSlice(blockBuilder, slice.slice());
@@ -195,7 +195,7 @@ public class BenchmarkJsonPathBinaryOperators
             BlockBuilder blockBuilder = VARCHAR.createBlockBuilder(null, positionCount);
             for (int position = 0; position < positionCount; position++) {
                 SliceOutput slice = new DynamicSliceOutput(20);
-                slice.appendBytes(("{\"first\" : ").getBytes(UTF_8));
+                slice.appendBytes("{\"first\" : ".getBytes(UTF_8));
                 if (position % 3 == 0) {
                     slice.appendBytes(format("%e", (double) position % 100).getBytes(UTF_8)); // real
                 }
@@ -205,7 +205,7 @@ public class BenchmarkJsonPathBinaryOperators
                 else {
                     slice.appendBytes(format("%s", position % 100).getBytes(UTF_8)); // int
                 }
-                slice.appendBytes((", \"second\" : ").getBytes(UTF_8))
+                slice.appendBytes(", \"second\" : ".getBytes(UTF_8))
                         .appendBytes(format("%s", position % 10).getBytes(UTF_8)) // int
                         .appendByte('}');
                 VARCHAR.writeSlice(blockBuilder, slice.slice());
@@ -219,7 +219,7 @@ public class BenchmarkJsonPathBinaryOperators
             for (int position = 0; position < positionCount; position++) {
                 SliceOutput slice = new DynamicSliceOutput(20);
 
-                slice.appendBytes(("{\"first\" : ").getBytes(UTF_8));
+                slice.appendBytes("{\"first\" : ".getBytes(UTF_8));
                 if (position % 3 == 0) {
                     slice.appendBytes(format("%e", (double) position % 100).getBytes(UTF_8)); // real
                 }
@@ -230,7 +230,7 @@ public class BenchmarkJsonPathBinaryOperators
                     slice.appendBytes(format("%s", position % 100).getBytes(UTF_8)); // int
                 }
 
-                slice.appendBytes((", \"second\" : ").getBytes(UTF_8));
+                slice.appendBytes(", \"second\" : ".getBytes(UTF_8));
                 if (position % 4 == 0) {
                     slice.appendBytes(format("%e", (double) position % 10).getBytes(UTF_8)); // real
                 }

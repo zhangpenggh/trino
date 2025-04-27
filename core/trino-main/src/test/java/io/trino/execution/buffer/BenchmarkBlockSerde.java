@@ -23,13 +23,13 @@ import io.trino.spi.Page;
 import io.trino.spi.PageBuilder;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.block.RowBlockBuilder;
-import io.trino.spi.block.TestingBlockEncodingSerde;
 import io.trino.spi.type.DecimalType;
 import io.trino.spi.type.Int128;
 import io.trino.spi.type.RowType;
 import io.trino.spi.type.SqlDecimal;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.VarcharType;
+import org.junit.jupiter.api.Test;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
 import org.openjdk.jmh.annotations.Fork;
@@ -41,7 +41,6 @@ import org.openjdk.jmh.annotations.Param;
 import org.openjdk.jmh.annotations.Setup;
 import org.openjdk.jmh.annotations.State;
 import org.openjdk.jmh.annotations.Warmup;
-import org.testng.annotations.Test;
 
 import java.util.AbstractMap.SimpleEntry;
 import java.util.ArrayList;
@@ -57,6 +56,7 @@ import static io.airlift.slice.Slices.utf8Slice;
 import static io.trino.execution.buffer.BenchmarkDataGenerator.createValues;
 import static io.trino.execution.buffer.PagesSerdeUtil.readPages;
 import static io.trino.execution.buffer.PagesSerdeUtil.writePages;
+import static io.trino.execution.buffer.TestingPagesSerdes.createTestingPagesSerdeFactory;
 import static io.trino.jmh.Benchmarks.benchmark;
 import static io.trino.plugin.tpch.TpchTables.getTablePages;
 import static io.trino.spi.type.BigintType.BIGINT;
@@ -206,7 +206,7 @@ public class BenchmarkBlockSerde
 
         public void setup(Type type, Function<Random, ?> valueGenerator)
         {
-            PagesSerdeFactory serdeFactory = new PagesSerdeFactory(new TestingBlockEncodingSerde(), false);
+            PagesSerdeFactory serdeFactory = createTestingPagesSerdeFactory();
             PageSerializer serializer = serdeFactory.createSerializer(Optional.empty());
             PageDeserializer deserializer = serdeFactory.createDeserializer(Optional.empty());
             PageBuilder pageBuilder = new PageBuilder(ImmutableList.of(type));
@@ -403,7 +403,7 @@ public class BenchmarkBlockSerde
         @Setup
         public void setup()
         {
-            PagesSerdeFactory serdeFactory = new PagesSerdeFactory(new TestingBlockEncodingSerde(), false);
+            PagesSerdeFactory serdeFactory = createTestingPagesSerdeFactory();
             PageSerializer serializer = serdeFactory.createSerializer(Optional.empty());
             PageDeserializer deserializer = serdeFactory.createDeserializer(Optional.empty());
 
@@ -422,7 +422,7 @@ public class BenchmarkBlockSerde
         public void setup()
         {
             RowType type = RowType.anonymous(ImmutableList.of(BIGINT));
-            super.setup(type, (random -> BenchmarkDataGenerator.randomRow(type.getTypeParameters(), random)));
+            super.setup(type, random -> BenchmarkDataGenerator.randomRow(type.getTypeParameters(), random));
         }
     }
 

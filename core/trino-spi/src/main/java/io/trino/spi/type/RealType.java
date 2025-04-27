@@ -20,6 +20,7 @@ import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.function.FlatFixed;
 import io.trino.spi.function.FlatFixedOffset;
+import io.trino.spi.function.FlatVariableOffset;
 import io.trino.spi.function.FlatVariableWidth;
 import io.trino.spi.function.IsNull;
 import io.trino.spi.function.ScalarOperator;
@@ -34,7 +35,7 @@ import static io.trino.spi.function.OperatorType.COMPARISON_UNORDERED_FIRST;
 import static io.trino.spi.function.OperatorType.COMPARISON_UNORDERED_LAST;
 import static io.trino.spi.function.OperatorType.EQUAL;
 import static io.trino.spi.function.OperatorType.HASH_CODE;
-import static io.trino.spi.function.OperatorType.IS_DISTINCT_FROM;
+import static io.trino.spi.function.OperatorType.IDENTICAL;
 import static io.trino.spi.function.OperatorType.LESS_THAN;
 import static io.trino.spi.function.OperatorType.LESS_THAN_OR_EQUAL;
 import static io.trino.spi.function.OperatorType.READ_VALUE;
@@ -76,7 +77,7 @@ public final class RealType
 
     public float getFloat(Block block, int position)
     {
-        return intBitsToFloat(block.getInt(position, 0));
+        return intBitsToFloat(getInt(block, position));
     }
 
     @Override
@@ -121,7 +122,8 @@ public final class RealType
     private static long readFlat(
             @FlatFixed byte[] fixedSizeSlice,
             @FlatFixedOffset int fixedSizeOffset,
-            @FlatVariableWidth byte[] unusedVariableSizeSlice)
+            @FlatVariableWidth byte[] unusedVariableSizeSlice,
+            @FlatVariableOffset int unusedVariableSizeOffset)
     {
         return (int) INT_HANDLE.get(fixedSizeSlice, fixedSizeOffset);
     }
@@ -137,6 +139,7 @@ public final class RealType
         INT_HANDLE.set(fixedSizeSlice, fixedSizeOffset, (int) value);
     }
 
+    @SuppressWarnings("FloatingPointEquality")
     @ScalarOperator(EQUAL)
     private static boolean equalOperator(long left, long right)
     {
@@ -163,25 +166,26 @@ public final class RealType
         return XxHash64.hash(floatToIntBits(realValue));
     }
 
-    @ScalarOperator(IS_DISTINCT_FROM)
-    private static boolean distinctFromOperator(long left, @IsNull boolean leftNull, long right, @IsNull boolean rightNull)
+    @SuppressWarnings("FloatingPointEquality")
+    @ScalarOperator(IDENTICAL)
+    private static boolean identical(long left, @IsNull boolean leftNull, long right, @IsNull boolean rightNull)
     {
         if (leftNull || rightNull) {
-            return leftNull != rightNull;
+            return leftNull == rightNull;
         }
 
         float leftFloat = intBitsToFloat((int) left);
         float rightFloat = intBitsToFloat((int) right);
         if (Float.isNaN(leftFloat) && Float.isNaN(rightFloat)) {
-            return false;
+            return true;
         }
-        return leftFloat != rightFloat;
+        return leftFloat == rightFloat;
     }
 
     @ScalarOperator(COMPARISON_UNORDERED_LAST)
     private static long comparisonUnorderedLastOperator(long left, long right)
     {
-        return Float.compare(intBitsToFloat((int) left), intBitsToFloat((int) right));
+        return compare(intBitsToFloat((int) left), intBitsToFloat((int) right));
     }
 
     @ScalarOperator(COMPARISON_UNORDERED_FIRST)
@@ -199,7 +203,7 @@ public final class RealType
         if (Float.isNaN(right)) {
             return 1;
         }
-        return Float.compare(left, right);
+        return compare(left, right);
     }
 
     @ScalarOperator(LESS_THAN)
@@ -212,5 +216,14 @@ public final class RealType
     private static boolean lessThanOrEqualOperator(long left, long right)
     {
         return intBitsToFloat((int) left) <= intBitsToFloat((int) right);
+    }
+
+    private static int compare(float left, float right)
+    {
+        if (left == right) { // Float.compare considers 0.0 and -0.0 different from each other
+            return 0;
+        }
+
+        return Float.compare(left, right);
     }
 }

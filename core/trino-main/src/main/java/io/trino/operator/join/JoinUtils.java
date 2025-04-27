@@ -80,8 +80,8 @@ public final class JoinUtils
     public static boolean isBuildSideReplicated(PlanNode node)
     {
         checkArgument(node instanceof JoinNode || node instanceof SemiJoinNode);
-        if (node instanceof JoinNode) {
-            return PlanNodeSearcher.searchFrom(((JoinNode) node).getRight())
+        if (node instanceof JoinNode joinNode) {
+            return PlanNodeSearcher.searchFrom(joinNode.getRight())
                     .recurseOnlyWhen(planNode -> planNode instanceof ProjectNode ||
                                     isLocalRepartitionExchange(planNode) ||
                                     isLocalGatherExchange(planNode))  // used in cross join case
@@ -97,7 +97,7 @@ public final class JoinUtils
 
     public static Map<DynamicFilterId, Symbol> getJoinDynamicFilters(JoinNode joinNode)
     {
-        List<DynamicFilterSourceNode> dynamicFilterSourceNodes = PlanNodeSearcher.searchFrom(joinNode.getRight())
+        List<PlanNode> dynamicFilterSourceNodes = PlanNodeSearcher.searchFrom(joinNode.getRight())
                 .where(DynamicFilterSourceNode.class::isInstance)
                 .recurseOnlyWhen(node -> node instanceof ExchangeNode || node instanceof ProjectNode)
                 .findAll();
@@ -110,12 +110,12 @@ public final class JoinUtils
                 dynamicFilters.isEmpty(),
                 "Dynamic filters %s present in a join with a DynamicFilterSourceNode on it's build side", dynamicFilters);
         verify(dynamicFilterSourceNodes.size() == 1, "Expected only 1 dynamic filter source node");
-        return dynamicFilterSourceNodes.get(0).getDynamicFilters();
+        return ((DynamicFilterSourceNode) getOnlyElement(dynamicFilterSourceNodes)).getDynamicFilters();
     }
 
     public static Optional<DynamicFilterId> getSemiJoinDynamicFilterId(SemiJoinNode semiJoinNode)
     {
-        List<DynamicFilterSourceNode> dynamicFilterSourceNodes = PlanNodeSearcher.searchFrom(semiJoinNode.getFilteringSource())
+        List<PlanNode> dynamicFilterSourceNodes = PlanNodeSearcher.searchFrom(semiJoinNode.getFilteringSource())
                 .where(DynamicFilterSourceNode.class::isInstance)
                 .recurseOnlyWhen(node -> node instanceof ExchangeNode || node instanceof ProjectNode)
                 .findAll();
@@ -128,7 +128,7 @@ public final class JoinUtils
                 dynamicFilterId.isEmpty(),
                 "Dynamic filter %s present in a semi join with a DynamicFilterSourceNode on it's filtering source side", dynamicFilterId);
         verify(dynamicFilterSourceNodes.size() == 1, "Expected only 1 dynamic filter source node");
-        return Optional.of(getOnlyElement(dynamicFilterSourceNodes.get(0).getDynamicFilters().keySet()));
+        return Optional.of(getOnlyElement(((DynamicFilterSourceNode) getOnlyElement(dynamicFilterSourceNodes)).getDynamicFilters().keySet()));
     }
 
     private static boolean isRemoteReplicatedExchange(PlanNode node)

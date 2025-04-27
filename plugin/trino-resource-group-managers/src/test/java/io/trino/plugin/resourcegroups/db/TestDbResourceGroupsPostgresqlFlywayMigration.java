@@ -15,9 +15,7 @@ package io.trino.plugin.resourcegroups.db;
 
 import org.testcontainers.containers.JdbcDatabaseContainer;
 import org.testcontainers.containers.PostgreSQLContainer;
-import org.testng.annotations.Test;
 
-@Test(singleThreaded = true)
 public class TestDbResourceGroupsPostgresqlFlywayMigration
         extends BaseTestDbResourceGroupsFlywayMigration
 {
@@ -29,11 +27,13 @@ public class TestDbResourceGroupsPostgresqlFlywayMigration
         return container;
     }
 
-    @Test
-    public void forceTestNgToRespectSingleThreaded()
+    @Override
+    protected final boolean tableExists(String tableName)
     {
-        // TODO: Remove after updating TestNG to 7.4.0+ (https://github.com/trinodb/trino/issues/8571)
-        // TestNG doesn't enforce @Test(singleThreaded = true) when tests are defined in base class. According to
-        // https://github.com/cbeust/testng/issues/2361#issuecomment-688393166 a workaround it to add a dummy test to the leaf test class.
+        return jdbi.withHandle(handle ->
+                handle.createQuery("SELECT COUNT(*) FROM information_schema.tables WHERE table_name = :tableName")
+                        .bind("tableName", tableName)
+                        .mapTo(Long.class)
+                        .one()) > 0;
     }
 }

@@ -24,6 +24,7 @@ import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.block.PageBuilderStatus;
 import io.trino.spi.connector.ConnectorPageSource;
 import io.trino.spi.connector.ConnectorSession;
+import io.trino.spi.connector.SourcePage;
 
 import java.util.Arrays;
 import java.util.Iterator;
@@ -98,7 +99,7 @@ public class PinotBrokerPageSource
     }
 
     @Override
-    public Page getNextPage()
+    public SourcePage getNextSourcePage()
     {
         if (finished) {
             return null;
@@ -115,7 +116,7 @@ public class PinotBrokerPageSource
             // The reason for the limit is that Pinot brokers allocate memory based on the limit size.
             // This is a temporary workaround to address https://github.com/apache/pinot/issues/7110
             if (currentRowCount.incrementAndGet() > limitForBrokerQueries) {
-                throw new PinotException(PINOT_EXCEPTION, Optional.of(query.getQuery()), format("Broker query returned '%s' rows, maximum allowed is '%s' rows.", currentRowCount.get(), limitForBrokerQueries));
+                throw new PinotException(PINOT_EXCEPTION, Optional.of(query.query()), format("Broker query returned '%s' rows, maximum allowed is '%s' rows.", currentRowCount.get(), limitForBrokerQueries));
             }
             BrokerResultRow row = resultIterator.next();
             for (int i = 0; i < decoders.size(); i++) {
@@ -133,9 +134,9 @@ public class PinotBrokerPageSource
             columnBuilders[i] = columnBuilders[i].newBlockBuilderLike(null);
         }
         if (decoders.isEmpty()) {
-            return new Page(rowCount);
+            return SourcePage.create(rowCount);
         }
-        return new Page(blocks);
+        return SourcePage.create(new Page(rowCount, blocks));
     }
 
     @Override

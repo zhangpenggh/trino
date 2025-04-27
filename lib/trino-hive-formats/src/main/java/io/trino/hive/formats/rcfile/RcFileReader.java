@@ -14,6 +14,7 @@
 package io.trino.hive.formats.rcfile;
 
 import com.google.common.collect.ImmutableMap;
+import com.google.errorprone.annotations.FormatMethod;
 import io.airlift.slice.BasicSliceInput;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
@@ -438,9 +439,7 @@ public class RcFileReader
         checkState(currentChunkRowCount > 0, "No more data");
 
         if (columnIndex >= columns.length) {
-            Type type = readColumns.get(columnIndex);
-            Block nullBlock = type.createBlockBuilder(null, 1, 0).appendNull().build();
-            return RunLengthEncodedBlock.create(nullBlock, currentChunkRowCount);
+            return RunLengthEncodedBlock.create(readColumns.get(columnIndex).createNullBlock(), currentChunkRowCount);
         }
 
         return columns[columnIndex].readBlock(rowGroupPosition, currentChunkRowCount);
@@ -456,7 +455,7 @@ public class RcFileReader
         try {
             close();
         }
-        catch (IOException ignored) {
+        catch (IOException _) {
         }
     }
 
@@ -468,6 +467,7 @@ public class RcFileReader
         return in.readSlice(length);
     }
 
+    @FormatMethod
     private void verify(boolean expression, String messageFormat, Object... args)
             throws FileCorruptionException
     {
@@ -476,12 +476,15 @@ public class RcFileReader
         }
     }
 
+    @FormatMethod
     private FileCorruptionException corrupt(String messageFormat, Object... args)
     {
         closeQuietly();
         return new FileCorruptionException(messageFormat, args);
     }
 
+    @SuppressWarnings("FormatStringAnnotation")
+    @FormatMethod
     private void validateWrite(Predicate<RcFileWriteValidation> test, String messageFormat, Object... args)
             throws FileCorruptionException
     {
@@ -633,7 +636,7 @@ public class RcFileReader
                 if (lastValueLength == -1) {
                     throw new FileCorruptionException("First column value length is negative");
                 }
-                runLength = (~valueLength) - 1;
+                runLength = ~valueLength - 1;
                 return lastValueLength;
             }
 

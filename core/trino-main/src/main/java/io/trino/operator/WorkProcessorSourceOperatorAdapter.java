@@ -24,6 +24,7 @@ import io.trino.sql.planner.plan.PlanNodeId;
 
 import java.util.ArrayDeque;
 import java.util.Deque;
+import java.util.Map;
 
 import static io.trino.operator.WorkProcessor.ProcessState.blocked;
 import static io.trino.operator.WorkProcessor.ProcessState.finished;
@@ -51,26 +52,13 @@ public class WorkProcessorSourceOperatorAdapter
     private long previousReadTimeNanos;
     private long previousDynamicFilterSplitsProcessed;
 
-    public interface AdapterWorkProcessorSourceOperatorFactory
-            extends WorkProcessorSourceOperatorFactory
-    {
-        default WorkProcessorSourceOperator createAdapterOperator(
-                OperatorContext operatorContext,
-                MemoryTrackingContext memoryTrackingContext,
-                DriverYieldSignal yieldSignal,
-                WorkProcessor<Split> splits)
-        {
-            return create(operatorContext, memoryTrackingContext, yieldSignal, splits);
-        }
-    }
-
-    public WorkProcessorSourceOperatorAdapter(OperatorContext operatorContext, AdapterWorkProcessorSourceOperatorFactory sourceOperatorFactory)
+    public WorkProcessorSourceOperatorAdapter(OperatorContext operatorContext, WorkProcessorSourceOperatorFactory sourceOperatorFactory)
     {
         this.operatorContext = requireNonNull(operatorContext, "operatorContext is null");
         this.sourceId = sourceOperatorFactory.getSourceId();
         this.splitBuffer = new SplitBuffer();
         this.sourceOperator = sourceOperatorFactory
-                .createAdapterOperator(
+                .create(
                         operatorContext,
                         new MemoryTrackingContext(
                                 operatorContext.aggregateUserMemoryContext(),
@@ -78,7 +66,6 @@ public class WorkProcessorSourceOperatorAdapter
                         operatorContext.getDriverContext().getYieldSignal(),
                         WorkProcessor.create(splitBuffer));
         this.pages = sourceOperator.getOutputPages()
-                .map(Page::getLoadedPage)
                 .withProcessStateMonitor(state -> updateOperatorStats())
                 .finishWhen(() -> operatorFinishing);
         operatorContext.setInfoSupplier(() -> sourceOperator.getOperatorInfo().orElse(null));
@@ -97,8 +84,8 @@ public class WorkProcessorSourceOperatorAdapter
             return;
         }
 
-        Object splitInfo = split.getInfo();
-        if (splitInfo != null) {
+        Map<String, String> splitInfo = split.getInfo();
+        if (!splitInfo.isEmpty()) {
             operatorContext.setInfoSupplier(Suppliers.ofInstance(new SplitOperatorInfo(split.getCatalogHandle(), splitInfo)));
         }
 

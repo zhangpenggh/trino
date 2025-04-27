@@ -52,6 +52,7 @@ public class DeltaLakeTableHandle
     private final TupleDomain<DeltaLakeColumnHandle> nonPartitionConstraint;
     private final Optional<WriteType> writeType;
     private final long readVersion;
+    private final boolean timeTravel;
 
     private final Optional<Set<DeltaLakeColumnHandle>> projectedColumns;
     // UPDATE only: The list of columns being updated
@@ -64,6 +65,7 @@ public class DeltaLakeTableHandle
 
     // OPTIMIZE only. Coordinator-only
     private final boolean recordScannedFiles;
+    private final boolean isOptimize;
     private final Optional<DataSize> maxScannedFileSize;
     // Used only for validation when config property delta.query-partition-filter-required is enabled.
     private final Set<DeltaLakeColumnHandle> constraintColumns;
@@ -83,7 +85,8 @@ public class DeltaLakeTableHandle
             @JsonProperty("updatedColumns") Optional<List<DeltaLakeColumnHandle>> updatedColumns,
             @JsonProperty("updateRowIdColumns") Optional<List<DeltaLakeColumnHandle>> updateRowIdColumns,
             @JsonProperty("analyzeHandle") Optional<AnalyzeHandle> analyzeHandle,
-            @JsonProperty("readVersion") long readVersion)
+            @JsonProperty("readVersion") long readVersion,
+            @JsonProperty("timeTravel") boolean timeTravel)
     {
         this(
                 schemaName,
@@ -101,8 +104,10 @@ public class DeltaLakeTableHandle
                 updateRowIdColumns,
                 analyzeHandle,
                 false,
+                false,
                 Optional.empty(),
-                readVersion);
+                readVersion,
+                timeTravel);
     }
 
     public DeltaLakeTableHandle(
@@ -121,8 +126,10 @@ public class DeltaLakeTableHandle
             Optional<List<DeltaLakeColumnHandle>> updateRowIdColumns,
             Optional<AnalyzeHandle> analyzeHandle,
             boolean recordScannedFiles,
+            boolean isOptimize,
             Optional<DataSize> maxScannedFileSize,
-            long readVersion)
+            long readVersion,
+            boolean timeTravel)
     {
         this.schemaName = requireNonNull(schemaName, "schemaName is null");
         this.tableName = requireNonNull(tableName, "tableName is null");
@@ -140,8 +147,10 @@ public class DeltaLakeTableHandle
         this.updateRowIdColumns = requireNonNull(updateRowIdColumns, "rowIdColumns is null");
         this.analyzeHandle = requireNonNull(analyzeHandle, "analyzeHandle is null");
         this.recordScannedFiles = recordScannedFiles;
+        this.isOptimize = isOptimize;
         this.maxScannedFileSize = requireNonNull(maxScannedFileSize, "maxScannedFileSize is null");
         this.readVersion = readVersion;
+        this.timeTravel = timeTravel;
         this.constraintColumns = ImmutableSet.copyOf(requireNonNull(constraintColumns, "constraintColumns is null"));
     }
 
@@ -163,8 +172,10 @@ public class DeltaLakeTableHandle
                 updateRowIdColumns,
                 analyzeHandle,
                 recordScannedFiles,
+                isOptimize,
                 maxScannedFileSize,
-                readVersion);
+                readVersion,
+                timeTravel);
     }
 
     public DeltaLakeTableHandle forOptimize(boolean recordScannedFiles, DataSize maxScannedFileSize)
@@ -185,8 +196,10 @@ public class DeltaLakeTableHandle
                 updateRowIdColumns,
                 analyzeHandle,
                 recordScannedFiles,
+                true,
                 Optional.of(maxScannedFileSize),
-                readVersion);
+                readVersion,
+                timeTravel);
     }
 
     @Override
@@ -298,6 +311,12 @@ public class DeltaLakeTableHandle
     }
 
     @JsonIgnore
+    public boolean isOptimize()
+    {
+        return isOptimize;
+    }
+
+    @JsonIgnore
     public Optional<DataSize> getMaxScannedFileSize()
     {
         return maxScannedFileSize;
@@ -313,6 +332,12 @@ public class DeltaLakeTableHandle
     public long getReadVersion()
     {
         return readVersion;
+    }
+
+    @JsonProperty
+    public boolean isTimeTravel()
+    {
+        return timeTravel;
     }
 
     @Override
@@ -346,8 +371,10 @@ public class DeltaLakeTableHandle
                 Objects.equals(updatedColumns, that.updatedColumns) &&
                 Objects.equals(updateRowIdColumns, that.updateRowIdColumns) &&
                 Objects.equals(analyzeHandle, that.analyzeHandle) &&
+                isOptimize == that.isOptimize &&
                 Objects.equals(maxScannedFileSize, that.maxScannedFileSize) &&
-                readVersion == that.readVersion;
+                readVersion == that.readVersion &&
+                timeTravel == that.timeTravel;
     }
 
     @Override
@@ -368,7 +395,9 @@ public class DeltaLakeTableHandle
                 updateRowIdColumns,
                 analyzeHandle,
                 recordScannedFiles,
+                isOptimize,
                 maxScannedFileSize,
-                readVersion);
+                readVersion,
+                timeTravel);
     }
 }

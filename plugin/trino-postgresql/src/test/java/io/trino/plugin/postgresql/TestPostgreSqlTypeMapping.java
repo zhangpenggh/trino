@@ -14,7 +14,6 @@
 package io.trino.plugin.postgresql;
 
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableMap;
 import io.trino.Session;
 import io.trino.plugin.jdbc.UnsupportedTypeHandling;
 import io.trino.spi.type.ArrayType;
@@ -25,7 +24,6 @@ import io.trino.spi.type.Type;
 import io.trino.sql.planner.plan.FilterNode;
 import io.trino.sql.planner.plan.TopNNode;
 import io.trino.testing.AbstractTestQueryFramework;
-import io.trino.testing.DataProviders;
 import io.trino.testing.QueryRunner;
 import io.trino.testing.TestingSession;
 import io.trino.testing.datatype.CreateAndInsertDataSetup;
@@ -39,20 +37,21 @@ import io.trino.testing.sql.JdbcSqlExecutor;
 import io.trino.testing.sql.TestTable;
 import io.trino.testing.sql.TrinoSqlExecutor;
 import org.intellij.lang.annotations.Language;
-import org.testng.annotations.BeforeClass;
-import org.testng.annotations.DataProvider;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.parallel.Execution;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
-import java.time.LocalTime;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
+import java.util.Map;
 import java.util.function.Function;
 
 import static com.google.common.base.Preconditions.checkState;
@@ -69,7 +68,6 @@ import static io.trino.plugin.jdbc.UnsupportedTypeHandling.IGNORE;
 import static io.trino.plugin.postgresql.PostgreSqlConfig.ArrayMapping.AS_ARRAY;
 import static io.trino.plugin.postgresql.PostgreSqlConfig.ArrayMapping.AS_JSON;
 import static io.trino.plugin.postgresql.PostgreSqlConfig.ArrayMapping.DISABLED;
-import static io.trino.plugin.postgresql.PostgreSqlQueryRunner.createPostgreSqlQueryRunner;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.spi.type.CharType.createCharType;
@@ -107,12 +105,14 @@ import static java.util.Collections.singletonList;
 import static java.util.stream.Collectors.toList;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
+import static org.junit.jupiter.api.parallel.ExecutionMode.CONCURRENT;
 
+@TestInstance(PER_CLASS)
+@Execution(CONCURRENT)
 public class TestPostgreSqlTypeMapping
         extends AbstractTestQueryFramework
 {
-    private static final LocalDate EPOCH_DAY = LocalDate.ofEpochDay(0);
-
     protected TestingPostgreSqlServer postgreSqlServer;
 
     private final LocalDateTime beforeEpoch = LocalDateTime.of(1958, 1, 1, 13, 18, 3, 123_000_000);
@@ -120,7 +120,7 @@ public class TestPostgreSqlTypeMapping
     private final LocalDateTime afterEpoch = LocalDateTime.of(2019, 3, 18, 10, 1, 17, 987_000_000);
 
     private final ZoneId jvmZone = ZoneId.systemDefault();
-    private final LocalDateTime timeGapInJvmZone1 = LocalDateTime.of(1970, 1, 1, 0, 13, 42);
+    private final LocalDateTime timeGapInJvmZone1 = LocalDateTime.of(1932, 4, 1, 0, 13, 42);
     private final LocalDateTime timeGapInJvmZone2 = LocalDateTime.of(2018, 4, 1, 2, 13, 55, 123_000_000);
     private final LocalDateTime timeDoubledInJvmZone = LocalDateTime.of(2018, 10, 28, 1, 33, 17, 456_000_000);
 
@@ -141,14 +141,12 @@ public class TestPostgreSqlTypeMapping
             throws Exception
     {
         postgreSqlServer = closeAfterClass(new TestingPostgreSqlServer());
-        return createPostgreSqlQueryRunner(
-                postgreSqlServer,
-                ImmutableMap.of(),
-                ImmutableMap.of("jdbc-types-mapped-to-varchar", "Tsrange, Inet" /* make sure that types are compared case insensitively */),
-                ImmutableList.of());
+        return PostgreSqlQueryRunner.builder(postgreSqlServer)
+                .addConnectorProperties(Map.of("jdbc-types-mapped-to-varchar", "Tsrange, Inet" /* make sure that types are compared case insensitively */))
+                .build();
     }
 
-    @BeforeClass
+    @BeforeAll
     public void setUp()
     {
         checkState(jvmZone.getId().equals("America/Bahia_Banderas"), "This test assumes certain JVM time zone");
@@ -626,8 +624,14 @@ public class TestPostgreSqlTypeMapping
         }
     }
 
-    @Test(dataProvider = "testDecimalExceedingPrecisionMaxProvider")
-    public void testDecimalExceedingPrecisionMaxWithSupportedValues(int typePrecision, int typeScale)
+    @Test
+    public void testDecimalExceedingPrecisionMaxWithSupportedValues()
+    {
+        testDecimalExceedingPrecisionMaxWithSupportedValues(40, 8);
+        testDecimalExceedingPrecisionMaxWithSupportedValues(50, 10);
+    }
+
+    private void testDecimalExceedingPrecisionMaxWithSupportedValues(int typePrecision, int typeScale)
     {
         JdbcSqlExecutor jdbcSqlExecutor = new JdbcSqlExecutor(postgreSqlServer.getJdbcUrl(), postgreSqlServer.getProperties());
 
@@ -677,15 +681,6 @@ public class TestPostgreSqlTypeMapping
                     "SELECT d_col FROM " + testTable.getName(),
                     "VALUES (12.01), (-12.01), (123), (-123), (1.12345678), (-1.12345678)");
         }
-    }
-
-    @DataProvider
-    public Object[][] testDecimalExceedingPrecisionMaxProvider()
-    {
-        return new Object[][] {
-                {40, 8},
-                {50, 10},
-        };
     }
 
     @Test
@@ -915,7 +910,7 @@ public class TestPostgreSqlTypeMapping
 
     private SqlDataTypeTest arrayDateTest(Function<String, String> arrayTypeFactory)
     {
-        LocalDate dateOfLocalTimeChangeForwardAtMidnightInJvmZone = LocalDate.of(1970, 1, 1);
+        LocalDate dateOfLocalTimeChangeForwardAtMidnightInJvmZone = LocalDate.of(1932, 4, 1);
         checkIsGap(jvmZone, dateOfLocalTimeChangeForwardAtMidnightInJvmZone.atStartOfDay());
 
         LocalDate dateOfLocalTimeChangeForwardAtMidnightInSomeZone = LocalDate.of(1983, 4, 1);
@@ -1070,8 +1065,18 @@ public class TestPostgreSqlTypeMapping
                 valuesList -> valuesList == null ? null : valuesList.stream().map(elementType::toTrinoQueryResult).collect(toList()));
     }
 
-    @Test(dataProvider = "sessionZonesDataProvider")
-    public void testDate(ZoneId sessionZone)
+    @Test
+    public void testDate()
+    {
+        testDate(UTC);
+        testDate(jvmZone);
+        // using two non-JVM zones so that we don't need to worry what Postgres system zone is
+        testDate(vilnius);
+        testDate(kathmandu);
+        testDate(TestingSession.DEFAULT_TIME_ZONE_KEY.getZoneId());
+    }
+
+    private void testDate(ZoneId sessionZone)
     {
         Session session = Session.builder(getSession())
                 .setTimeZoneKey(TimeZoneKey.getTimeZoneKey(sessionZone.getId()))
@@ -1152,12 +1157,19 @@ public class TestPostgreSqlTypeMapping
     /**
      * @see #testTimeCoercion
      */
-    @Test(dataProvider = "sessionZonesDataProvider")
-    public void testTime(ZoneId sessionZone)
+    @Test
+    public void testTime()
     {
-        LocalTime timeGapInJvmZone = LocalTime.of(0, 12, 34, 567_000_000);
-        checkIsGap(jvmZone, timeGapInJvmZone.atDate(EPOCH_DAY));
+        testTime(UTC);
+        testTime(jvmZone);
+        // using two non-JVM zones so that we don't need to worry what Postgres system zone is
+        testTime(vilnius);
+        testTime(kathmandu);
+        testTime(TestingSession.DEFAULT_TIME_ZONE_KEY.getZoneId());
+    }
 
+    private void testTime(ZoneId sessionZone)
+    {
         Session session = Session.builder(getSession())
                 .setTimeZoneKey(TimeZoneKey.getTimeZoneKey(sessionZone.getId()))
                 .build();
@@ -1324,8 +1336,18 @@ public class TestPostgreSqlTypeMapping
     /**
      * @see #testTimestampCoercion
      */
-    @Test(dataProvider = "sessionZonesDataProvider")
-    public void testTimestamp(ZoneId sessionZone)
+    @Test
+    public void testTimestamp()
+    {
+        testTimestamp(UTC);
+        testTimestamp(jvmZone);
+        // using two non-JVM zones so that we don't need to worry what Postgres system zone is
+        testTimestamp(vilnius);
+        testTimestamp(kathmandu);
+        testTimestamp(TestingSession.DEFAULT_TIME_ZONE_KEY.getZoneId());
+    }
+
+    private void testTimestamp(ZoneId sessionZone)
     {
         // no need to test gap for multiple precisions as both Trino and PostgreSql JDBC
         // uses same representation for all precisions 1-6
@@ -1425,8 +1447,18 @@ public class TestPostgreSqlTypeMapping
                 .execute(getQueryRunner(), trinoCreateAndInsert("test_timestamp_coercion"));
     }
 
-    @Test(dataProvider = "sessionZonesDataProvider")
-    public void testArrayTimestamp(ZoneId sessionZone)
+    @Test
+    public void testArrayTimestamp()
+    {
+        testArrayTimestamp(UTC);
+        testArrayTimestamp(jvmZone);
+        // using two non-JVM zones so that we don't need to worry what Postgres system zone is
+        testArrayTimestamp(vilnius);
+        testArrayTimestamp(kathmandu);
+        testArrayTimestamp(TestingSession.DEFAULT_TIME_ZONE_KEY.getZoneId());
+    }
+
+    private void testArrayTimestamp(ZoneId sessionZone)
     {
         // no need to test gap for multiple precisions as both Trino and PostgreSql JDBC
         // uses same representation for all precisions 1-6
@@ -1475,24 +1507,17 @@ public class TestPostgreSqlTypeMapping
                 .execute(getQueryRunner(), session, postgresCreateAndInsert("test_array_timestamp"));
     }
 
-    @DataProvider
-    public Object[][] sessionZonesDataProvider()
-    {
-        return new Object[][] {
-                {UTC},
-                {jvmZone},
-                // using two non-JVM zones so that we don't need to worry what Postgres system zone is
-                {vilnius},
-                {kathmandu},
-                {TestingSession.DEFAULT_TIME_ZONE_KEY.getZoneId()},
-        };
-    }
-
     /**
      * @see #testTimestampWithTimeZoneCoercion
      */
-    @Test(dataProvider = "trueFalse", dataProviderClass = DataProviders.class)
-    public void testTimestampWithTimeZone(boolean insertWithTrino)
+    @Test
+    public void testTimestampWithTimeZone()
+    {
+        testTimestampWithTimeZone(true);
+        testTimestampWithTimeZone(false);
+    }
+
+    private void testTimestampWithTimeZone(boolean insertWithTrino)
     {
         DataTypeTest tests = DataTypeTest.create(true);
         for (int precision : List.of(3, 6)) {
@@ -1604,17 +1629,21 @@ public class TestPostgreSqlTypeMapping
                 .execute(getQueryRunner(), trinoCreateAndInsert("test_timestamp_tz_coercion"));
     }
 
-    @Test(dataProvider = "trueFalse", dataProviderClass = DataProviders.class)
-    public void testArrayTimestampWithTimeZone(boolean insertWithTrino)
+    @Test
+    public void testArrayTimestampWithTimeZone()
+    {
+        testArrayTimestampWithTimeZone(true);
+        testArrayTimestampWithTimeZone(false);
+    }
+
+    private void testArrayTimestampWithTimeZone(boolean insertWithTrino)
     {
         DataTypeTest tests = DataTypeTest.create();
         for (int precision : List.of(3, 6)) {
             // test all standard cases with precision 3 and 6 to make sure the long and short TIMESTAMP WITH TIME ZONE
             // is gap friendly.
             DataType<List<ZonedDateTime>> dataType = arrayOfTimestampWithTimeZoneDataType(precision, insertWithTrino);
-
-            tests.addRoundTrip(dataType, asList(epoch.atZone(UTC), epoch.atZone(kathmandu)));
-            tests.addRoundTrip(dataType, asList(beforeEpoch.atZone(kathmandu), beforeEpoch.atZone(UTC)));
+            tests.addRoundTrip(dataType, asList(beforeEpoch.atZone(jvmZone), beforeEpoch.atZone(UTC)));
             tests.addRoundTrip(dataType, asList(afterEpoch.atZone(UTC), afterEpoch.atZone(kathmandu)));
             tests.addRoundTrip(dataType, asList(timeDoubledInJvmZone.atZone(UTC)));
             tests.addRoundTrip(dataType, asList(timeDoubledInJvmZone.atZone(kathmandu)));
@@ -1687,7 +1716,7 @@ public class TestPostgreSqlTypeMapping
     @Test
     public void testHstore()
     {
-        Type mapOfVarcharToVarchar = getQueryRunner().getTypeManager().getType(mapType(VARCHAR.getTypeSignature(), VARCHAR.getTypeSignature()));
+        Type mapOfVarcharToVarchar = getQueryRunner().getPlannerContext().getTypeManager().getType(mapType(VARCHAR.getTypeSignature(), VARCHAR.getTypeSignature()));
 
         SqlDataTypeTest.create()
                 .addRoundTrip("hstore", "NULL", mapOfVarcharToVarchar, "CAST(NULL AS MAP(VARCHAR, VARCHAR))")
@@ -1717,6 +1746,58 @@ public class TestPostgreSqlTypeMapping
                 .execute(getQueryRunner(), postgresCreateAndInsert("postgresql_test_uuid"))
                 .execute(getQueryRunner(), trinoCreateAsSelect("trino_test_uuid"))
                 .execute(getQueryRunner(), trinoCreateAndInsert("trino_test_uuid"));
+    }
+
+    @Test
+    public void testArrayUuid()
+    {
+        Session session = sessionWithArrayAsArray();
+
+        SqlDataTypeTest.create()
+                .addRoundTrip("uuid[]", "NULL", new ArrayType(UUID), "CAST(NULL AS ARRAY(UUID))")
+                .addRoundTrip("uuid[]", "ARRAY[]::uuid[]", new ArrayType(UUID), "CAST(ARRAY[] AS ARRAY(UUID))")
+
+                .addRoundTrip("uuid[]", "ARRAY[UUID 'a0ee-bc99-9c0b-4ef8-bb6d-6bb9-bd38-0a11', UUID '00000000-0000-0000-0000-000000000000']", new ArrayType(UUID), "ARRAY[UUID 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11', UUID '00000000-0000-0000-0000-000000000000']")
+                .addRoundTrip("uuid[]", "ARRAY[UUID 'a0eebc999c0b4ef8bb6d6bb9bd380a11', UUID '00000000-0000-0000-0000-000000000000']", new ArrayType(UUID), "ARRAY[UUID 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11', UUID '00000000-0000-0000-0000-000000000000']")
+                .addRoundTrip("uuid[]", "ARRAY[UUID '{a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11}', UUID '00000000-0000-0000-0000-000000000000']", new ArrayType(UUID), "ARRAY[UUID 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11', UUID '00000000-0000-0000-0000-000000000000']")
+                .addRoundTrip("uuid[]", "ARRAY[UUID '{a0eebc99-9c0b4ef8-bb6d6bb9-bd380a11}', UUID '00000000-0000-0000-0000-000000000000']", new ArrayType(UUID), "ARRAY[UUID 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11', UUID '00000000-0000-0000-0000-000000000000']")
+
+                .addRoundTrip("uuid[]", "ARRAY[UUID '00000000-0000-0000-0000-000000000000', UUID '12151fd2-7586-11e9-8f9e-2a86e4085a59']", new ArrayType(UUID), "ARRAY[UUID '00000000-0000-0000-0000-000000000000', UUID '12151fd2-7586-11e9-8f9e-2a86e4085a59']")
+                .addRoundTrip("uuid[]", "ARRAY[UUID '123e4567-e89b-12d3-a456-426655440000', UUID 'c9c0b3f4-3e7e-4e1a-83eb-bb3e1a2c3c7e']", new ArrayType(UUID), "ARRAY[UUID '123e4567-e89b-12d3-a456-426655440000', UUID 'c9c0b3f4-3e7e-4e1a-83eb-bb3e1a2c3c7e']")
+                .addRoundTrip("uuid[]", "ARRAY[UUID 'f47ac10b-58cc-4372-a567-0e02b2c3d479', UUID '3c6f4b8e-7a3e-4d7c-bc8e-3a0fbc1c6ad1']", new ArrayType(UUID), "ARRAY[UUID 'f47ac10b-58cc-4372-a567-0e02b2c3d479', UUID '3c6f4b8e-7a3e-4d7c-bc8e-3a0fbc1c6ad1']")
+                .execute(getQueryRunner(), session, postgresCreateAndInsert("postgresql_test_array_uuid_or_empty_or_nulls"));
+
+        SqlDataTypeTest.create()
+                .addRoundTrip("ARRAY(uuid)", "NULL", new ArrayType(UUID), "CAST(NULL AS ARRAY(UUID))")
+                .addRoundTrip("ARRAY(uuid)", "ARRAY[]", new ArrayType(UUID), "CAST(ARRAY[] AS ARRAY(UUID))")
+
+                .addRoundTrip("ARRAY(uuid)", "ARRAY[UUID '00000000-0000-0000-0000-000000000000', UUID '12151fd2-7586-11e9-8f9e-2a86e4085a59']", new ArrayType(UUID), "ARRAY[UUID '00000000-0000-0000-0000-000000000000', UUID '12151fd2-7586-11e9-8f9e-2a86e4085a59']")
+                .addRoundTrip("ARRAY(uuid)", "ARRAY[UUID '123e4567-e89b-12d3-a456-426655440000', UUID 'c9c0b3f4-3e7e-4e1a-83eb-bb3e1a2c3c7e']", new ArrayType(UUID), "ARRAY[UUID '123e4567-e89b-12d3-a456-426655440000', UUID 'c9c0b3f4-3e7e-4e1a-83eb-bb3e1a2c3c7e']")
+                .addRoundTrip("ARRAY(uuid)", "ARRAY[UUID 'f47ac10b-58cc-4372-a567-0e02b2c3d479', UUID '3c6f4b8e-7a3e-4d7c-bc8e-3a0fbc1c6ad1']", new ArrayType(UUID), "ARRAY[UUID 'f47ac10b-58cc-4372-a567-0e02b2c3d479', UUID '3c6f4b8e-7a3e-4d7c-bc8e-3a0fbc1c6ad1']")
+                .execute(getQueryRunner(), session, trinoCreateAsSelect(session, "trino_test_array_uuid_or_empty_or_nulls"))
+                .execute(getQueryRunner(), session, trinoCreateAndInsert(session, "trino_test_array_uuid_or_empty_or_nulls"));
+    }
+
+    @Test
+    public void testArrayNulls()
+    {
+        Session session = sessionWithArrayAsArray();
+
+        // Verify only SELECT instead of using SqlDataTypeTest because array comparison not supported for arrays with null elements
+        try (TestTable table = new TestTable(
+                postgreSqlServer::execute,
+                "test_array_nulls",
+                "(col_boolean boolean[], col_smallint smallint[], col_integer integer[], col_bigint bigint[], col_real real[], col_double double precision[], col_uuid uuid[])")) {
+            assertUpdate(session, format("INSERT INTO %s VALUES(%s, %s, %s, %s, %s, %s, %s)", table.getName(), "ARRAY[NULL, true]", "ARRAY[NULL, 123]", "ARRAY[NULL, 123]", "ARRAY[NULL, 123]", "ARRAY[NULL, 123.45]", "ARRAY[NULL, 123.45]", "ARRAY[NULL, UUID 'f47ac10b-58cc-4372-a567-0e02b2c3d479']"), 1);
+
+            assertThat(query(session, "SELECT col_boolean FROM " + table.getName())).matches("VALUES CAST(ARRAY[NULL, true] AS ARRAY(boolean))");
+            assertThat(query(session, "SELECT col_smallint FROM " + table.getName())).matches("VALUES CAST(ARRAY[NULL, 123] AS ARRAY(smallint))");
+            assertThat(query(session, "SELECT col_integer FROM " + table.getName())).matches("VALUES CAST(ARRAY[NULL, 123] AS ARRAY(integer))");
+            assertThat(query(session, "SELECT col_bigint FROM " + table.getName())).matches("VALUES CAST(ARRAY[NULL, 123] AS ARRAY(bigint))");
+            assertThat(query(session, "SELECT col_real FROM " + table.getName())).matches("VALUES CAST(ARRAY[NULL, 123.45] AS ARRAY(real))");
+            assertThat(query(session, "SELECT col_double FROM " + table.getName())).matches("VALUES CAST(ARRAY[NULL, 123.45] AS ARRAY(double))");
+            assertThat(query(session, "SELECT col_uuid FROM " + table.getName())).matches("VALUES CAST(ARRAY[NULL, UUID 'f47ac10b-58cc-4372-a567-0e02b2c3d479'] AS ARRAY(uuid))");
+        }
     }
 
     @Test

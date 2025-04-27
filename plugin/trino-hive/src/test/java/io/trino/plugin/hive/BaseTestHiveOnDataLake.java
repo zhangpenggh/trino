@@ -15,13 +15,17 @@ package io.trino.plugin.hive;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
 import io.airlift.units.DataSize;
 import io.trino.Session;
+import io.trino.metastore.Column;
+import io.trino.metastore.HiveColumnStatistics;
+import io.trino.metastore.HiveMetastore;
+import io.trino.metastore.Partition;
+import io.trino.metastore.PartitionStatistics;
+import io.trino.metastore.PartitionWithStatistics;
+import io.trino.metastore.Table;
 import io.trino.plugin.hive.containers.HiveMinioDataLake;
-import io.trino.plugin.hive.metastore.HiveMetastore;
-import io.trino.plugin.hive.metastore.Partition;
-import io.trino.plugin.hive.metastore.PartitionWithStatistics;
-import io.trino.plugin.hive.metastore.Table;
 import io.trino.plugin.hive.metastore.thrift.BridgingHiveMetastore;
 import io.trino.plugin.hive.s3.S3HiveQueryRunner;
 import io.trino.spi.connector.SchemaTableName;
@@ -29,14 +33,12 @@ import io.trino.spi.connector.TableNotFoundException;
 import io.trino.spi.predicate.NullableValue;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.testing.AbstractTestQueryFramework;
-import io.trino.testing.MaterializedResult;
 import io.trino.testing.QueryRunner;
 import io.trino.testing.minio.MinioClient;
-import io.trino.testing.sql.TestTable;
-import org.intellij.lang.annotations.Language;
-import org.testng.annotations.BeforeClass;
-import org.testng.annotations.DataProvider;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
 
 import java.text.DateFormat;
 import java.text.SimpleDateFormat;
@@ -55,6 +57,7 @@ import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.airlift.units.DataSize.Unit.MEGABYTE;
 import static io.trino.plugin.hive.TestingThriftHiveMetastoreBuilder.testingThriftHiveMetastoreBuilder;
+import static io.trino.plugin.hive.metastore.MetastoreUtil.getHiveBasicStatistics;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.testing.MaterializedResult.resultBuilder;
 import static io.trino.testing.TestingNames.randomNameSuffix;
@@ -62,43 +65,44 @@ import static java.lang.String.format;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.time.temporal.ChronoUnit.DAYS;
 import static java.time.temporal.ChronoUnit.MINUTES;
-import static java.util.Objects.requireNonNull;
 import static java.util.regex.Pattern.quote;
 import static java.util.stream.Collectors.joining;
+import static java.util.stream.Collectors.toSet;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.testng.Assert.assertEquals;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
 
-public abstract class BaseTestHiveOnDataLake
+@TestInstance(PER_CLASS)
+abstract class BaseTestHiveOnDataLake
         extends AbstractTestQueryFramework
 {
     private static final String HIVE_TEST_SCHEMA = "hive_datalake";
     private static final DataSize HIVE_S3_STREAMING_PART_SIZE = DataSize.of(5, MEGABYTE);
 
-    private String bucketName;
-    private HiveMinioDataLake hiveMinioDataLake;
+    private final HiveMinioDataLake hiveMinioDataLake;
+    private final String bucketName;
+
     private HiveMetastore metastoreClient;
 
-    private final String hiveHadoopImage;
-
-    public BaseTestHiveOnDataLake(String hiveHadoopImage)
+    public BaseTestHiveOnDataLake(String bucketName, HiveMinioDataLake hiveMinioDataLake)
     {
-        this.hiveHadoopImage = requireNonNull(hiveHadoopImage, "hiveHadoopImage is null");
+        this.bucketName = bucketName;
+        this.hiveMinioDataLake = hiveMinioDataLake;
     }
 
     @Override
     protected QueryRunner createQueryRunner()
             throws Exception
     {
-        this.bucketName = "test-hive-insert-overwrite-" + randomNameSuffix();
-        this.hiveMinioDataLake = closeAfterClass(
-                new HiveMinioDataLake(bucketName, hiveHadoopImage));
         this.hiveMinioDataLake.start();
         this.metastoreClient = new BridgingHiveMetastore(
                 testingThriftHiveMetastoreBuilder()
-                        .metastoreClient(this.hiveMinioDataLake.getHiveHadoop().getHiveMetastoreEndpoint())
-                        .build());
+                        .metastoreClient(hiveMinioDataLake.getHiveMetastoreEndpoint())
+                        .build(this::closeAfterClass));
         return S3HiveQueryRunner.builder(hiveMinioDataLake)
+                .addExtraProperty("sql.path", "hive.functions")
+                .addExtraProperty("sql.default-function-catalog", "hive")
+                .addExtraProperty("sql.default-function-schema", "functions")
                 .setHiveProperties(
                         ImmutableMap.<String, String>builder()
                                 .put("hive.insert-existing-partitions-behavior", "OVERWRITE")
@@ -107,21 +111,58 @@ public abstract class BaseTestHiveOnDataLake
                                 .put("hive.metastore-cache-ttl", "1d")
                                 .put("hive.metastore-refresh-interval", "1d")
                                 // This is required to reduce memory pressure to test writing large files
-                                .put("hive.s3.streaming.part-size", HIVE_S3_STREAMING_PART_SIZE.toString())
-                                // This is required to enable AWS Athena partition projection
-                                .put("hive.partition-projection-enabled", "true")
-                                .put("hive.s3select-pushdown.experimental-textfile-pushdown-enabled", "true")
+                                .put("s3.streaming.part-size", HIVE_S3_STREAMING_PART_SIZE.toString())
+                                .put("hive.hive-views.enabled", "true")
                                 .buildOrThrow())
                 .build();
     }
 
-    @BeforeClass
+    @BeforeAll
     public void setUp()
     {
         computeActual(format(
                 "CREATE SCHEMA hive.%1$s WITH (location='s3a://%2$s/%1$s')",
                 HIVE_TEST_SCHEMA,
                 bucketName));
+        computeActual("CREATE SCHEMA hive.functions");
+    }
+
+    @AfterAll
+    public void destroy()
+            throws Exception
+    {
+        hiveMinioDataLake.close();
+    }
+
+    @Test
+    public void testHiveViewColumnComment()
+    {
+        String tableName = "default.test_with_column_comment" + randomNameSuffix();
+        String viewName = "default.test_view_with_column_comment" + randomNameSuffix();
+        String partitionedViewName = "default.test_partitioned_view_with_column_comment" + randomNameSuffix();
+
+        hiveMinioDataLake.runOnHive(format("CREATE TABLE %s(id int, name string) PARTITIONED BY (ds date)", tableName));
+        hiveMinioDataLake.runOnHive(format("CREATE VIEW %s(id, name COMMENT 'comment', ds COMMENT 'test comment') AS SELECT * FROM %s", viewName, tableName));
+        hiveMinioDataLake.runOnHive(format("CREATE VIEW %s(name COMMENT 'comment', ds COMMENT 'test comment') PARTITIONED ON (ds) AS SELECT name, ds FROM %s", partitionedViewName, tableName));
+
+        assertThat(query("DESCRIBE " + viewName)).result()
+                .skippingTypesCheck()
+                .containsAll(resultBuilder(getSession())
+                        .row("id", "integer", "", "")
+                        .row("name", "varchar", "", "comment")
+                        .row("ds", "date", "", "test comment")
+                        .build());
+
+        assertThat(query("DESCRIBE " + partitionedViewName)).result()
+                .skippingTypesCheck()
+                .containsAll(resultBuilder(getSession())
+                        .row("name", "varchar", "", "comment")
+                        .row("ds", "date", "", "test comment")
+                        .build());
+
+        assertUpdate("DROP VIEW " + viewName);
+        assertUpdate("DROP VIEW " + partitionedViewName);
+        assertUpdate("DROP TABLE " + tableName);
     }
 
     @Test
@@ -212,6 +253,135 @@ public abstract class BaseTestHiveOnDataLake
     }
 
     @Test
+    public void testSyncPartitionOnBucketRoot()
+    {
+        String tableName = "test_sync_partition_on_bucket_root_" + randomNameSuffix();
+        String fullyQualifiedTestTableName = getFullyQualifiedTestTableName(tableName);
+
+        hiveMinioDataLake.getMinioClient().putObject(
+                bucketName,
+                "hello\u0001world\nbye\u0001world".getBytes(UTF_8),
+                "part_key=part_val/data.txt");
+
+        assertUpdate("CREATE TABLE " + fullyQualifiedTestTableName + "(" +
+                " a varchar," +
+                " b varchar," +
+                " part_key varchar)" +
+                "WITH (" +
+                " external_location='s3://" + bucketName + "/'," +
+                " partitioned_by=ARRAY['part_key']," +
+                " format='TEXTFILE'" +
+                ")");
+
+        getQueryRunner().execute("CALL system.sync_partition_metadata(schema_name => '" + HIVE_TEST_SCHEMA + "', table_name => '" + tableName + "', mode => 'ADD')");
+
+        assertQuery("SELECT * FROM " + fullyQualifiedTestTableName, "VALUES ('hello', 'world', 'part_val'), ('bye', 'world', 'part_val')");
+
+        assertUpdate("DROP TABLE " + fullyQualifiedTestTableName);
+    }
+
+    @Test
+    public void testSyncPartitionCaseSensitivePathVariation()
+    {
+        String tableName = "test_sync_partition_case_variation_" + randomNameSuffix();
+        String fullyQualifiedTestTableName = getFullyQualifiedTestTableName(tableName);
+        String tableLocation = format("s3://%s/%s/%s/", bucketName, HIVE_TEST_SCHEMA, tableName);
+
+        hiveMinioDataLake.getMinioClient().putObject(
+                bucketName,
+                "Trino\u0001rocks".getBytes(UTF_8),
+                HIVE_TEST_SCHEMA + "/" + tableName + "/part_key=part_val/data.txt");
+
+        assertUpdate("CREATE TABLE " + fullyQualifiedTestTableName + "(" +
+                " a varchar," +
+                " b varchar," +
+                " part_key varchar)" +
+                "WITH (" +
+                " external_location='" + tableLocation + "'," +
+                " partitioned_by=ARRAY['part_key']," +
+                " format='TEXTFILE'" +
+                ")");
+
+        getQueryRunner().execute("CALL system.sync_partition_metadata(schema_name => '" + HIVE_TEST_SCHEMA + "', table_name => '" + tableName + "', mode => 'ADD')");
+        assertQuery("SELECT * FROM " + fullyQualifiedTestTableName, "VALUES ('Trino', 'rocks', 'part_val')");
+
+        // Move the data to a location where the partition path differs only in case
+        hiveMinioDataLake.getMinioClient().removeObject(bucketName, HIVE_TEST_SCHEMA + "/" + tableName + "/part_key=part_val/data.txt");
+        hiveMinioDataLake.getMinioClient().putObject(
+                bucketName,
+                "Trino\u0001rocks".getBytes(UTF_8),
+                HIVE_TEST_SCHEMA + "/" + tableName + "/PART_KEY=part_val/data.txt");
+
+        getQueryRunner().execute("CALL system.sync_partition_metadata(schema_name => '" + HIVE_TEST_SCHEMA + "', table_name => '" + tableName + "', mode => 'FULL', case_sensitive => false)");
+        assertQuery("SELECT * FROM " + fullyQualifiedTestTableName, "VALUES ('Trino', 'rocks', 'part_val')");
+
+        // Verify that syncing again the partition metadata has no negative effect (e.g. drop the partition)
+        getQueryRunner().execute("CALL system.sync_partition_metadata(schema_name => '" + HIVE_TEST_SCHEMA + "', table_name => '" + tableName + "', mode => 'FULL', case_sensitive => false)");
+        assertQuery("SELECT * FROM " + fullyQualifiedTestTableName, "VALUES ('Trino', 'rocks', 'part_val')");
+
+        assertUpdate("DROP TABLE " + fullyQualifiedTestTableName);
+    }
+
+    @Test
+    public void testSyncPartitionSpecialCharacters()
+    {
+        String tableName = "test_sync_partition_special_characters_" + randomNameSuffix();
+        String fullyQualifiedTestTableName = getFullyQualifiedTestTableName(tableName);
+        String tableLocation = format("s3://%s/%s/%s/", bucketName, HIVE_TEST_SCHEMA, tableName);
+
+        hiveMinioDataLake.getMinioClient().putObject(
+                bucketName,
+                "Trino\u0001rocks\u0001hyphens".getBytes(UTF_8),
+                HIVE_TEST_SCHEMA + "/" + tableName + "/part_key=with-hyphen/data.txt");
+        hiveMinioDataLake.getMinioClient().putObject(
+                bucketName,
+                "Trino\u0001rocks\u0001dots".getBytes(UTF_8),
+                HIVE_TEST_SCHEMA + "/" + tableName + "/part_key=with.dot/data.txt");
+        hiveMinioDataLake.getMinioClient().putObject(
+                bucketName,
+                "Trino\u0001rocks\u0001colons".getBytes(UTF_8),
+                HIVE_TEST_SCHEMA + "/" + tableName + "/part_key=with%3Acolon/data.txt");
+        hiveMinioDataLake.getMinioClient().putObject(
+                bucketName,
+                "Trino\u0001rocks\u0001slashes".getBytes(UTF_8),
+                HIVE_TEST_SCHEMA + "/" + tableName + "/part_key=with%2Fslash/data.txt");
+        hiveMinioDataLake.getMinioClient().putObject(
+                bucketName,
+                "Trino\u0001rocks\u0001backslashes".getBytes(UTF_8),
+                HIVE_TEST_SCHEMA + "/" + tableName + "/part_key=with%5Cbackslash/data.txt");
+        hiveMinioDataLake.getMinioClient().putObject(
+                bucketName,
+                "Trino\u0001rocks\u0001percents".getBytes(UTF_8),
+                HIVE_TEST_SCHEMA + "/" + tableName + "/part_key=with%25percent/data.txt");
+
+        assertUpdate("CREATE TABLE " + fullyQualifiedTestTableName + "(" +
+                " a varchar," +
+                " b varchar," +
+                " c varchar," +
+                " part_key varchar)" +
+                "WITH (" +
+                " external_location='" + tableLocation + "'," +
+                " partitioned_by=ARRAY['part_key']," +
+                " format='TEXTFILE'" +
+                ")");
+
+        getQueryRunner().execute("CALL system.sync_partition_metadata(schema_name => '" + HIVE_TEST_SCHEMA + "', table_name => '" + tableName + "', mode => 'ADD')");
+        assertQuery(
+                "SELECT * FROM " + fullyQualifiedTestTableName,
+                """
+                    VALUES
+                            ('Trino', 'rocks', 'hyphens', 'with-hyphen'),
+                            ('Trino', 'rocks', 'dots', 'with.dot'),
+                            ('Trino', 'rocks', 'colons', 'with:colon'),
+                            ('Trino', 'rocks', 'slashes', 'with/slash'),
+                            ('Trino', 'rocks', 'backslashes', 'with\\backslash'),
+                            ('Trino', 'rocks', 'percents', 'with%percent')
+                    """);
+
+        assertUpdate("DROP TABLE " + fullyQualifiedTestTableName);
+    }
+
+    @Test
     public void testFlushPartitionCache()
     {
         String tableName = "nation_" + randomNameSuffix();
@@ -224,24 +394,6 @@ public abstract class BaseTestHiveOnDataLake
                 partitionColumn,
                 format(
                         "CALL system.flush_metadata_cache(schema_name => '%s', table_name => '%s', partition_columns => ARRAY['%s'], partition_values => ARRAY['0'])",
-                        HIVE_TEST_SCHEMA,
-                        tableName,
-                        partitionColumn));
-    }
-
-    @Test
-    public void testFlushPartitionCacheWithDeprecatedPartitionParams()
-    {
-        String tableName = "nation_" + randomNameSuffix();
-        String fullyQualifiedTestTableName = getFullyQualifiedTestTableName(tableName);
-        String partitionColumn = "regionkey";
-
-        testFlushPartitionCache(
-                tableName,
-                fullyQualifiedTestTableName,
-                partitionColumn,
-                format(
-                        "CALL system.flush_metadata_cache(schema_name => '%s', table_name => '%s', partition_column => ARRAY['%s'], partition_value => ARRAY['0'])",
                         HIVE_TEST_SCHEMA,
                         tableName,
                         partitionColumn));
@@ -345,7 +497,7 @@ public abstract class BaseTestHiveOnDataLake
                         ")");
 
         assertThat(
-                hiveMinioDataLake.getHiveHadoop()
+                hiveMinioDataLake
                         .runOnHive("SHOW TBLPROPERTIES " + getHiveTestTableName(tableName)))
                 .containsPattern("[ |]+projection\\.enabled[ |]+true[ |]+")
                 .containsPattern("[ |]+projection\\.short name\\.type[ |]+enum[ |]+")
@@ -422,7 +574,7 @@ public abstract class BaseTestHiveOnDataLake
                         "  partition_projection_location_template='" + storageFormat + "' " +
                         ")");
         assertThat(
-                hiveMinioDataLake.getHiveHadoop()
+                hiveMinioDataLake
                         .runOnHive("SHOW TBLPROPERTIES " + getHiveTestTableName(schemaName, tableName)))
                 .containsPattern("[ |]+projection\\.enabled[ |]+true[ |]+")
                 .containsPattern("[ |]+storage\\.location\\.template[ |]+" + quote(storageFormat) + "[ |]+")
@@ -442,7 +594,7 @@ public abstract class BaseTestHiveOnDataLake
                 this.bucketName,
                 HIVE_TEST_SCHEMA,
                 tableName);
-        hiveMinioDataLake.getHiveHadoop().runOnHive(
+        hiveMinioDataLake.runOnHive(
                 "CREATE TABLE " + getHiveTestTableName(tableName) + " ( " +
                         "  name varchar(25), " +
                         "  comment varchar(152), " +
@@ -517,7 +669,7 @@ public abstract class BaseTestHiveOnDataLake
                         ")");
 
         assertThat(
-                hiveMinioDataLake.getHiveHadoop()
+                hiveMinioDataLake
                         .runOnHive("SHOW TBLPROPERTIES " + getHiveTestTableName(tableName)))
                 .containsPattern("[ |]+projection\\.enabled[ |]+true[ |]+")
                 .containsPattern("[ |]+projection\\.short_name1\\.type[ |]+enum[ |]+")
@@ -574,7 +726,7 @@ public abstract class BaseTestHiveOnDataLake
                         "  partition_projection_enabled=true " +
                         ")");
         assertThat(
-                hiveMinioDataLake.getHiveHadoop()
+                hiveMinioDataLake
                         .runOnHive("SHOW TBLPROPERTIES " + getHiveTestTableName(tableName)))
                 .containsPattern("[ |]+projection\\.enabled[ |]+true[ |]+")
                 .containsPattern("[ |]+projection\\.short_name1\\.type[ |]+enum[ |]+")
@@ -589,7 +741,7 @@ public abstract class BaseTestHiveOnDataLake
     public void testIntegerPartitionProjectionOnVarcharColumnWithDigitsAlignCreatedOnHive()
     {
         String tableName = "nation_" + randomNameSuffix();
-        hiveMinioDataLake.getHiveHadoop().runOnHive(
+        hiveMinioDataLake.runOnHive(
                 "CREATE TABLE " + getHiveTestTableName(tableName) + " ( " +
                         "  name varchar(25), " +
                         "  comment varchar(152), " +
@@ -672,7 +824,7 @@ public abstract class BaseTestHiveOnDataLake
                         ")");
 
         assertThat(
-                hiveMinioDataLake.getHiveHadoop()
+                hiveMinioDataLake
                         .runOnHive("SHOW TBLPROPERTIES " + getHiveTestTableName(tableName)))
                 .containsPattern("[ |]+projection\\.enabled[ |]+true[ |]+")
                 .containsPattern("[ |]+projection\\.short_name1\\.type[ |]+enum[ |]+")
@@ -732,7 +884,7 @@ public abstract class BaseTestHiveOnDataLake
                         ")");
 
         assertThat(
-                hiveMinioDataLake.getHiveHadoop()
+                hiveMinioDataLake
                         .runOnHive("SHOW TBLPROPERTIES " + getHiveTestTableName(tableName)))
                 .containsPattern("[ |]+projection\\.enabled[ |]+true[ |]+")
                 .containsPattern("[ |]+projection\\.short_name1\\.type[ |]+enum[ |]+")
@@ -792,7 +944,7 @@ public abstract class BaseTestHiveOnDataLake
                         ")");
 
         assertThat(
-                hiveMinioDataLake.getHiveHadoop()
+                hiveMinioDataLake
                         .runOnHive("SHOW TBLPROPERTIES " + getHiveTestTableName(tableName)))
                 .containsPattern("[ |]+projection\\.enabled[ |]+true[ |]+")
                 .containsPattern("[ |]+projection\\.short_name1\\.type[ |]+enum[ |]+")
@@ -869,7 +1021,7 @@ public abstract class BaseTestHiveOnDataLake
                         ")");
 
         assertThat(
-                hiveMinioDataLake.getHiveHadoop()
+                hiveMinioDataLake
                         .runOnHive("SHOW TBLPROPERTIES " + getHiveTestTableName(tableName)))
                 .containsPattern("[ |]+projection\\.enabled[ |]+true[ |]+")
                 .containsPattern("[ |]+projection\\.short_name1\\.type[ |]+enum[ |]+")
@@ -943,7 +1095,7 @@ public abstract class BaseTestHiveOnDataLake
                         "  partition_projection_enabled=true " +
                         ")");
         assertThat(
-                hiveMinioDataLake.getHiveHadoop()
+                hiveMinioDataLake
                         .runOnHive("SHOW TBLPROPERTIES " + getHiveTestTableName(tableName)))
                 .containsPattern("[ |]+projection\\.enabled[ |]+true[ |]+")
                 .containsPattern("[ |]+projection\\.short_name1\\.type[ |]+enum[ |]+")
@@ -960,7 +1112,7 @@ public abstract class BaseTestHiveOnDataLake
     {
         String tableName = getRandomTestTableName();
         String dateProjectionFormat = "yyyy-MM-dd HH:mm:ss";
-        hiveMinioDataLake.getHiveHadoop().runOnHive(
+        hiveMinioDataLake.runOnHive(
                 "CREATE TABLE " + getHiveTestTableName(tableName) + " ( " +
                         "  name varchar(25), " +
                         "  comment varchar(152), " +
@@ -1042,7 +1194,7 @@ public abstract class BaseTestHiveOnDataLake
                         ")");
 
         assertThat(
-                hiveMinioDataLake.getHiveHadoop()
+                hiveMinioDataLake
                         .runOnHive("SHOW TBLPROPERTIES " + getHiveTestTableName(tableName)))
                 .containsPattern("[ |]+projection\\.enabled[ |]+true[ |]+")
                 .containsPattern("[ |]+projection\\.short_name1\\.type[ |]+enum[ |]+")
@@ -1116,7 +1268,7 @@ public abstract class BaseTestHiveOnDataLake
                         ")");
 
         assertThat(
-                hiveMinioDataLake.getHiveHadoop()
+                hiveMinioDataLake
                         .runOnHive("SHOW TBLPROPERTIES " + getHiveTestTableName(tableName)))
                 .containsPattern("[ |]+projection\\.enabled[ |]+true[ |]+")
                 .containsPattern("[ |]+projection\\.short_name1\\.type[ |]+enum[ |]+")
@@ -1189,7 +1341,7 @@ public abstract class BaseTestHiveOnDataLake
                         ")");
 
         assertThat(
-                hiveMinioDataLake.getHiveHadoop()
+                hiveMinioDataLake
                         .runOnHive("SHOW TBLPROPERTIES " + getHiveTestTableName(tableName)))
                 .containsPattern("[ |]+projection\\.enabled[ |]+true[ |]+")
                 .containsPattern("[ |]+projection\\.short_name1\\.type[ |]+enum[ |]+")
@@ -1293,7 +1445,7 @@ public abstract class BaseTestHiveOnDataLake
                         ")");
 
         assertThat(
-                hiveMinioDataLake.getHiveHadoop()
+                hiveMinioDataLake
                         .runOnHive("SHOW TBLPROPERTIES " + getHiveTestTableName(tableName)))
                 .containsPattern("[ |]+projection\\.enabled[ |]+true[ |]+")
                 .containsPattern("[ |]+projection\\.short_name1\\.type[ |]+enum[ |]+")
@@ -1312,10 +1464,13 @@ public abstract class BaseTestHiveOnDataLake
                 format("SELECT name FROM %s WHERE short_name1='PL1' AND short_name2='002'", fullyQualifiedTestTableName),
                 "VALUES 'POLAND_2'");
 
-        assertThatThrownBy(
-                () -> getQueryRunner().execute(
-                        format("SELECT name FROM %s WHERE short_name1='PL1' AND ( short_name2='002' OR short_name2='001' )", fullyQualifiedTestTableName)))
-                .hasMessage("Column projection for column 'short_name2' failed. Injected projection requires single predicate for it's column in where clause. Currently provided can't be converted to single partition.");
+        assertQuery(
+                format("SELECT name FROM %s WHERE short_name2 IN ('001', '003')", fullyQualifiedTestTableName),
+                "VALUES 'POLAND_1', 'CZECH_1'");
+
+        assertQuery(
+                format("SELECT name FROM %s WHERE short_name1='PL1' AND ( short_name2='002' OR short_name2='001' )", fullyQualifiedTestTableName),
+                "VALUES 'POLAND_1', 'POLAND_2'");
 
         assertThatThrownBy(
                 () -> getQueryRunner().execute(
@@ -1337,7 +1492,7 @@ public abstract class BaseTestHiveOnDataLake
                         ") WITH ( " +
                         "  partition_projection_enabled=true " +
                         ")"))
-                .hasMessage("Partition projection can't be enabled when no partition columns are defined.");
+                .hasMessage("Partition projection cannot be enabled on a table that is not partitioned");
 
         assertThatThrownBy(() -> getQueryRunner().execute(
                 "CREATE TABLE " + getFullyQualifiedTestTableName("nation_" + randomNameSuffix()) + " ( " +
@@ -1350,7 +1505,7 @@ public abstract class BaseTestHiveOnDataLake
                         "  partitioned_by=ARRAY['short_name1'], " +
                         "  partition_projection_enabled=true " +
                         ")"))
-                .hasMessage("Partition projection can't be defined for non partition column: 'name'");
+                .hasMessage("Partition projection cannot be defined for non-partition column: 'name'");
 
         assertThatThrownBy(() -> getQueryRunner().execute(
                 "CREATE TABLE " + getFullyQualifiedTestTableName("nation_" + randomNameSuffix()) + " ( " +
@@ -1364,7 +1519,7 @@ public abstract class BaseTestHiveOnDataLake
                         "  partitioned_by=ARRAY['short_name1', 'short_name2'], " +
                         "  partition_projection_enabled=true " +
                         ")"))
-                .hasMessage("Partition projection definition for column: 'short_name2' missing");
+                .hasMessage("Column projection for column 'short_name2' failed. Projection type property missing");
 
         assertThatThrownBy(() -> getQueryRunner().execute(
                 "CREATE TABLE " + getFullyQualifiedTestTableName("nation_" + randomNameSuffix()) + " ( " +
@@ -1427,7 +1582,7 @@ public abstract class BaseTestHiveOnDataLake
                         "  partition_projection_enabled=true " +
                         ")"))
                 .hasMessage("Column projection for column 'short_name1' failed. Property: 'partition_projection_range' needs to be a list of 2 valid dates formatted as 'yyyy-MM-dd HH' " +
-                        "or '^\\s*NOW\\s*(([+-])\\s*([0-9]+)\\s*(DAY|HOUR|MINUTE|SECOND)S?\\s*)?$' that are sequential. Unparseable date: \"2001-01-01\"");
+                        "or '^\\s*NOW\\s*(([+-])\\s*([0-9]+)\\s*(DAY|HOUR|MINUTE|SECOND)S?\\s*)?$' that are sequential: Unparseable date: \"2001-01-01\"");
 
         assertThatThrownBy(() -> getQueryRunner().execute(
                 "CREATE TABLE " + getFullyQualifiedTestTableName("nation_" + randomNameSuffix()) + " ( " +
@@ -1442,7 +1597,7 @@ public abstract class BaseTestHiveOnDataLake
                         "  partition_projection_enabled=true " +
                         ")"))
                 .hasMessage("Column projection for column 'short_name1' failed. Property: 'partition_projection_range' needs to be a list of 2 valid dates formatted as 'yyyy-MM-dd' " +
-                        "or '^\\s*NOW\\s*(([+-])\\s*([0-9]+)\\s*(DAY|HOUR|MINUTE|SECOND)S?\\s*)?$' that are sequential. Unparseable date: \"NOW*3DAYS\"");
+                        "or '^\\s*NOW\\s*(([+-])\\s*([0-9]+)\\s*(DAY|HOUR|MINUTE|SECOND)S?\\s*)?$' that are sequential: Unparseable date: \"NOW*3DAYS\"");
 
         assertThatThrownBy(() -> getQueryRunner().execute(
                 "CREATE TABLE " + getFullyQualifiedTestTableName("nation_" + randomNameSuffix()) + " ( " +
@@ -1502,7 +1657,7 @@ public abstract class BaseTestHiveOnDataLake
                         ") WITH ( " +
                         "  partitioned_by=ARRAY['short_name1'] " +
                         ")"))
-                .hasMessage("Columns ['short_name1'] projections are disallowed when partition projection property 'partition_projection_enabled' is missing");
+                .hasMessage("Columns partition projection properties cannot be set when 'partition_projection_enabled' is not set");
 
         // Verify that ignored flag is only interpreted for pre-existing tables where configuration is loaded from metastore.
         // It should not allow creating corrupted config via Trino. It's a kill switch to run away when we have compatibility issues.
@@ -1516,7 +1671,7 @@ public abstract class BaseTestHiveOnDataLake
                         "  )" +
                         ") WITH ( " +
                         "  partitioned_by=ARRAY['short_name1'], " +
-                        "  partition_projection_enabled=false, " +
+                        "  partition_projection_enabled=true, " +
                         "  partition_projection_ignore=true " + // <-- Even if this is set we disallow creating corrupted configuration via Trino
                         ")"))
                 .hasMessage("Column projection for column 'short_name1' failed. Property: 'partition_projection_interval_unit' " +
@@ -1532,7 +1687,7 @@ public abstract class BaseTestHiveOnDataLake
         String fullyQualifiedTestTableName = getFullyQualifiedTestTableName(tableName);
 
         // Create corrupted configuration
-        hiveMinioDataLake.getHiveHadoop().runOnHive(
+        hiveMinioDataLake.runOnHive(
                 "CREATE TABLE " + hiveTestTableName + " ( " +
                         "  name varchar(25) " +
                         ") PARTITIONED BY (" +
@@ -1548,13 +1703,13 @@ public abstract class BaseTestHiveOnDataLake
         // Expect invalid Partition Projection properties to fail
         assertThatThrownBy(() -> getQueryRunner().execute("SELECT * FROM " + fullyQualifiedTestTableName))
                 .hasMessage("Column projection for column 'date_time' failed. Property: 'partition_projection_range' needs to be a list of 2 valid dates formatted as 'yyyy-MM-dd HH' " +
-                        "or '^\\s*NOW\\s*(([+-])\\s*([0-9]+)\\s*(DAY|HOUR|MINUTE|SECOND)S?\\s*)?$' that are sequential. Unparseable date: \"2001-01-01\"");
+                        "or '^\\s*NOW\\s*(([+-])\\s*([0-9]+)\\s*(DAY|HOUR|MINUTE|SECOND)S?\\s*)?$' that are sequential: Unparseable date: \"2001-01-01\"");
 
         // Append kill switch table property to ignore Partition Projection properties
-        hiveMinioDataLake.getHiveHadoop().runOnHive(
+        hiveMinioDataLake.runOnHive(
                 "ALTER TABLE " + hiveTestTableName + " SET TBLPROPERTIES ( 'trino.partition_projection.ignore'='TRUE' )");
         // Flush cache to get new definition
-        computeActual("CALL system.flush_metadata_cache()");
+        computeActual("CALL system.flush_metadata_cache(schema_name => '" + HIVE_TEST_SCHEMA + "', table_name => '" + tableName + "')");
 
         // Verify query execution works
         computeActual(createInsertStatement(
@@ -1624,7 +1779,7 @@ public abstract class BaseTestHiveOnDataLake
                             (null, null, null, null, 5.0, null, null)
                         """);
         // TODO (https://github.com/trinodb/trino/issues/15998) fix selective ANALYZE for table with non-canonical partition values
-        assertQueryFails("ANALYZE " + getFullyQualifiedTestTableName(externalTableName) + " WITH (partitions = ARRAY[ARRAY['4']])", "Partition no longer exists: month=4");
+        assertQueryFails("ANALYZE " + getFullyQualifiedTestTableName(externalTableName) + " WITH (partitions = ARRAY[ARRAY['4']])", ".*Partition.*not found.*");
 
         assertUpdate("DROP TABLE " + getFullyQualifiedTestTableName(externalTableName));
         assertUpdate("DROP TABLE " + getFullyQualifiedTestTableName(tableName));
@@ -1657,20 +1812,17 @@ public abstract class BaseTestHiveOnDataLake
         assertUpdate("DROP TABLE " + tableName);
     }
 
-    @Test(dataProvider = "invalidObjectNames")
-    public void testCreateSchemaInvalidName(String schemaName)
+    @Test
+    public void testCreateSchemaInvalidName()
     {
-        assertThatThrownBy(() -> assertUpdate("CREATE SCHEMA \"" + schemaName + "\""))
-                .hasMessage(format("Invalid object name: '%s'", schemaName));
-    }
+        assertThatThrownBy(() -> assertUpdate("CREATE SCHEMA \".\""))
+                .hasMessage("Invalid object name: '.'");
 
-    @DataProvider
-    public Object[][] invalidObjectNames()
-    {
-        return new Object[][] {
-                {"."},
-                {".."},
-                {"foo/bar"}};
+        assertThatThrownBy(() -> assertUpdate("CREATE SCHEMA \"..\""))
+                .hasMessage("Invalid object name: '..'");
+
+        assertThatThrownBy(() -> assertUpdate("CREATE SCHEMA \"foo/bar\""))
+                .hasMessage("Invalid object name: 'foo/bar'");
     }
 
     @Test
@@ -1695,7 +1847,7 @@ public abstract class BaseTestHiveOnDataLake
     public void testRenameSchemaToInvalidObjectName()
     {
         String schemaName = "test_rename_schema_invalid_name_" + randomNameSuffix();
-        assertUpdate("CREATE SCHEMA " + schemaName);
+        assertUpdate("CREATE SCHEMA %1$s WITH (location='s3a://%2$s/%1$s')".formatted(schemaName, bucketName));
 
         for (String invalidSchemaName : Arrays.asList(".", "..", "foo/bar")) {
             assertThatThrownBy(() -> assertUpdate("ALTER SCHEMA hive." + schemaName + " RENAME TO  \"" + invalidSchemaName + "\""))
@@ -1793,249 +1945,6 @@ public abstract class BaseTestHiveOnDataLake
         assertUpdate("DROP TABLE " + tableName);
     }
 
-    @Test(dataProvider = "s3SelectFileFormats")
-    public void testS3SelectPushdown(String tableProperties)
-    {
-        Session usingAppendInserts = Session.builder(getSession())
-                .setCatalogSessionProperty("hive", "insert_existing_partitions_behavior", "APPEND")
-                .build();
-        List<String> values = ImmutableList.of(
-                "1, true, 11, 111, 1111, 11111, 'one', DATE '2020-01-01'",
-                "2, true, 22, 222, 2222, 22222, 'two', DATE '2020-02-02'",
-                "3, NULL, NULL, NULL, NULL, NULL, NULL, NULL",
-                "4, false, 44, 444, 4444, 44444, 'four', DATE '2020-04-04'");
-        try (TestTable table = new TestTable(
-                sql -> getQueryRunner().execute(usingAppendInserts, sql),
-                "hive.%s.test_s3_select_pushdown".formatted(HIVE_TEST_SCHEMA),
-                "(id INT, bool_t BOOLEAN, tiny_t TINYINT, small_t SMALLINT, int_t INT, big_t BIGINT, string_t VARCHAR, date_t DATE) " +
-                        "WITH (" + tableProperties + ")", values)) {
-            assertS3SelectQuery("SELECT id FROM " + table.getName() + " WHERE bool_t = true", "VALUES 1, 2");
-            assertS3SelectQuery("SELECT id FROM " + table.getName() + " WHERE bool_t = false", "VALUES 4");
-            assertS3SelectQuery("SELECT id FROM " + table.getName() + " WHERE bool_t IS NULL", "VALUES 3");
-            assertS3SelectQuery("SELECT id FROM " + table.getName() + " WHERE bool_t IS NOT NULL", "VALUES 1, 2, 4");
-
-            assertS3SelectQuery("SELECT id FROM " + table.getName() + " WHERE tiny_t = 22", "VALUES 2");
-            assertS3SelectQuery("SELECT id FROM " + table.getName() + " WHERE tiny_t != 22", "VALUES 1, 4");
-            assertS3SelectQuery("SELECT id FROM " + table.getName() + " WHERE tiny_t > 22", "VALUES 4");
-            assertS3SelectQuery("SELECT id FROM " + table.getName() + " WHERE tiny_t >= 22", "VALUES 2, 4");
-            assertS3SelectQuery("SELECT id FROM " + table.getName() + " WHERE tiny_t = 22 OR tiny_t = 44", "VALUES 2, 4");
-            assertS3SelectQuery("SELECT id FROM " + table.getName() + " WHERE tiny_t IS NULL OR tiny_t >= 22", "VALUES 2, 3, 4");
-            assertS3SelectQuery("SELECT id FROM " + table.getName() + " WHERE tiny_t IS NULL", "VALUES 3");
-            assertS3SelectQuery("SELECT id FROM " + table.getName() + " WHERE tiny_t IS NOT NULL", "VALUES 1, 2, 4");
-
-            assertS3SelectQuery("SELECT id FROM " + table.getName() + " WHERE small_t = 222", "VALUES 2");
-            assertS3SelectQuery("SELECT id FROM " + table.getName() + " WHERE small_t != 222", "VALUES 1, 4");
-            assertS3SelectQuery("SELECT id FROM " + table.getName() + " WHERE small_t > 222", "VALUES 4");
-            assertS3SelectQuery("SELECT id FROM " + table.getName() + " WHERE small_t >= 222", "VALUES 2, 4");
-            assertS3SelectQuery("SELECT id FROM " + table.getName() + " WHERE small_t = 222 OR small_t = 444", "VALUES 2, 4");
-            assertS3SelectQuery("SELECT id FROM " + table.getName() + " WHERE small_t IS NULL OR small_t >= 222", "VALUES 2, 3, 4");
-            assertS3SelectQuery("SELECT id FROM " + table.getName() + " WHERE small_t IS NULL", "VALUES 3");
-            assertS3SelectQuery("SELECT id FROM " + table.getName() + " WHERE small_t IS NOT NULL", "VALUES 1, 2, 4");
-
-            assertS3SelectQuery("SELECT id FROM " + table.getName() + " WHERE int_t = 2222", "VALUES 2");
-            assertS3SelectQuery("SELECT id FROM " + table.getName() + " WHERE int_t != 2222", "VALUES 1, 4");
-            assertS3SelectQuery("SELECT id FROM " + table.getName() + " WHERE int_t > 2222", "VALUES 4");
-            assertS3SelectQuery("SELECT id FROM " + table.getName() + " WHERE int_t >= 2222", "VALUES 2, 4");
-            assertS3SelectQuery("SELECT id FROM " + table.getName() + " WHERE int_t = 2222 OR int_t = 4444", "VALUES 2, 4");
-            assertS3SelectQuery("SELECT id FROM " + table.getName() + " WHERE int_t IS NULL OR int_t >= 2222", "VALUES 2, 3, 4");
-            assertS3SelectQuery("SELECT id FROM " + table.getName() + " WHERE int_t IS NULL", "VALUES 3");
-            assertS3SelectQuery("SELECT id FROM " + table.getName() + " WHERE int_t IS NOT NULL", "VALUES 1, 2, 4");
-
-            assertS3SelectQuery("SELECT id FROM " + table.getName() + " WHERE big_t = 22222", "VALUES 2");
-            assertS3SelectQuery("SELECT id FROM " + table.getName() + " WHERE big_t != 22222", "VALUES 1, 4");
-            assertS3SelectQuery("SELECT id FROM " + table.getName() + " WHERE big_t > 22222", "VALUES 4");
-            assertS3SelectQuery("SELECT id FROM " + table.getName() + " WHERE big_t >= 22222", "VALUES 2, 4");
-            assertS3SelectQuery("SELECT id FROM " + table.getName() + " WHERE big_t = 22222 OR big_t = 44444", "VALUES 2, 4");
-            assertS3SelectQuery("SELECT id FROM " + table.getName() + " WHERE big_t IS NULL OR big_t >= 22222", "VALUES 2, 3, 4");
-            assertS3SelectQuery("SELECT id FROM " + table.getName() + " WHERE big_t IS NULL", "VALUES 3");
-            assertS3SelectQuery("SELECT id FROM " + table.getName() + " WHERE big_t IS NOT NULL", "VALUES 1, 2, 4");
-
-            assertS3SelectQuery("SELECT id FROM " + table.getName() + " WHERE string_t = 'two'", "VALUES 2");
-            assertS3SelectQuery("SELECT id FROM " + table.getName() + " WHERE string_t != 'two'", "VALUES 1, 4");
-            assertS3SelectQuery("SELECT id FROM " + table.getName() + " WHERE string_t < 'two'", "VALUES 1, 4");
-            assertS3SelectQuery("SELECT id FROM " + table.getName() + " WHERE string_t <= 'two'", "VALUES 1, 2, 4");
-            assertS3SelectQuery("SELECT id FROM " + table.getName() + " WHERE string_t = 'two' OR string_t = 'four'", "VALUES 2, 4");
-            assertS3SelectQuery("SELECT id FROM " + table.getName() + " WHERE string_t IS NULL OR string_t >= 'two'", "VALUES 2, 3");
-            assertS3SelectQuery("SELECT id FROM " + table.getName() + " WHERE string_t IS NULL", "VALUES 3");
-            assertS3SelectQuery("SELECT id FROM " + table.getName() + " WHERE string_t IS NOT NULL", "VALUES 1, 2, 4");
-
-            assertS3SelectQuery("SELECT id FROM " + table.getName() + " WHERE date_t = DATE '2020-02-02'", "VALUES 2");
-            assertS3SelectQuery("SELECT id FROM " + table.getName() + " WHERE date_t != DATE '2020-02-02'", "VALUES 1, 4");
-            assertS3SelectQuery("SELECT id FROM " + table.getName() + " WHERE date_t > DATE '2020-02-02'", "VALUES 4");
-            assertS3SelectQuery("SELECT id FROM " + table.getName() + " WHERE date_t <= DATE '2020-02-02'", "VALUES 1, 2");
-            assertS3SelectQuery("SELECT id FROM " + table.getName() + " WHERE date_t = DATE '2020-02-02' OR date_t = DATE '2020-04-04'", "VALUES 2, 4");
-            assertS3SelectQuery("SELECT id FROM " + table.getName() + " WHERE date_t IS NULL OR date_t >= DATE '2020-02-02'", "VALUES 2, 3, 4");
-            assertS3SelectQuery("SELECT id FROM " + table.getName() + " WHERE date_t IS NULL", "VALUES 3");
-            assertS3SelectQuery("SELECT id FROM " + table.getName() + " WHERE date_t IS NOT NULL", "VALUES 1, 2, 4");
-        }
-    }
-
-    @Test(dataProvider = "s3SelectFileFormats")
-    public void testS3SelectOnDecimalColumnIsDisabled(String tableProperties)
-    {
-        Session usingAppendInserts = Session.builder(getSession())
-                .setCatalogSessionProperty("hive", "insert_existing_partitions_behavior", "APPEND")
-                .build();
-        List<String> values = ImmutableList.of("1, 1.1", "2, 2.2", "3, NULL", "4, 4.4");
-        try (TestTable table = new TestTable(
-                sql -> getQueryRunner().execute(usingAppendInserts, sql),
-                "hive.%s.test_s3_select_pushdown".formatted(HIVE_TEST_SCHEMA),
-                "(id INT, decimal_t DECIMAL(10, 5)) WITH (" + tableProperties + ")",
-                values)) {
-            assertNoS3SelectPushdown("SELECT id FROM " + table.getName() + " WHERE decimal_t = 2.2", "VALUES 2");
-            assertNoS3SelectPushdown("SELECT id FROM " + table.getName() + " WHERE decimal_t != 2.2", "VALUES 1, 4");
-            assertNoS3SelectPushdown("SELECT id FROM " + table.getName() + " WHERE decimal_t < 2.2", "VALUES 1");
-            assertNoS3SelectPushdown("SELECT id FROM " + table.getName() + " WHERE decimal_t <= 2.2", "VALUES 1, 2");
-            assertNoS3SelectPushdown("SELECT id FROM " + table.getName() + " WHERE decimal_t = 2.2 OR decimal_t = 4.4", "VALUES 2, 4");
-            assertNoS3SelectPushdown("SELECT id FROM " + table.getName() + " WHERE decimal_t IS NULL OR decimal_t >= 2.2", "VALUES 2, 3, 4");
-            assertNoS3SelectPushdown("SELECT id FROM " + table.getName() + " WHERE decimal_t IS NULL", "VALUES 3");
-            assertNoS3SelectPushdown("SELECT id FROM " + table.getName() + " WHERE decimal_t IS NOT NULL", "VALUES 1, 2, 4");
-        }
-    }
-
-    @Test
-    public void testJsonS3SelectPushdownWithSpecialCharacters()
-    {
-        Session usingAppendInserts = Session.builder(getSession())
-                .setCatalogSessionProperty("hive", "insert_existing_partitions_behavior", "APPEND")
-                .build();
-
-        List<String> specialCharacterValues = ImmutableList.of(
-                "1, 'a,comma'",
-                "2, 'a|pipe'",
-                "3, 'an''escaped quote'",
-                "4, 'a\"double quote'");
-        try (TestTable table = new TestTable(
-                sql -> getQueryRunner().execute(usingAppendInserts, sql),
-                "hive.%s.test_s3_select_pushdown_special_characters".formatted(HIVE_TEST_SCHEMA),
-                "(id INT, string_t VARCHAR) WITH (format = 'JSON')",
-                specialCharacterValues)) {
-            assertS3SelectQuery("SELECT id FROM " + table.getName() + " WHERE string_t ='a,comma'", "VALUES 1");
-            assertS3SelectQuery("SELECT id FROM " + table.getName() + " WHERE string_t ='a|pipe'", "VALUES 2");
-            assertS3SelectQuery("SELECT id FROM " + table.getName() + " WHERE string_t ='an''escaped quote'", "VALUES 3");
-            assertS3SelectQuery("SELECT id FROM " + table.getName() + " WHERE string_t ='a\"double quote'", "VALUES 4");
-        }
-    }
-
-    @Test
-    public void testS3SelectExperimentalPushdown()
-    {
-        // Demonstrate correctness issues which have resulted in pushdown for TEXTFILE
-        // using CSV support in S3 Select being put behind a separate "experimental" flag.
-        // TODO: https://github.com/trinodb/trino/issues/17775
-        Session usingAppendInserts = Session.builder(getSession())
-                .setCatalogSessionProperty("hive", "insert_existing_partitions_behavior", "APPEND")
-                .build();
-        List<String> values = ImmutableList.of(
-                "1, true, 11",
-                "2, true, 22",
-                "3, NULL, NULL",
-                "4, false, 44");
-        Session withS3SelectPushdown = Session.builder(getSession())
-                .setCatalogSessionProperty("hive", "s3_select_pushdown_enabled", "true")
-                .setCatalogSessionProperty("hive", "json_native_reader_enabled", "false")
-                .setCatalogSessionProperty("hive", "text_file_native_reader_enabled", "false")
-                .build();
-
-        Session withoutS3SelectPushdown = Session.builder(getSession())
-                .setCatalogSessionProperty("hive", "json_native_reader_enabled", "false")
-                .setCatalogSessionProperty("hive", "text_file_native_reader_enabled", "false")
-                .build();
-
-        try (TestTable table = new TestTable(
-                sql -> getQueryRunner().execute(usingAppendInserts, sql),
-                "hive.%s.test_s3_select_pushdown_experimental_features".formatted(HIVE_TEST_SCHEMA),
-                "(id INT, bool_t BOOLEAN, int_t INT) WITH (format = 'TEXTFILE')",
-                values)) {
-            assertQuery(withoutS3SelectPushdown, "SELECT id FROM " + table.getName() + " WHERE int_t IS NULL", "VALUES 3");
-            assertThat(query(withS3SelectPushdown, "SELECT id FROM " + table.getName() + " WHERE int_t IS NULL")).returnsEmptyResult();
-
-            assertQueryFails(
-                    withS3SelectPushdown,
-                    "SELECT id FROM " + table.getName() + " WHERE bool_t = true",
-                    "S3 returned an error: Error casting:.*");
-        }
-
-        List<String> specialCharacterValues = ImmutableList.of(
-                "1, 'a,comma'",
-                "2, 'a|pipe'",
-                "3, 'an''escaped quote'",
-                "4, 'a~null encoding'");
-        try (TestTable table = new TestTable(
-                sql -> getQueryRunner().execute(usingAppendInserts, sql),
-                "hive.%s.test_s3_select_pushdown_special_characters".formatted(HIVE_TEST_SCHEMA),
-                "(id INT, string_t VARCHAR) WITH (format = 'TEXTFILE', textfile_field_separator=',', textfile_field_separator_escape='|', null_format='~')",
-                specialCharacterValues)) {
-            // These two should return a result, but incorrectly return nothing
-            String selectWithComma = "SELECT id FROM " + table.getName() + " WHERE string_t ='a,comma'";
-            assertQuery(withoutS3SelectPushdown, selectWithComma, "VALUES 1");
-            assertThat(query(withS3SelectPushdown, selectWithComma)).returnsEmptyResult();
-
-            String selectWithPipe = "SELECT id FROM " + table.getName() + " WHERE string_t ='a|pipe'";
-            assertQuery(withoutS3SelectPushdown, selectWithPipe, "VALUES 2");
-            assertThat(query(withS3SelectPushdown, selectWithPipe)).returnsEmptyResult();
-
-            // These two are actually correct
-            assertS3SelectQuery("SELECT id FROM " + table.getName() + " WHERE string_t ='an''escaped quote'", "VALUES 3");
-            assertS3SelectQuery("SELECT id FROM " + table.getName() + " WHERE string_t ='a~null encoding'", "VALUES 4");
-        }
-    }
-
-    private void assertS3SelectQuery(@Language("SQL") String query, @Language("SQL") String expectedValues)
-    {
-        Session withS3SelectPushdown = Session.builder(getSession())
-                .setCatalogSessionProperty("hive", "s3_select_pushdown_enabled", "true")
-                .setCatalogSessionProperty("hive", "json_native_reader_enabled", "false")
-                .setCatalogSessionProperty("hive", "text_file_native_reader_enabled", "false")
-                .build();
-
-        MaterializedResult expectedResult = computeActual(expectedValues);
-        assertQueryStats(
-                withS3SelectPushdown,
-                query,
-                statsWithPushdown -> {
-                    long inputPositionsWithPushdown = statsWithPushdown.getPhysicalInputPositions();
-                    assertQueryStats(
-                            getSession(),
-                            query,
-                            statsWithoutPushdown -> assertThat(statsWithoutPushdown.getPhysicalInputPositions()).isGreaterThan(inputPositionsWithPushdown),
-                            results -> assertEquals(results.getOnlyColumnAsSet(), expectedResult.getOnlyColumnAsSet()));
-                },
-                results -> assertEquals(results.getOnlyColumnAsSet(), expectedResult.getOnlyColumnAsSet()));
-    }
-
-    private void assertNoS3SelectPushdown(@Language("SQL") String query, @Language("SQL") String expectedValues)
-    {
-        Session withS3SelectPushdown = Session.builder(getSession())
-                .setCatalogSessionProperty("hive", "s3_select_pushdown_enabled", "true")
-                .setCatalogSessionProperty("hive", "json_native_reader_enabled", "false")
-                .setCatalogSessionProperty("hive", "text_file_native_reader_enabled", "false")
-                .build();
-
-        MaterializedResult expectedResult = computeActual(expectedValues);
-        assertQueryStats(
-                withS3SelectPushdown,
-                query,
-                statsWithPushdown -> {
-                    long inputPositionsWithPushdown = statsWithPushdown.getPhysicalInputPositions();
-                    assertQueryStats(
-                            getSession(),
-                            query,
-                            statsWithoutPushdown -> assertThat(statsWithoutPushdown.getPhysicalInputPositions()).isEqualTo(inputPositionsWithPushdown),
-                            results -> assertEquals(results.getOnlyColumnAsSet(), expectedResult.getOnlyColumnAsSet()));
-                },
-                results -> assertEquals(results.getOnlyColumnAsSet(), expectedResult.getOnlyColumnAsSet()));
-    }
-
-    @DataProvider
-    public static Object[][] s3SelectFileFormats()
-    {
-        return new Object[][] {
-                {"format = 'JSON'"},
-                {"format = 'TEXTFILE', textfile_field_separator=',', textfile_field_separator_escape='|', null_format='~'"}
-        };
-    }
-
     @Test
     public void testDropStatsPartitionedTable()
     {
@@ -2050,8 +1959,8 @@ public abstract class BaseTestHiveOnDataLake
                 ")").formatted(getFullyQualifiedTestTableName(tableName)));
 
         // Drop stats for partition which does not exist
-        assertThatThrownBy(() -> query(format("CALL system.drop_stats('%s', '%s', ARRAY[ARRAY['partnotfound', '999']])", HIVE_TEST_SCHEMA, tableName)))
-                .hasMessage("No partition found for name: p_varchar=partnotfound/p_integer=999");
+        assertThat(query(format("CALL system.drop_stats('%s', '%s', ARRAY[ARRAY['partnotfound', '999']])", HIVE_TEST_SCHEMA, tableName)))
+                .failure().hasMessage("No partition found for name: p_varchar=partnotfound/p_integer=999");
 
         assertUpdate("INSERT INTO " + getFullyQualifiedTestTableName(tableName) + " VALUES (1, 'part1', 10) , (2, 'part2', 10), (12, 'part2', 20)", 3);
 
@@ -2081,8 +1990,8 @@ public abstract class BaseTestHiveOnDataLake
         assertUpdate("DELETE FROM " + getFullyQualifiedTestTableName(tableName) + " WHERE p_varchar ='part1' and p_integer = 10");
 
         // Drop stats for partition which does not exist
-        assertThatThrownBy(() -> query(format("CALL system.drop_stats('%s', '%s', ARRAY[ARRAY['part1', '10']])", HIVE_TEST_SCHEMA, tableName)))
-                .hasMessage("No partition found for name: p_varchar=part1/p_integer=10");
+        assertThat(query(format("CALL system.drop_stats('%s', '%s', ARRAY[ARRAY['part1', '10']])", HIVE_TEST_SCHEMA, tableName)))
+                .failure().hasMessage("No partition found for name: p_varchar=part1/p_integer=10");
 
         assertQuery("SHOW STATS FOR " + getFullyQualifiedTestTableName(tableName),
                 """
@@ -2101,9 +2010,9 @@ public abstract class BaseTestHiveOnDataLake
         String schemaName = "test_unsupported_drop_schema_cascade_" + randomNameSuffix();
         String icebergTableName = "test_dummy_iceberg_table" + randomNameSuffix();
 
-        hiveMinioDataLake.getHiveHadoop().runOnHive("CREATE DATABASE %2$s LOCATION 's3a://%1$s/%2$s'".formatted(bucketName, schemaName));
+        hiveMinioDataLake.runOnHive("CREATE DATABASE %2$s LOCATION 's3a://%1$s/%2$s'".formatted(bucketName, schemaName));
         try {
-            hiveMinioDataLake.getHiveHadoop().runOnHive("CREATE TABLE " + schemaName + "." + icebergTableName + " TBLPROPERTIES ('table_type'='iceberg') AS SELECT 1 a");
+            hiveMinioDataLake.runOnHive("CREATE TABLE " + schemaName + "." + icebergTableName + " TBLPROPERTIES ('table_type'='iceberg') AS SELECT 1 a");
 
             assertQueryFails("DROP SCHEMA " + schemaName + " CASCADE", "\\QCannot query Iceberg table '%s.%s'".formatted(schemaName, icebergTableName));
 
@@ -2112,8 +2021,82 @@ public abstract class BaseTestHiveOnDataLake
             assertThat(hiveMinioDataLake.getMinioClient().listObjects(bucketName, schemaName).stream()).isNotEmpty();
         }
         finally {
-            hiveMinioDataLake.getHiveHadoop().runOnHive("DROP DATABASE IF EXISTS " + schemaName + " CASCADE");
+            hiveMinioDataLake.runOnHive("DROP DATABASE IF EXISTS " + schemaName + " CASCADE");
         }
+    }
+
+    @Test
+    public void testUnsupportedCommentOnHiveView()
+    {
+        String viewName = HIVE_TEST_SCHEMA + ".test_unsupported_comment_on_hive_view_" + randomNameSuffix();
+
+        hiveMinioDataLake.runOnHive("CREATE VIEW " + viewName + " AS SELECT 1 x");
+        try {
+            assertQueryFails("COMMENT ON COLUMN " + viewName + ".x IS NULL", "Hive views are not supported.*");
+        }
+        finally {
+            hiveMinioDataLake.runOnHive("DROP VIEW " + viewName);
+        }
+    }
+
+    @Test
+    public void testCreateFunction()
+    {
+        String name = "test_" + randomNameSuffix();
+        String name2 = "test_" + randomNameSuffix();
+
+        assertUpdate("CREATE FUNCTION " + name + "(x integer) RETURNS bigint RETURN x * 10");
+        assertQuery("SELECT " + name + "(99)", "SELECT 990");
+
+        assertUpdate("CREATE OR REPLACE FUNCTION " + name + "(x integer) RETURNS bigint COMMENT 't42' RETURN x * 42");
+        assertQuery("SELECT " + name + "(99)", "SELECT 4158");
+
+        assertQueryFails("SELECT " + name + "(2.9)", ".*Unexpected parameters.*");
+
+        assertUpdate("CREATE FUNCTION " + name + "(x double) RETURNS double COMMENT 't88' RETURN x * 8.8");
+
+        assertThat(query("SHOW FUNCTIONS"))
+                .result()
+                .skippingTypesCheck()
+                .containsAll(resultBuilder(getSession())
+                        .row(name, "bigint", "integer", "scalar", true, "t42")
+                        .row(name, "double", "double", "scalar", true, "t88")
+                        .build());
+
+        assertQuery("SELECT " + name + "(99)", "SELECT 4158");
+        assertQuery("SELECT " + name + "(2.9)", "SELECT 25.52");
+
+        assertQueryFails("CREATE FUNCTION " + name + "(x int) RETURNS bigint RETURN x", "line 1:1: Function already exists");
+
+        assertQuery("SELECT " + name + "(99)", "SELECT 4158");
+        assertQuery("SELECT " + name + "(2.9)", "SELECT 25.52");
+
+        assertUpdate("CREATE OR REPLACE FUNCTION " + name + "(x bigint) RETURNS bigint RETURN x * 23");
+        assertUpdate("CREATE FUNCTION " + name2 + "(s varchar) RETURNS varchar RETURN 'Hello ' || s");
+
+        assertThat(query("SHOW FUNCTIONS"))
+                .result()
+                .skippingTypesCheck()
+                .containsAll(resultBuilder(getSession())
+                        .row(name, "bigint", "integer", "scalar", true, "t42")
+                        .row(name, "bigint", "bigint", "scalar", true, "")
+                        .row(name, "double", "double", "scalar", true, "t88")
+                        .row(name2, "varchar", "varchar", "scalar", true, "")
+                        .build());
+
+        assertQuery("SELECT " + name + "(99)", "SELECT 4158");
+        assertQuery("SELECT " + name + "(cast(99 as bigint))", "SELECT 2277");
+        assertQuery("SELECT " + name + "(2.9)", "SELECT 25.52");
+        assertQuery("SELECT " + name2 + "('world')", "SELECT 'Hello world'");
+
+        assertQueryFails("DROP FUNCTION " + name + "(varchar)", "line 1:1: Function not found");
+        assertUpdate("DROP FUNCTION " + name + "(z bigint)");
+        assertUpdate("DROP FUNCTION " + name + "(double)");
+        assertUpdate("DROP FUNCTION " + name + "(int)");
+        assertQueryFails("DROP FUNCTION " + name + "(bigint)", "line 1:1: Function not found");
+        assertUpdate("DROP FUNCTION IF EXISTS " + name + "(bigint)");
+        assertUpdate("DROP FUNCTION " + name2 + "(varchar)");
+        assertQueryFails("DROP FUNCTION " + name2 + "(varchar)", "line 1:1: Function not found");
     }
 
     private void renamePartitionResourcesOutsideTrino(String tableName, String partitionColumn, String regionKey)
@@ -2124,7 +2107,7 @@ public abstract class BaseTestHiveOnDataLake
 
         // Copy whole partition to new location
         MinioClient minioClient = hiveMinioDataLake.getMinioClient();
-        minioClient.listObjects(bucketName, "/")
+        minioClient.listObjects(bucketName, "")
                 .forEach(objectKey -> {
                     if (objectKey.startsWith(partitionS3KeyPrefix)) {
                         String fileName = objectKey.substring(objectKey.lastIndexOf('/'));
@@ -2134,20 +2117,23 @@ public abstract class BaseTestHiveOnDataLake
                 });
 
         // Delete old partition and update metadata to point to location of new copy
-        Table hiveTable = metastoreClient.getTable(HIVE_TEST_SCHEMA, tableName).get();
-        Partition hivePartition = metastoreClient.getPartition(hiveTable, List.of(regionKey)).get();
-        Map<String, PartitionStatistics> partitionStatistics =
-                metastoreClient.getPartitionStatistics(hiveTable, List.of(hivePartition));
+        Table hiveTable = metastoreClient.getTable(HIVE_TEST_SCHEMA, tableName).orElseThrow();
+        Partition partition = metastoreClient.getPartition(hiveTable, List.of(regionKey)).orElseThrow();
+        Map<String, Map<String, HiveColumnStatistics>> partitionStatistics = metastoreClient.getPartitionColumnStatistics(
+                HIVE_TEST_SCHEMA,
+                tableName,
+                ImmutableSet.of(partitionName),
+                partition.getColumns().stream().map(Column::getName).collect(toSet()));
 
         metastoreClient.dropPartition(HIVE_TEST_SCHEMA, tableName, List.of(regionKey), true);
         metastoreClient.addPartitions(HIVE_TEST_SCHEMA, tableName, List.of(
                 new PartitionWithStatistics(
-                        Partition.builder(hivePartition)
+                        Partition.builder(partition)
                                 .withStorage(builder -> builder.setLocation(
-                                        hivePartition.getStorage().getLocation() + renamedPartitionSuffix))
+                                        partition.getStorage().getLocation() + renamedPartitionSuffix))
                                 .build(),
                         partitionName,
-                        partitionStatistics.get(partitionName))));
+                        new PartitionStatistics(getHiveBasicStatistics(partition.getParameters()), partitionStatistics.get(partitionName)))));
     }
 
     protected void assertInsertFailure(String testTable, String expectedMessageRegExp)
@@ -2188,6 +2174,7 @@ public abstract class BaseTestHiveOnDataLake
                         ImmutableList.of("'CZECH'", "'Test Data'", "26", "5"))));
         query(format("SELECT name, comment, nationkey, regionkey FROM %s WHERE regionkey = 5", testTable))
                 .assertThat()
+                .result()
                 .skippingTypesCheck()
                 .containsAll(resultBuilder(getSession())
                         .row("POLAND", "Test Data", 25L, 5L)
@@ -2200,6 +2187,7 @@ public abstract class BaseTestHiveOnDataLake
                         ImmutableList.of("'POLAND'", "'Overwrite'", "25", "5"))));
         query(format("SELECT name, comment, nationkey, regionkey FROM %s WHERE regionkey = 5", testTable))
                 .assertThat()
+                .result()
                 .skippingTypesCheck()
                 .containsAll(resultBuilder(getSession())
                         .row("POLAND", "Overwrite", 25L, 5L)
@@ -2250,7 +2238,7 @@ public abstract class BaseTestHiveOnDataLake
                         "    comment varchar(152),  " +
                         "    nationkey bigint, " +
                         "    regionkey bigint) " +
-                        (propertiesEntries.size() < 1 ? "" : propertiesEntries
+                        (propertiesEntries.isEmpty() ? "" : propertiesEntries
                                 .stream()
                                 .collect(joining(",", "WITH (", ")"))),
                 tableName);
@@ -2267,12 +2255,14 @@ public abstract class BaseTestHiveOnDataLake
         computeActual(format("INSERT INTO " + testTable + " SELECT %s, %s, regionkey FROM tpch.tiny.nation WHERE nationkey = 9", scaledColumnExpression, scaledColumnExpression));
         query(format("SELECT length(col1) FROM %s", testTable))
                 .assertThat()
+                .result()
                 .skippingTypesCheck()
                 .containsAll(resultBuilder(getSession())
                         .row(114L * scaleFactorInThousands * 1000)
                         .build());
         query(format("SELECT \"$file_size\" BETWEEN %d AND %d FROM %s", fileSizeRangeStart, fileSizeRangeEnd, testTable))
                 .assertThat()
+                .result()
                 .skippingTypesCheck()
                 .containsAll(resultBuilder(getSession())
                         .row(true)
@@ -2310,5 +2300,21 @@ public abstract class BaseTestHiveOnDataLake
     private String getTableLocation(String tableName)
     {
         return (String) computeScalar("SELECT DISTINCT regexp_replace(\"$path\", '/[^/]*$', '') FROM " + tableName);
+    }
+
+    @Test
+    public void testInsertOverwritePartitionedAndBucketedAcidTable()
+    {
+        String testTable = getFullyQualifiedTestTableName();
+        computeActual(getCreateTableStatement(
+                testTable,
+                "partitioned_by=ARRAY['regionkey']",
+                "bucketed_by = ARRAY['nationkey']",
+                "bucket_count = 3",
+                "format = 'ORC'",
+                "transactional = true"));
+        assertInsertFailure(
+                testTable,
+                "Overwriting existing partition in transactional tables doesn't support DIRECT_TO_TARGET_EXISTING_DIRECTORY write mode");
     }
 }

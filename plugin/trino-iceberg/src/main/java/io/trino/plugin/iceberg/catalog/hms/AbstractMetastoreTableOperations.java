@@ -14,16 +14,15 @@
 package io.trino.plugin.iceberg.catalog.hms;
 
 import io.trino.annotation.NotThreadSafe;
-import io.trino.plugin.hive.TableAlreadyExistsException;
+import io.trino.metastore.PrincipalPrivileges;
+import io.trino.metastore.Table;
+import io.trino.metastore.cache.CachingHiveMetastore;
 import io.trino.plugin.hive.metastore.MetastoreUtil;
-import io.trino.plugin.hive.metastore.PrincipalPrivileges;
-import io.trino.plugin.hive.metastore.Table;
-import io.trino.plugin.hive.metastore.cache.CachingHiveMetastore;
+import io.trino.plugin.iceberg.CreateTableException;
 import io.trino.plugin.iceberg.UnknownTableTypeException;
 import io.trino.plugin.iceberg.catalog.AbstractIcebergTableOperations;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ConnectorSession;
-import io.trino.spi.connector.SchemaNotFoundException;
 import io.trino.spi.connector.TableNotFoundException;
 import org.apache.iceberg.TableMetadata;
 import org.apache.iceberg.io.FileIO;
@@ -31,13 +30,15 @@ import org.apache.iceberg.io.FileIO;
 import java.util.Optional;
 
 import static com.google.common.base.Verify.verify;
-import static io.trino.plugin.hive.HiveMetadata.TABLE_COMMENT;
+import static io.trino.metastore.PrincipalPrivileges.NO_PRIVILEGES;
+import static io.trino.metastore.Table.TABLE_COMMENT;
 import static io.trino.plugin.hive.TableType.EXTERNAL_TABLE;
 import static io.trino.plugin.hive.ViewReaderUtil.isTrinoMaterializedView;
 import static io.trino.plugin.hive.ViewReaderUtil.isTrinoView;
-import static io.trino.plugin.hive.metastore.PrincipalPrivileges.NO_PRIVILEGES;
 import static io.trino.plugin.hive.util.HiveUtil.isIcebergTable;
 import static io.trino.plugin.iceberg.IcebergErrorCode.ICEBERG_INVALID_METADATA;
+import static io.trino.plugin.iceberg.IcebergTableName.isMaterializedViewStorage;
+import static io.trino.plugin.iceberg.IcebergTableName.tableNameFrom;
 import static java.lang.String.format;
 import static java.util.Locale.ENGLISH;
 import static java.util.Objects.requireNonNull;
@@ -66,19 +67,28 @@ public abstract class AbstractMetastoreTableOperations
     }
 
     @Override
-    protected final String getRefreshedLocation(boolean invalidateCaches)
+    protected String getRefreshedLocation(boolean invalidateCaches)
     {
         if (invalidateCaches) {
             metastore.invalidateTable(database, tableName);
         }
-        Table table = getTable();
 
-        if (isTrinoView(table) || isTrinoMaterializedView(table)) {
+        boolean isMaterializedViewStorageTable = isMaterializedViewStorage(tableName);
+
+        Table table;
+        if (isMaterializedViewStorageTable) {
+            table = getTable(database, tableNameFrom(tableName));
+        }
+        else {
+            table = getTable();
+        }
+
+        if (!isMaterializedViewStorageTable && (isTrinoView(table) || isTrinoMaterializedView(table))) {
             // this is a Hive view or Trino/Presto view, or Trino materialized view, hence not a table
             // TODO table operations should not be constructed for views (remove exception-driven code path)
             throw new TableNotFoundException(getSchemaTableName());
         }
-        if (!isIcebergTable(table)) {
+        if (!isMaterializedViewStorageTable && !isIcebergTable(table)) {
             throw new UnknownTableTypeException(getSchemaTableName());
         }
 
@@ -113,11 +123,11 @@ public abstract class AbstractMetastoreTableOperations
         try {
             metastore.createTable(table, privileges);
         }
-        catch (SchemaNotFoundException
-               | TableAlreadyExistsException e) {
-            // clean up metadata files corresponding to the current transaction
+        catch (Exception e) {
+            // clean up metadata file corresponding to the current transaction
             fileIo.deleteFile(newMetadataLocation);
-            throw e;
+            // wrap exception in CleanableFailure to ensure that manifest list Avro files are also cleaned up
+            throw new CreateTableException(e, getSchemaTableName());
         }
     }
 
@@ -132,6 +142,11 @@ public abstract class AbstractMetastoreTableOperations
     }
 
     protected Table getTable()
+    {
+        return getTable(database, tableName);
+    }
+
+    protected Table getTable(String database, String tableName)
     {
         return metastore.getTable(database, tableName)
                 .orElseThrow(() -> new TableNotFoundException(getSchemaTableName()));

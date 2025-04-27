@@ -16,12 +16,12 @@ package io.trino.plugin.iceberg.catalog.jdbc;
 import com.google.common.collect.ImmutableMap;
 import com.google.inject.Inject;
 import io.trino.filesystem.TrinoFileSystemFactory;
-import io.trino.plugin.base.CatalogName;
 import io.trino.plugin.iceberg.IcebergConfig;
 import io.trino.plugin.iceberg.catalog.IcebergTableOperationsProvider;
 import io.trino.plugin.iceberg.catalog.TrinoCatalog;
 import io.trino.plugin.iceberg.catalog.TrinoCatalogFactory;
 import io.trino.plugin.iceberg.fileio.ForwardingFileIo;
+import io.trino.spi.catalog.CatalogName;
 import io.trino.spi.security.ConnectorIdentity;
 import io.trino.spi.type.TypeManager;
 import jakarta.annotation.PreDestroy;
@@ -71,8 +71,10 @@ public class TrinoJdbcCatalogFactory
         ImmutableMap.Builder<String, String> properties = ImmutableMap.builder();
         properties.put(URI, jdbcConfig.getConnectionUrl());
         properties.put(WAREHOUSE_LOCATION, defaultWarehouseDir);
+        properties.put(PROPERTY_PREFIX + "schema-version", jdbcConfig.getSchemaVersion().toString());
         jdbcConfig.getConnectionUser().ifPresent(user -> properties.put(PROPERTY_PREFIX + "user", user));
         jdbcConfig.getConnectionPassword().ifPresent(password -> properties.put(PROPERTY_PREFIX + "password", password));
+        jdbcConfig.getRetryableStatusCodes().ifPresent(codes -> properties.put("retryable_status_codes", codes));
         this.catalogProperties = properties.buildOrThrow();
 
         this.clientPool = new JdbcClientPool(jdbcConfig.getConnectionUrl(), catalogProperties);

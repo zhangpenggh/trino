@@ -83,9 +83,7 @@ public class TaskOutputOperator
         }
 
         @Override
-        public void noMoreOperators()
-        {
-        }
+        public void noMoreOperators() {}
 
         @Override
         public OperatorFactory duplicate()
@@ -122,6 +120,7 @@ public class TaskOutputOperator
     @Override
     public void finish()
     {
+        updateMetrics();
         finished = true;
     }
 
@@ -134,7 +133,7 @@ public class TaskOutputOperator
     @Override
     public ListenableFuture<Void> isBlocked()
     {
-        // Avoid re-synchronizing on the output buffer when operator is already blocked
+        // Avoid re-synchronizing on the output buffer when the operator is already blocked
         if (isBlocked.isDone()) {
             isBlocked = outputBuffer.isFull();
             if (isBlocked.isDone()) {
@@ -162,21 +161,27 @@ public class TaskOutputOperator
 
         outputBuffer.enqueue(splitAndSerializePage(page));
         operatorContext.recordOutput(page.getSizeInBytes(), page.getPositionCount());
+        updateMetrics();
     }
 
     private List<Slice> splitAndSerializePage(Page page)
     {
-        List<Page> split = splitPage(page, DEFAULT_MAX_PAGE_SIZE_IN_BYTES);
-        ImmutableList.Builder<Slice> builder = ImmutableList.builderWithExpectedSize(split.size());
-        for (Page p : split) {
-            builder.add(serializer.serialize(p));
+        List<Page> inputPages = splitPage(page, DEFAULT_MAX_PAGE_SIZE_IN_BYTES);
+        ImmutableList.Builder<Slice> serializedPages = ImmutableList.builderWithExpectedSize(inputPages.size());
+        for (Page inputPage : inputPages) {
+            serializedPages.add(serializer.serialize(inputPage));
         }
-        return builder.build();
+        return serializedPages.build();
     }
 
     @Override
     public Page getOutput()
     {
         return null;
+    }
+
+    private void updateMetrics()
+    {
+        operatorContext.setLatestMetrics(serializer.getMetrics());
     }
 }

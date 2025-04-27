@@ -73,7 +73,8 @@ public abstract class AbstractResourceConfigurationManager
                     case WEIGHTED_FAIR:
                         checkArgument(
                                 subGroups.stream().allMatch(t -> t.getSchedulingWeight().isPresent()) || subGroups.stream().noneMatch(t -> t.getSchedulingWeight().isPresent()),
-                                format("Must specify scheduling weight for all sub-groups of '%s' or none of them", group.getName()));
+                                "Must specify scheduling weight for all sub-groups of '%s' or none of them",
+                                group.getName());
                         break;
                     case QUERY_PRIORITY:
                     case FAIR:
@@ -96,6 +97,8 @@ public abstract class AbstractResourceConfigurationManager
             selectors.add(new StaticSelector(
                     spec.getUserRegex(),
                     spec.getUserGroupRegex(),
+                    spec.getOriginalUserRegex(),
+                    spec.getAuthenticatedUserRegex(),
                     spec.getSourceRegex(),
                     spec.getClientTags(),
                     spec.getResourceEstimate(),
@@ -191,7 +194,10 @@ public abstract class AbstractResourceConfigurationManager
     protected void configureGroup(ResourceGroup group, ResourceGroupSpec match)
     {
         if (match.getSoftMemoryLimit().isPresent()) {
-            group.setSoftMemoryLimitBytes(match.getSoftMemoryLimit().get().toBytes());
+            synchronized (memoryPoolFraction) {
+                memoryPoolFraction.remove(group);
+                group.setSoftMemoryLimitBytes(match.getSoftMemoryLimit().get().toBytes());
+            }
         }
         else {
             synchronized (memoryPoolFraction) {

@@ -21,7 +21,9 @@ import io.trino.tests.product.launcher.env.DockerContainer;
 import io.trino.tests.product.launcher.env.Environment;
 import io.trino.tests.product.launcher.env.EnvironmentConfig;
 import io.trino.tests.product.launcher.env.EnvironmentProvider;
+import io.trino.tests.product.launcher.env.Ipv6;
 import io.trino.tests.product.launcher.env.ServerPackage;
+import io.trino.tests.product.launcher.env.Tracing;
 import io.trino.tests.product.launcher.env.common.Hadoop;
 import io.trino.tests.product.launcher.env.common.Standard;
 import io.trino.tests.product.launcher.env.common.TestsEnvironment;
@@ -51,6 +53,8 @@ public final class EnvMultinodeTls
     private final String imagesVersion;
     private final File serverPackage;
     private final boolean debug;
+    private final boolean tracing;
+    private final boolean ipv6;
     private final JdkProvider jdkProvider;
 
     @Inject
@@ -62,7 +66,9 @@ public final class EnvMultinodeTls
             EnvironmentConfig environmentConfig,
             @ServerPackage File serverPackage,
             JdkProvider jdkProvider,
-            @Debug boolean debug)
+            @Debug boolean debug,
+            @Tracing boolean tracing,
+            @Ipv6 boolean ipv6)
     {
         super(ImmutableList.of(standard, hadoop));
         this.dockerFiles = requireNonNull(dockerFiles, "dockerFiles is null");
@@ -71,6 +77,8 @@ public final class EnvMultinodeTls
         this.jdkProvider = requireNonNull(jdkProvider, "jdkProvider is null");
         this.serverPackage = requireNonNull(serverPackage, "serverPackage is null");
         this.debug = debug;
+        this.tracing = tracing;
+        this.ipv6 = ipv6;
     }
 
     @Override
@@ -93,7 +101,7 @@ public final class EnvMultinodeTls
 
     private DockerContainer createTrinoWorker(String workerName)
     {
-        return createTrinoContainer(dockerFiles, serverPackage, jdkProvider, debug, "ghcr.io/trinodb/testing/centos7-oj17:" + imagesVersion, workerName)
+        return createTrinoContainer(dockerFiles, serverPackage, jdkProvider, debug, tracing, ipv6, "ghcr.io/trinodb/testing/almalinux9-oj17:" + imagesVersion, workerName)
                 .withCreateContainerCmdModifier(createContainerCmd -> createContainerCmd.withDomainName("docker.cluster"))
                 .withCopyFileToContainer(forHostPath(dockerFiles.getDockerFilesHostPath("conf/environment/multinode-tls/config-worker.properties")), CONTAINER_TRINO_CONFIG_PROPERTIES)
                 .withCopyFileToContainer(forHostPath(dockerFiles.getDockerFilesHostPath("common/hadoop/hive.properties")), CONTAINER_TRINO_HIVE_PROPERTIES)

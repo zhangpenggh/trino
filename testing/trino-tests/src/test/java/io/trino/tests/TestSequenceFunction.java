@@ -16,13 +16,12 @@ package io.trino.tests;
 import io.trino.testing.AbstractTestQueryFramework;
 import io.trino.testing.DistributedQueryRunner;
 import io.trino.testing.QueryRunner;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
-import static io.trino.operator.table.Sequence.SequenceFunctionSplit.DEFAULT_SPLIT_SIZE;
+import static io.trino.operator.table.SequenceFunction.SequenceFunctionSplit.DEFAULT_SPLIT_SIZE;
 import static io.trino.testing.TestingSession.testSessionBuilder;
 import static java.lang.String.format;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class TestSequenceFunction
         extends AbstractTestQueryFramework
@@ -37,7 +36,8 @@ public class TestSequenceFunction
     @Test
     public void testSequence()
     {
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT *
                 FROM TABLE(sequence(0, 8000, 3))
                 """))
@@ -71,7 +71,8 @@ public class TestSequenceFunction
     @Test
     public void testDefaultArguments()
     {
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT *
                 FROM TABLE(sequence(stop => 10))
                 """))
@@ -81,56 +82,62 @@ public class TestSequenceFunction
     @Test
     public void testInvalidArgument()
     {
-        assertThatThrownBy(() -> query("""
+        assertThat(query(
+                """
                 SELECT *
                 FROM TABLE(sequence(
                                     start => -5,
                                     stop => 10,
                                     step => -2))
                 """))
-                .hasMessage("Step must be positive for sequence [-5, 10]");
+                .failure().hasMessage("Step must be positive for sequence [-5, 10]");
 
-        assertThatThrownBy(() -> query("""
+        assertThat(query(
+                """
                 SELECT *
                 FROM TABLE(sequence(
                                     start => 10,
                                     stop => -5,
                                     step => 2))
                 """))
-                .hasMessage("Step must be negative for sequence [10, -5]");
+                .failure().hasMessage("Step must be negative for sequence [10, -5]");
 
-        assertThatThrownBy(() -> query("""
+        assertThat(query(
+                """
                 SELECT *
                 FROM TABLE(sequence(
                                     start => null,
                                     stop => -5,
                                     step => 2))
                 """))
-                .hasMessage("Start is null");
+                .failure().hasMessage("Start is null");
 
-        assertThatThrownBy(() -> query("""
+        assertThat(query(
+                """
                 SELECT *
                 FROM TABLE(sequence(
                                     start => 10,
                                     stop => null,
                                     step => 2))
                 """))
-                .hasMessage("Stop is null");
+                .failure().hasMessage("Stop is null");
 
-        assertThatThrownBy(() -> query("""
+        assertThat(query(
+                """
                 SELECT *
                 FROM TABLE(sequence(
                                     start => 10,
                                     stop => -5,
                                     step => null))
                 """))
-                .hasMessage("Step is null");
+                .failure().hasMessage("Step is null");
     }
 
     @Test
     public void testSingletonSequence()
     {
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT *
                 FROM TABLE(sequence(
                                     start => 10,
@@ -139,7 +146,8 @@ public class TestSequenceFunction
                 """))
                 .matches("VALUES BIGINT '10'");
 
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT *
                 FROM TABLE(sequence(
                                     start => 10,
@@ -148,7 +156,8 @@ public class TestSequenceFunction
                 """))
                 .matches("VALUES BIGINT '10'");
 
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT *
                 FROM TABLE(sequence(
                                     start => 10,
@@ -161,7 +170,8 @@ public class TestSequenceFunction
     @Test
     public void testBigStep()
     {
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT *
                 FROM TABLE(sequence(
                                     start => 10,
@@ -170,7 +180,8 @@ public class TestSequenceFunction
                 """.formatted(Long.MIN_VALUE / (DEFAULT_SPLIT_SIZE - 1))))
                 .matches("VALUES BIGINT '10'");
 
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT *
                 FROM TABLE(sequence(
                                     start => 10,
@@ -179,7 +190,8 @@ public class TestSequenceFunction
                 """.formatted(Long.MIN_VALUE / (DEFAULT_SPLIT_SIZE - 1) - 1)))
                 .matches("VALUES BIGINT '10'");
 
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT DISTINCT x - lag(x, 1) OVER(ORDER BY x DESC)
                 FROM TABLE(sequence(
                                     start => %s,
@@ -188,7 +200,8 @@ public class TestSequenceFunction
                 """.formatted(Long.MAX_VALUE, Long.MIN_VALUE, Long.MIN_VALUE / (DEFAULT_SPLIT_SIZE - 1) - 1)))
                 .matches(format("VALUES (null), (%s)", Long.MIN_VALUE / (DEFAULT_SPLIT_SIZE - 1) - 1));
 
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT *
                 FROM TABLE(sequence(
                                     start => 10,
@@ -197,7 +210,8 @@ public class TestSequenceFunction
                 """.formatted(Long.MIN_VALUE)))
                 .matches("VALUES BIGINT '10'");
 
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT *
                 FROM TABLE(sequence(
                                     start => -5,
@@ -206,7 +220,8 @@ public class TestSequenceFunction
                 """.formatted(Long.MAX_VALUE / (DEFAULT_SPLIT_SIZE - 1))))
                 .matches("VALUES BIGINT '-5'");
 
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT *
                 FROM TABLE(sequence(
                                     start => -5,
@@ -215,7 +230,8 @@ public class TestSequenceFunction
                 """.formatted(Long.MAX_VALUE / (DEFAULT_SPLIT_SIZE - 1) + 1)))
                 .matches("VALUES BIGINT '-5'");
 
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT DISTINCT x - lag(x, 1) OVER(ORDER BY x)
                 FROM TABLE(sequence(
                                     start => %s,
@@ -224,7 +240,8 @@ public class TestSequenceFunction
                 """.formatted(Long.MIN_VALUE, Long.MAX_VALUE, Long.MAX_VALUE / (DEFAULT_SPLIT_SIZE - 1) + 1)))
                 .matches(format("VALUES (null), (%s)", Long.MAX_VALUE / (DEFAULT_SPLIT_SIZE - 1) + 1));
 
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT *
                 FROM TABLE(sequence(
                                     start => -5,
@@ -241,7 +258,8 @@ public class TestSequenceFunction
         long start = 10;
         long step = 5;
         long stop = start + (sequenceLength - 1) * step;
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT count(x), count(DISTINCT x), min(x), max(x)
                 FROM TABLE(sequence(
                                     start => %s,
@@ -252,7 +270,8 @@ public class TestSequenceFunction
 
         sequenceLength = DEFAULT_SPLIT_SIZE * 4 + DEFAULT_SPLIT_SIZE / 2;
         stop = start + (sequenceLength - 1) * step;
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT min(x), max(x)
                 FROM TABLE(sequence(
                                     start => %s,
@@ -263,7 +282,8 @@ public class TestSequenceFunction
 
         step = -5;
         stop = start + (sequenceLength - 1) * step;
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT max(x), min(x)
                 FROM TABLE(sequence(
                                     start => %s,
@@ -279,7 +299,8 @@ public class TestSequenceFunction
         long start = Long.MIN_VALUE + 15;
         long stop = Long.MIN_VALUE + 3;
         long step = -10;
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT *
                 FROM TABLE(sequence(
                                     start => %s,
@@ -290,7 +311,8 @@ public class TestSequenceFunction
 
         start = Long.MIN_VALUE + 1 - (DEFAULT_SPLIT_SIZE - 1) * step;
         stop = Long.MIN_VALUE + 1;
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT max(x), min(x)
                 FROM TABLE(sequence(
                                     start => %s,
@@ -302,7 +324,8 @@ public class TestSequenceFunction
         start = Long.MAX_VALUE - 15;
         stop = Long.MAX_VALUE - 3;
         step = 10;
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT *
                 FROM TABLE(sequence(
                                     start => %s,
@@ -313,7 +336,8 @@ public class TestSequenceFunction
 
         start = Long.MAX_VALUE - 1 - (DEFAULT_SPLIT_SIZE - 1) * step;
         stop = Long.MAX_VALUE - 1;
-        assertThat(query("""
+        assertThat(query(
+                """
                 SELECT min(x), max(x)
                 FROM TABLE(sequence(
                                     start => %s,

@@ -30,11 +30,11 @@ import io.trino.spi.type.BooleanType;
 import io.trino.spi.type.RowType;
 import io.trino.spi.type.StandardTypes;
 import io.trino.sql.query.QueryAssertions;
-import io.trino.testing.LocalQueryRunner;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.parallel.Execution;
 
 import java.util.Collections;
 
@@ -46,9 +46,10 @@ import static io.trino.spi.StandardErrorCode.FUNCTION_NOT_FOUND;
 import static io.trino.spi.StandardErrorCode.INVALID_CAST_ARGUMENT;
 import static io.trino.spi.StandardErrorCode.INVALID_FUNCTION_ARGUMENT;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
+import static io.trino.spi.StandardErrorCode.OPERATOR_NOT_FOUND;
 import static io.trino.spi.StandardErrorCode.TYPE_MISMATCH;
+import static io.trino.spi.function.OperatorType.IDENTICAL;
 import static io.trino.spi.function.OperatorType.INDETERMINATE;
-import static io.trino.spi.function.OperatorType.IS_DISTINCT_FROM;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.spi.type.DecimalType.createDecimalType;
@@ -79,9 +80,10 @@ import static java.util.Collections.emptyList;
 import static java.util.Collections.singletonList;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
-import static org.testng.Assert.assertEquals;
+import static org.junit.jupiter.api.parallel.ExecutionMode.CONCURRENT;
 
 @TestInstance(PER_CLASS)
+@Execution(CONCURRENT)
 public class TestArrayOperators
 {
     private QueryAssertions assertions;
@@ -117,7 +119,7 @@ public class TestArrayOperators
         ArrayType arrayType = new ArrayType(BIGINT);
         Block actualBlock = arrayBlockOf(arrayType, arrayBlockOf(BIGINT, 1L, 2L), arrayBlockOf(BIGINT, 3L));
         DynamicSliceOutput actualSliceOutput = new DynamicSliceOutput(100);
-        writeBlock(((LocalQueryRunner) assertions.getQueryRunner()).getPlannerContext().getBlockEncodingSerde(), actualSliceOutput, actualBlock);
+        writeBlock(assertions.getQueryRunner().getPlannerContext().getBlockEncodingSerde(), actualSliceOutput, actualBlock);
 
         ArrayBlockBuilder expectedBlockBuilder = arrayType.createBlockBuilder(null, 3);
         expectedBlockBuilder.buildEntry(elementBuilder -> {
@@ -127,20 +129,39 @@ public class TestArrayOperators
         expectedBlockBuilder.buildEntry(elementBuilder -> BIGINT.writeLong(elementBuilder, 3));
         Block expectedBlock = expectedBlockBuilder.build();
         DynamicSliceOutput expectedSliceOutput = new DynamicSliceOutput(100);
-        writeBlock(((LocalQueryRunner) assertions.getQueryRunner()).getPlannerContext().getBlockEncodingSerde(), expectedSliceOutput, expectedBlock);
+        writeBlock(assertions.getQueryRunner().getPlannerContext().getBlockEncodingSerde(), expectedSliceOutput, expectedBlock);
 
-        assertEquals(actualSliceOutput.slice(), expectedSliceOutput.slice());
+        assertThat(actualSliceOutput.slice()).isEqualTo(expectedSliceOutput.slice());
     }
 
     @Test
     public void testTypeConstructor()
     {
+        assertThat(assertions.expression("ARRAY[]"))
+                .hasType(new ArrayType(UNKNOWN))
+                .isEqualTo(ImmutableList.of());
+
+        assertThat(assertions.expression("[]"))
+                .hasType(new ArrayType(UNKNOWN))
+                .isEqualTo(ImmutableList.of());
+
         assertThat(assertions.expression("ARRAY[a]")
                 .binding("a", "7"))
                 .hasType(new ArrayType(INTEGER))
                 .isEqualTo(ImmutableList.of(7));
 
+        assertThat(assertions.expression("[a]")
+                .binding("a", "7"))
+                .hasType(new ArrayType(INTEGER))
+                .isEqualTo(ImmutableList.of(7));
+
         assertThat(assertions.expression("ARRAY[a, b]")
+                .binding("a", "12.34E0")
+                .binding("b", "56.78E0"))
+                .hasType(new ArrayType(DOUBLE))
+                .isEqualTo(ImmutableList.of(12.34, 56.78));
+
+        assertThat(assertions.expression("[a, b]")
                 .binding("a", "12.34E0")
                 .binding("b", "56.78E0"))
                 .hasType(new ArrayType(DOUBLE))
@@ -263,11 +284,8 @@ public class TestArrayOperators
     public void testArraySize()
     {
         int size = toIntExact(MAX_FUNCTION_MEMORY.toBytes() + 1);
-        assertTrinoExceptionThrownBy(() -> assertions.expression("array_distinct(ARRAY['" +
-                                                                 "x".repeat(size) + "', '" +
-                                                                 "y".repeat(size) + "', '" +
-                                                                 "z".repeat(size) +
-                                                                 "'])").evaluate())
+        assertTrinoExceptionThrownBy(
+                () -> assertions.expression("array_distinct(ARRAY[lpad('', %1$s , 'x'), lpad('', %1$s , 'y'), lpad('', %1$s , 'z')])".formatted(size)).evaluate())
                 .hasErrorCode(EXCEEDED_FUNCTION_MEMORY_LIMIT);
     }
 
@@ -321,9 +339,7 @@ public class TestArrayOperators
         assertThat(assertions.expression("CAST(a AS JSON)")
                 .binding("a", "ARRAY[3.14E0, 1e-323, 1e308, nan(), infinity(), -infinity(), null]"))
                 .hasType(JSON)
-                .isEqualTo(Runtime.version().feature() >= 19
-                        ? "[3.14,9.9E-324,1.0E308,\"NaN\",\"Infinity\",\"-Infinity\",null]"
-                        : "[3.14,1.0E-323,1.0E308,\"NaN\",\"Infinity\",\"-Infinity\",null]");
+                .isEqualTo("[3.14,9.9E-324,1.0E308,\"NaN\",\"Infinity\",\"-Infinity\",null]");
 
         assertThat(assertions.expression("CAST(a AS JSON)")
                 .binding("a", "ARRAY[DECIMAL '3.14', null]"))
@@ -481,7 +497,9 @@ public class TestArrayOperators
                 .isEqualTo(asList(asList(1L, 2L), asList(3L, null), emptyList(), asList(null, null), null));
 
         assertThat(assertions.expression("CAST(a AS ARRAY(MAP(VARCHAR, BIGINT)))")
-                .binding("a", """
+                .binding(
+                        "a",
+                        """
                         JSON '[
                             {"a": 1, "b": 2},
                             {"none": null, "three": 3},
@@ -499,7 +517,9 @@ public class TestArrayOperators
                         null));
 
         assertThat(assertions.expression("CAST(a AS ARRAY(ROW(k1 BIGINT, k2 VARCHAR)))")
-                .binding("a", """
+                .binding(
+                        "a",
+                        """
                         JSON '[
                             [1, "two"],
                             [3, null],
@@ -951,7 +971,7 @@ public class TestArrayOperators
                 .binding("a", "ARRAY[ARRAY[1]]")
                 .binding("b", "ARRAY[ARRAY['x']]")
                 .evaluate())
-                .hasMessage("line 1:10: Unexpected parameters (array(array(integer)), array(array(varchar(1)))) for function concat. Expected: concat(char(x), char(y)), concat(array(E), E) E, concat(E, array(E)) E, concat(array(E)) E, concat(varchar), concat(varbinary)");
+                .hasMessage("line 1:10: Unexpected parameters (array(array(integer)), array(array(varchar(1)))) for function concat. Expected: concat(E, array(E)) E, concat(array(E)) E, concat(array(E), E) E, concat(char(x), char(y)), concat(varbinary), concat(varchar)");
     }
 
     @Test
@@ -1060,7 +1080,7 @@ public class TestArrayOperators
                 .binding("a", "ARRAY[ARRAY[1]]")
                 .binding("b", "ARRAY['x']")
                 .evaluate())
-                .hasMessage("line 1:10: Unexpected parameters (array(array(integer)), array(varchar(1))) for function concat. Expected: concat(char(x), char(y)), concat(array(E), E) E, concat(E, array(E)) E, concat(array(E)) E, concat(varchar), concat(varbinary)");
+                .hasMessage("line 1:10: Unexpected parameters (array(array(integer)), array(varchar(1))) for function concat. Expected: concat(E, array(E)) E, concat(array(E)) E, concat(array(E), E) E, concat(char(x), char(y)), concat(varbinary), concat(varchar)");
     }
 
     @Test
@@ -1279,13 +1299,13 @@ public class TestArrayOperators
                 .isEqualTo("1.0E0x2.1E0x3.3E0");
 
         assertTrinoExceptionThrownBy(assertions.function("array_join", "ARRAY[ARRAY[1], ARRAY[2]]", "'-'")::evaluate)
-                .hasErrorCode(FUNCTION_NOT_FOUND);
+                .hasErrorCode(OPERATOR_NOT_FOUND);
 
         assertTrinoExceptionThrownBy(assertions.function("array_join", "ARRAY[MAP(ARRAY[1], ARRAY[2])]", "'-'")::evaluate)
-                .hasErrorCode(FUNCTION_NOT_FOUND);
+                .hasErrorCode(OPERATOR_NOT_FOUND);
 
         assertTrinoExceptionThrownBy(assertions.function("array_join", "ARRAY[CAST(row(1, 2) AS row(col0 bigint, col1 bigint))]", "'-'")::evaluate)
-                .hasErrorCode(FUNCTION_NOT_FOUND);
+                .hasErrorCode(OPERATOR_NOT_FOUND);
     }
 
     @Test
@@ -2178,107 +2198,136 @@ public class TestArrayOperators
                 .isEqualTo(ImmutableList.of(ImmutableList.of(1), ImmutableList.of(2)));
 
         // with lambda function
-        assertThat(assertions.expression("array_sort(a, (x, y) -> CASE " +
-                                         "WHEN x IS NULL THEN -1 " +
-                                         "WHEN y IS NULL THEN 1 " +
-                                         "WHEN x < y THEN 1 " +
-                                         "WHEN x = y THEN 0 " +
-                                         "ELSE -1 END)")
+        assertThat(assertions.expression(
+                        """
+                        array_sort(a, (x, y) -> CASE WHEN x IS NULL THEN -1
+                        WHEN y IS NULL THEN 1
+                        WHEN x < y THEN 1
+                        WHEN x = y THEN 0
+                        ELSE -1 END)
+                        """)
                 .binding("a", "ARRAY[2, 3, 2, null, null, 4, 1]"))
                 .hasType(new ArrayType(INTEGER))
                 .isEqualTo(asList(null, null, 4, 3, 2, 2, 1));
 
-        assertThat(assertions.expression("array_sort(a, (x, y) -> CASE " +
-                                         "WHEN x IS NULL THEN 1 " +
-                                         "WHEN y IS NULL THEN -1 " +
-                                         "WHEN x < y THEN 1 " +
-                                         "WHEN x = y THEN 0 " +
-                                         "ELSE -1 END)")
+        assertThat(assertions.expression(
+                        """
+                        array_sort(a, (x, y) -> CASE
+                        WHEN x IS NULL THEN 1
+                        WHEN y IS NULL THEN -1
+                        WHEN x < y THEN 1
+                        WHEN x = y THEN 0
+                        ELSE -1 END)
+                        """)
                 .binding("a", "ARRAY[2, 3, 2, null, null, 4, 1]"))
                 .hasType(new ArrayType(INTEGER))
                 .isEqualTo(asList(4, 3, 2, 2, 1, null, null));
 
-        assertThat(assertions.expression("array_sort(a, (x, y) -> CASE " +
-                                         "WHEN x IS NULL THEN -1 " +
-                                         "WHEN y IS NULL THEN 1 " +
-                                         "WHEN x < y THEN 1 " +
-                                         "WHEN x = y THEN 0 " +
-                                         "ELSE -1 END)")
+        assertThat(assertions.expression(
+                        """
+                        array_sort(a, (x, y) -> CASE
+                        WHEN x IS NULL THEN -1
+                        WHEN y IS NULL THEN 1
+                        WHEN x < y THEN 1
+                        WHEN x = y THEN 0
+                        ELSE -1 END)
+                        """)
                 .binding("a", "ARRAY[2, null, BIGINT '3', 4, null, 1]"))
                 .hasType(new ArrayType(BIGINT))
                 .isEqualTo(asList(null, null, 4L, 3L, 2L, 1L));
 
-        assertThat(assertions.expression("array_sort(a, (x, y) -> CASE " +
-                                         "WHEN x IS NULL THEN -1 " +
-                                         "WHEN y IS NULL THEN 1 " +
-                                         "WHEN x < y THEN 1 " +
-                                         "WHEN x = y THEN 0 " +
-                                         "ELSE -1 END)")
+        assertThat(assertions.expression(
+                        """
+                        array_sort(a, (x, y) -> CASE
+                        WHEN x IS NULL THEN -1
+                        WHEN y IS NULL THEN 1
+                        WHEN x < y THEN 1
+                        WHEN x = y THEN 0
+                        ELSE -1 END)
+                        """)
                 .binding("a", "ARRAY['bc', null, 'ab', 'dc', null]"))
                 .hasType(new ArrayType(createVarcharType(2)))
                 .isEqualTo(asList(null, null, "dc", "bc", "ab"));
 
-        assertThat(assertions.expression("array_sort(a, (x, y) -> CASE " +
-                                         "WHEN x IS NULL THEN -1 " +
-                                         "WHEN y IS NULL THEN 1 " +
-                                         "WHEN length(x) < length(y) THEN 1 " +
-                                         "WHEN length(x) = length(y) THEN 0 " +
-                                         "ELSE -1 END)")
+        assertThat(assertions.expression(
+                        """
+                        array_sort(a, (x, y) -> CASE
+                        WHEN x IS NULL THEN -1
+                        WHEN y IS NULL THEN 1
+                        WHEN length(x) < length(y) THEN 1
+                        WHEN length(x) = length(y) THEN 0
+                        ELSE -1 END)
+                        """)
                 .binding("a", "ARRAY['a', null, 'abcd', null, 'abc', 'zx']"))
                 .hasType(new ArrayType(createVarcharType(4)))
                 .isEqualTo(asList(null, null, "abcd", "abc", "zx", "a"));
 
-        assertThat(assertions.expression("array_sort(a, (x, y) -> CASE " +
-                                         "WHEN x IS NULL THEN -1 " +
-                                         "WHEN y IS NULL THEN 1 " +
-                                         "WHEN x = y THEN 0 " +
-                                         "WHEN x THEN -1 " +
-                                         "ELSE 1 END)")
+        assertThat(assertions.expression(
+                        """
+                        array_sort(a, (x, y) -> CASE
+                        WHEN x IS NULL THEN -1
+                        WHEN y IS NULL THEN 1
+                        WHEN x = y THEN 0
+                        WHEN x THEN -1
+                        ELSE 1 END)
+                        """)
                 .binding("a", "ARRAY[TRUE, null, FALSE, TRUE, null, FALSE, TRUE]"))
                 .hasType(new ArrayType(BOOLEAN))
                 .isEqualTo(asList(null, null, true, true, true, false, false));
 
-        assertThat(assertions.expression("array_sort(a, (x, y) -> CASE " +
-                                         "WHEN x IS NULL THEN -1 " +
-                                         "WHEN y IS NULL THEN 1 " +
-                                         "WHEN x < y THEN 1 " +
-                                         "WHEN x = y THEN 0 " +
-                                         "ELSE -1 END)")
+        assertThat(assertions.expression(
+                        """
+                        array_sort(a, (x, y) -> CASE
+                        WHEN x IS NULL THEN -1
+                        WHEN y IS NULL THEN 1
+                        WHEN x < y THEN 1
+                        WHEN x = y THEN 0
+                        ELSE -1 END)
+                        """)
                 .binding("a", "ARRAY[22.1E0, null, null, 11.1E0, 1.1E0, 44.1E0]"))
                 .hasType(new ArrayType(DOUBLE))
                 .isEqualTo(asList(null, null, 44.1, 22.1, 11.1, 1.1));
 
-        assertThat(assertions.expression("array_sort(a, (x, y) -> CASE " +
-                                         "WHEN x IS NULL THEN -1 " +
-                                         "WHEN y IS NULL THEN 1 " +
-                                         "WHEN date_diff('millisecond', y, x) < 0 THEN 1 " +
-                                         "WHEN date_diff('millisecond', y, x) = 0 THEN 0 " +
-                                         "ELSE -1 END)")
+        assertThat(assertions.expression(
+                        """
+                        array_sort(a, (x, y) -> CASE
+                        WHEN x IS NULL THEN -1
+                        WHEN y IS NULL THEN 1
+                        WHEN date_diff('millisecond', y, x) < 0 THEN 1
+                        WHEN date_diff('millisecond', y, x) = 0 THEN 0
+                        ELSE -1 END)
+                        """)
                 .binding("a", "ARRAY[TIMESTAMP '1973-07-08 22:00:01', NULL, TIMESTAMP '1970-01-01 00:00:01', NULL, TIMESTAMP '1989-02-06 12:00:00']"))
                 .matches("ARRAY[null, null, TIMESTAMP '1989-02-06 12:00:00', TIMESTAMP '1973-07-08 22:00:01', TIMESTAMP '1970-01-01 00:00:01']");
 
-        assertThat(assertions.expression("array_sort(a, (x, y) -> CASE " +
-                                         "WHEN x IS NULL THEN -1 " +
-                                         "WHEN y IS NULL THEN 1 " +
-                                         "WHEN cardinality(x) < cardinality(y) THEN 1 " +
-                                         "WHEN cardinality(x) = cardinality(y) THEN 0 " +
-                                         "ELSE -1 END)")
+        assertThat(assertions.expression(
+                        """
+                        array_sort(a, (x, y) -> CASE
+                        WHEN x IS NULL THEN -1
+                        WHEN y IS NULL THEN 1
+                        WHEN cardinality(x) < cardinality(y) THEN 1
+                        WHEN cardinality(x) = cardinality(y) THEN 0
+                        ELSE -1 END)
+                        """)
                 .binding("a", "ARRAY[ARRAY[2, 3, 1], null, ARRAY[4, null, 2, 1, 4], ARRAY[1, 2], null]"))
                 .hasType(new ArrayType(new ArrayType(INTEGER)))
                 .isEqualTo(asList(null, null, asList(4, null, 2, 1, 4), asList(2, 3, 1), asList(1, 2)));
 
-        assertThat(assertions.expression("array_sort(a, (x, y) -> CASE " +
-                                         "WHEN x IS NULL THEN -1 " +
-                                         "WHEN y IS NULL THEN 1 " +
-                                         "WHEN x < y THEN 1 " +
-                                         "WHEN x = y THEN 0 " +
-                                         "ELSE -1 END)")
+        assertThat(assertions.expression(
+                        """
+                        array_sort(a, (x, y) -> CASE
+                        WHEN x IS NULL THEN -1
+                        WHEN y IS NULL THEN 1
+                        WHEN x < y THEN 1
+                        WHEN x = y THEN 0
+                        ELSE -1 END)
+                        """)
                 .binding("a", "ARRAY[2.3, null, 2.1, null, 2.2]"))
                 .matches("ARRAY[null, null, 2.3, 2.2, 2.1]");
 
         assertThat(assertions.expression("array_sort(a, (x, y) -> CASE " +
-                                         "WHEN month(x) > month(y) THEN 1 " +
-                                         "ELSE -1 END)")
+                        "WHEN month(x) > month(y) THEN 1 " +
+                        "ELSE -1 END)")
                 .binding("a", "ARRAY[TIMESTAMP '1111-06-10 12:34:56.123456789', TIMESTAMP '2020-05-10 12:34:56.123456789']"))
                 .matches("ARRAY[TIMESTAMP '2020-05-10 12:34:56.123456789', TIMESTAMP '1111-06-10 12:34:56.123456789']");
 
@@ -2870,7 +2919,7 @@ public class TestArrayOperators
                 .isEqualTo(ImmutableList.of(asList(123, 456), asList(123, 789)));
 
         assertThat(assertions.function("array_intersect", "ARRAY[ARRAY[123, 456], ARRAY[123, 789]]", "ARRAY[ARRAY[123, 456], ARRAY[123, 456], ARRAY[123, 789]]"))
-                .hasType(new ArrayType(new ArrayType((INTEGER))))
+                .hasType(new ArrayType(new ArrayType(INTEGER)))
                 .isEqualTo(ImmutableList.of(asList(123, 456), asList(123, 789)));
 
         assertThat(assertions.function("array_intersect", "ARRAY[(123, 'abc'), (123, 'cde')]", "ARRAY[(123, 'abc'), (123, 'cde')]"))
@@ -3871,67 +3920,67 @@ public class TestArrayOperators
     }
 
     @Test
-    public void testDistinctFrom()
+    public void testIdentical()
     {
-        assertThat(assertions.operator(IS_DISTINCT_FROM, "CAST(NULL AS ARRAY(UNKNOWN))", "CAST(NULL AS ARRAY(UNKNOWN))"))
+        assertThat(assertions.operator(IDENTICAL, "CAST(NULL AS ARRAY(UNKNOWN))", "CAST(NULL AS ARRAY(UNKNOWN))"))
+                .isEqualTo(true);
+
+        assertThat(assertions.operator(IDENTICAL, "ARRAY[NULL]", "ARRAY[NULL]"))
+                .isEqualTo(true);
+
+        assertThat(assertions.operator(IDENTICAL, "NULL", "ARRAY[1, 2]"))
                 .isEqualTo(false);
 
-        assertThat(assertions.operator(IS_DISTINCT_FROM, "ARRAY[NULL]", "ARRAY[NULL]"))
+        assertThat(assertions.operator(IDENTICAL, "ARRAY[1, 2]", "NULL"))
                 .isEqualTo(false);
 
-        assertThat(assertions.operator(IS_DISTINCT_FROM, "NULL", "ARRAY[1, 2]"))
+        assertThat(assertions.operator(IDENTICAL, "ARRAY[1, 2]", "ARRAY[1, 2]"))
                 .isEqualTo(true);
 
-        assertThat(assertions.operator(IS_DISTINCT_FROM, "ARRAY[1, 2]", "NULL"))
-                .isEqualTo(true);
-
-        assertThat(assertions.operator(IS_DISTINCT_FROM, "ARRAY[1, 2]", "ARRAY[1, 2]"))
+        assertThat(assertions.operator(IDENTICAL, "ARRAY[1, 2, 3]", "ARRAY[1, 2]"))
                 .isEqualTo(false);
 
-        assertThat(assertions.operator(IS_DISTINCT_FROM, "ARRAY[1, 2, 3]", "ARRAY[1, 2]"))
-                .isEqualTo(true);
-
-        assertThat(assertions.operator(IS_DISTINCT_FROM, "ARRAY[1, 2]", "ARRAY[1, NULL]"))
-                .isEqualTo(true);
-
-        assertThat(assertions.operator(IS_DISTINCT_FROM, "ARRAY[1, 2]", "ARRAY[1, 3]"))
-                .isEqualTo(true);
-
-        assertThat(assertions.operator(IS_DISTINCT_FROM, "ARRAY[1, NULL]", "ARRAY[1, NULL]"))
+        assertThat(assertions.operator(IDENTICAL, "ARRAY[1, 2]", "ARRAY[1, NULL]"))
                 .isEqualTo(false);
 
-        assertThat(assertions.operator(IS_DISTINCT_FROM, "ARRAY[1, NULL]", "ARRAY[1, NULL]"))
+        assertThat(assertions.operator(IDENTICAL, "ARRAY[1, 2]", "ARRAY[1, 3]"))
                 .isEqualTo(false);
 
-        assertThat(assertions.operator(IS_DISTINCT_FROM, "ARRAY[1, 2, NULL]", "ARRAY[1, 2]"))
+        assertThat(assertions.operator(IDENTICAL, "ARRAY[1, NULL]", "ARRAY[1, NULL]"))
                 .isEqualTo(true);
 
-        assertThat(assertions.operator(IS_DISTINCT_FROM, "ARRAY[TRUE, FALSE]", "ARRAY[TRUE, FALSE]"))
+        assertThat(assertions.operator(IDENTICAL, "ARRAY[1, NULL]", "ARRAY[1, NULL]"))
+                .isEqualTo(true);
+
+        assertThat(assertions.operator(IDENTICAL, "ARRAY[1, 2, NULL]", "ARRAY[1, 2]"))
                 .isEqualTo(false);
 
-        assertThat(assertions.operator(IS_DISTINCT_FROM, "ARRAY[TRUE, NULL]", "ARRAY[TRUE, FALSE]"))
+        assertThat(assertions.operator(IDENTICAL, "ARRAY[TRUE, FALSE]", "ARRAY[TRUE, FALSE]"))
                 .isEqualTo(true);
 
-        assertThat(assertions.operator(IS_DISTINCT_FROM, "ARRAY[FALSE, NULL]", "ARRAY[NULL, FALSE]"))
-                .isEqualTo(true);
-
-        assertThat(assertions.operator(IS_DISTINCT_FROM, "ARRAY['puppies', 'kittens']", "ARRAY['puppies', 'kittens']"))
+        assertThat(assertions.operator(IDENTICAL, "ARRAY[TRUE, NULL]", "ARRAY[TRUE, FALSE]"))
                 .isEqualTo(false);
 
-        assertThat(assertions.operator(IS_DISTINCT_FROM, "ARRAY['puppies', NULL]", "ARRAY['puppies', 'kittens']"))
-                .isEqualTo(true);
-
-        assertThat(assertions.operator(IS_DISTINCT_FROM, "ARRAY['puppies', NULL]", "ARRAY[NULL, 'kittens']"))
-                .isEqualTo(true);
-
-        assertThat(assertions.operator(IS_DISTINCT_FROM, "ARRAY[ARRAY['puppies'], ARRAY['kittens']]", "ARRAY[ARRAY['puppies'], ARRAY['kittens']]"))
+        assertThat(assertions.operator(IDENTICAL, "ARRAY[FALSE, NULL]", "ARRAY[NULL, FALSE]"))
                 .isEqualTo(false);
 
-        assertThat(assertions.operator(IS_DISTINCT_FROM, "ARRAY[ARRAY['puppies'], NULL]", "ARRAY[ARRAY['puppies'], ARRAY['kittens']]"))
+        assertThat(assertions.operator(IDENTICAL, "ARRAY['puppies', 'kittens']", "ARRAY['puppies', 'kittens']"))
                 .isEqualTo(true);
 
-        assertThat(assertions.operator(IS_DISTINCT_FROM, "ARRAY[ARRAY['puppies'], NULL]", "ARRAY[NULL, ARRAY['kittens']]"))
+        assertThat(assertions.operator(IDENTICAL, "ARRAY['puppies', NULL]", "ARRAY['puppies', 'kittens']"))
+                .isEqualTo(false);
+
+        assertThat(assertions.operator(IDENTICAL, "ARRAY['puppies', NULL]", "ARRAY[NULL, 'kittens']"))
+                .isEqualTo(false);
+
+        assertThat(assertions.operator(IDENTICAL, "ARRAY[ARRAY['puppies'], ARRAY['kittens']]", "ARRAY[ARRAY['puppies'], ARRAY['kittens']]"))
                 .isEqualTo(true);
+
+        assertThat(assertions.operator(IDENTICAL, "ARRAY[ARRAY['puppies'], NULL]", "ARRAY[ARRAY['puppies'], ARRAY['kittens']]"))
+                .isEqualTo(false);
+
+        assertThat(assertions.operator(IDENTICAL, "ARRAY[ARRAY['puppies'], NULL]", "ARRAY[NULL, ARRAY['kittens']]"))
+                .isEqualTo(false);
     }
 
     @Test
@@ -4085,7 +4134,15 @@ public class TestArrayOperators
                 .hasType(new ArrayType(INTEGER))
                 .isEqualTo(ImmutableList.of(1, 1, 1, 1, 1));
 
+        assertThat(assertions.function("repeat", "1", "BIGINT '5'"))
+                .hasType(new ArrayType(INTEGER))
+                .isEqualTo(ImmutableList.of(1, 1, 1, 1, 1));
+
         assertThat(assertions.function("repeat", "'varchar'", "3"))
+                .hasType(new ArrayType(createVarcharType(7)))
+                .isEqualTo(ImmutableList.of("varchar", "varchar", "varchar"));
+
+        assertThat(assertions.function("repeat", "'varchar'", "BIGINT '3'"))
                 .hasType(new ArrayType(createVarcharType(7)))
                 .isEqualTo(ImmutableList.of("varchar", "varchar", "varchar"));
 
@@ -4093,13 +4150,29 @@ public class TestArrayOperators
                 .hasType(new ArrayType(BOOLEAN))
                 .isEqualTo(ImmutableList.of(true));
 
+        assertThat(assertions.function("repeat", "true", "BIGINT '1'"))
+                .hasType(new ArrayType(BOOLEAN))
+                .isEqualTo(ImmutableList.of(true));
+
         assertThat(assertions.function("repeat", "0.5E0", "4"))
+                .hasType(new ArrayType(DOUBLE))
+                .isEqualTo(ImmutableList.of(0.5, 0.5, 0.5, 0.5));
+
+        assertThat(assertions.function("repeat", "0.5E0", "BIGINT '4'"))
                 .hasType(new ArrayType(DOUBLE))
                 .isEqualTo(ImmutableList.of(0.5, 0.5, 0.5, 0.5));
 
         assertThat(assertions.function("repeat", "array[1]", "4"))
                 .hasType(new ArrayType(new ArrayType(INTEGER)))
                 .isEqualTo(ImmutableList.of(ImmutableList.of(1), ImmutableList.of(1), ImmutableList.of(1), ImmutableList.of(1)));
+
+        assertThat(assertions.function("repeat", "array[1]", "BIGINT '4'"))
+                .hasType(new ArrayType(new ArrayType(INTEGER)))
+                .isEqualTo(ImmutableList.of(ImmutableList.of(1), ImmutableList.of(1), ImmutableList.of(1), ImmutableList.of(1)));
+
+        assertThat(assertions.function("repeat", "array[NULL]", "BIGINT '4'"))
+                .hasType(new ArrayType(new ArrayType(UNKNOWN)))
+                .isEqualTo(ImmutableList.of(singletonList(null), singletonList(null), singletonList(null), singletonList(null)));
 
         // null values
         assertThat(assertions.function("repeat", "null", "4"))

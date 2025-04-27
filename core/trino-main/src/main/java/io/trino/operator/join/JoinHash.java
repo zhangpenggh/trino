@@ -159,11 +159,9 @@ public final class JoinHash
     @Override
     public void appendTo(long position, PageBuilder pageBuilder, int outputChannelOffset)
     {
-        pagesHash.appendTo(toIntExact(position), pageBuilder, outputChannelOffset);
+        pagesHash.appendTo(position, pageBuilder, outputChannelOffset);
     }
 
     @Override
-    public void close()
-    {
-    }
+    public void close() {}
 }

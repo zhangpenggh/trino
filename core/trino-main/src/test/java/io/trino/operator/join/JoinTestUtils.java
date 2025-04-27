@@ -77,25 +77,22 @@ public final class JoinTestUtils
     public static OperatorFactory innerJoinOperatorFactory(
             JoinBridgeManager<PartitionedLookupSourceFactory> lookupSourceFactoryManager,
             RowPagesBuilder probePages,
-            PartitioningSpillerFactory partitioningSpillerFactory,
-            boolean hasFilter)
+            PartitioningSpillerFactory partitioningSpillerFactory)
     {
-        return innerJoinOperatorFactory(lookupSourceFactoryManager, probePages, partitioningSpillerFactory, false, hasFilter);
+        return innerJoinOperatorFactory(lookupSourceFactoryManager, probePages, partitioningSpillerFactory, false);
     }
 
     public static OperatorFactory innerJoinOperatorFactory(
             JoinBridgeManager<PartitionedLookupSourceFactory> lookupSourceFactoryManager,
             RowPagesBuilder probePages,
             PartitioningSpillerFactory partitioningSpillerFactory,
-            boolean outputSingleMatch,
-            boolean hasFilter)
+            boolean outputSingleMatch)
     {
         return spillingJoin(
                 innerJoin(outputSingleMatch, false),
                 0,
                 new PlanNodeId("test"),
                 lookupSourceFactoryManager,
-                hasFilter,
                 probePages.getTypes(),
                 probePages.getHashChannels().orElseThrow(),
                 getHashChannelAsInt(probePages),
@@ -152,7 +149,8 @@ public final class JoinTestUtils
                 buildPages.getHashChannel(),
                 DataSize.of(32, DataSize.Unit.MEGABYTE),
                 TYPE_OPERATORS,
-                DataSize.of(32, DataSize.Unit.MEGABYTE));
+                DataSize.of(32, DataSize.Unit.MEGABYTE),
+                () -> 0L);
 
         // collect input data into the partitioned exchange
         DriverContext collectDriverContext = taskContext.addPipelineContext(0, true, true, false).addDriverContext();
@@ -317,14 +315,16 @@ public final class JoinTestUtils
         private volatile boolean failSpill;
         private volatile boolean failUnspill;
 
-        public void failSpill()
+        public DummySpillerFactory failSpill()
         {
             failSpill = true;
+            return this;
         }
 
-        public void failUnspill()
+        public DummySpillerFactory failUnspill()
         {
             failUnspill = true;
+            return this;
         }
 
         @Override

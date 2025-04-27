@@ -13,7 +13,9 @@
  */
 package io.trino.util;
 
+import com.google.common.base.Supplier;
 import com.google.common.collect.ImmutableList;
+import com.google.errorprone.annotations.FormatMethod;
 import io.trino.client.ErrorLocation;
 import io.trino.execution.ExecutionFailureInfo;
 import io.trino.execution.Failure;
@@ -57,10 +59,16 @@ public final class Failures
         return toFailure(failure, newIdentityHashSet());
     }
 
+    @FormatMethod
     public static void checkCondition(boolean condition, ErrorCodeSupplier errorCode, String formatString, Object... args)
     {
+        checkCondition(condition, errorCode, () -> format(formatString, args));
+    }
+
+    public static void checkCondition(boolean condition, ErrorCodeSupplier errorCode, Supplier<String> errorMessage)
+    {
         if (!condition) {
-            throw new TrinoException(errorCode, format(formatString, args));
+            throw new TrinoException(errorCode, errorMessage.get());
         }
     }
 
@@ -79,15 +87,15 @@ public final class Failures
 
         String type;
         HostAddress remoteHost = null;
-        if (throwable instanceof Failure) {
-            type = ((Failure) throwable).getType();
+        if (throwable instanceof Failure failure) {
+            type = failure.getFailureInfo().getType();
         }
         else {
             Class<?> clazz = throwable.getClass();
             type = firstNonNull(clazz.getCanonicalName(), clazz.getName());
         }
-        if (throwable instanceof TrinoTransportException) {
-            remoteHost = ((TrinoTransportException) throwable).getRemoteHost();
+        if (throwable instanceof TrinoTransportException trinoTransportException) {
+            remoteHost = trinoTransportException.getRemoteHost();
         }
 
         if (seenFailures.contains(throwable)) {
@@ -147,18 +155,12 @@ public final class Failures
     @Nullable
     private static ErrorCode toErrorCode(Throwable throwable)
     {
-        requireNonNull(throwable);
-
-        if (throwable instanceof TrinoException trinoException) {
-            return trinoException.getErrorCode();
-        }
-        if (throwable instanceof Failure failure && failure.getErrorCode() != null) {
-            return failure.getErrorCode();
-        }
-        if (throwable instanceof ParsingException) {
-            return SYNTAX_ERROR.toErrorCode();
-        }
-        return null;
+        return switch (requireNonNull(throwable)) {
+            case TrinoException trinoException -> trinoException.getErrorCode();
+            case Failure failure -> failure.getFailureInfo().getErrorCode();
+            case ParsingException _ -> SYNTAX_ERROR.toErrorCode();
+            default -> null;
+        };
     }
 
     public static TrinoException internalError(Throwable t)

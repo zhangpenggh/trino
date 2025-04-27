@@ -59,6 +59,8 @@ public final class ConcatWsFunction
     @ScalarFunction("concat_ws")
     public static final class ConcatArrayWs
     {
+        private ConcatArrayWs() {}
+
         @SqlType("varchar")
         public static Slice concatWsArray(@SqlType("varchar") Slice separator, @SqlType("array(varchar)") Block elements)
         {
@@ -72,8 +74,7 @@ public final class ConcatWsFunction
                             if (elements.isNull(i)) {
                                 return null;
                             }
-                            int sliceLength = elements.getSliceLength(i);
-                            return elements.getSlice(i, 0, sliceLength);
+                            return VARCHAR.getSlice(elements, i);
                         }
 
                         @Override
@@ -87,9 +88,8 @@ public final class ConcatWsFunction
 
     public ConcatWsFunction()
     {
-        super(FunctionMetadata.scalarBuilder()
+        super(FunctionMetadata.scalarBuilder("concat_ws")
                 .signature(Signature.builder()
-                        .name("concat_ws")
                         .returnType(VARCHAR)
                         .argumentType(VARCHAR)
                         .argumentType(VARCHAR)

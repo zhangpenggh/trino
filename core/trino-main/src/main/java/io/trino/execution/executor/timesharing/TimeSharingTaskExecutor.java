@@ -73,7 +73,7 @@ import static com.google.common.collect.Sets.newConcurrentHashSet;
 import static io.airlift.concurrent.Threads.threadsNamed;
 import static io.airlift.tracing.Tracing.noopTracer;
 import static io.trino.execution.executor.timesharing.MultilevelSplitQueue.computeLevel;
-import static io.trino.version.EmbedVersion.testingVersionEmbedder;
+import static io.trino.util.EmbedVersion.testingVersionEmbedder;
 import static java.lang.Math.min;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
@@ -264,7 +264,7 @@ public class TimeSharingTaskExecutor
         try {
             executor.execute(versionEmbedder.embedVersion(new TaskRunner()));
         }
-        catch (RejectedExecutionException ignored) {
+        catch (RejectedExecutionException _) {
         }
     }
 
@@ -293,7 +293,7 @@ public class TimeSharingTaskExecutor
     public void removeTask(TaskHandle taskHandle)
     {
         TimeSharingTaskHandle handle = (TimeSharingTaskHandle) taskHandle;
-        try (SetThreadName ignored = new SetThreadName("Task-%s", handle.getTaskId())) {
+        try (SetThreadName _ = new SetThreadName("Task-" + handle.getTaskId())) {
             // Skip additional scheduling if the task was already destroyed
             if (!doRemoveTask(handle)) {
                 return;
@@ -542,7 +542,7 @@ public class TimeSharingTaskExecutor
         @Override
         public void run()
         {
-            try (SetThreadName runnerName = new SetThreadName("SplitRunner-%s", runnerId)) {
+            try (SetThreadName runnerName = new SetThreadName("SplitRunner-" + runnerId)) {
                 while (!closed && !Thread.currentThread().isInterrupted()) {
                     // select next worker
                     PrioritizedSplitRunner split;
@@ -555,7 +555,7 @@ public class TimeSharingTaskExecutor
                     }
 
                     String threadId = split.getTaskHandle().getTaskId() + "-" + split.getSplitId();
-                    try (SetThreadName splitName = new SetThreadName(threadId)) {
+                    try (SetThreadName _ = new SetThreadName(threadId)) {
                         RunningSplitInfo splitInfo = new RunningSplitInfo(ticker.read(), threadId, Thread.currentThread(), split.getTaskHandle().getTaskId(), split::getInfo);
                         runningSplitInfos.add(splitInfo);
                         runningSplits.add(split);
@@ -594,12 +594,13 @@ public class TimeSharingTaskExecutor
                         // ignore random errors due to driver thread interruption
                         if (!split.isDestroyed()) {
                             if (t instanceof TrinoException trinoException) {
-                                log.error(t, "Error processing %s: %s: %s", split.getInfo(), trinoException.getErrorCode().getName(), trinoException.getMessage());
+                                log.debug(t, "Error processing %s: %s: %s", split.getInfo(), trinoException.getErrorCode().getName(), trinoException.getMessage());
                             }
                             else {
-                                log.error(t, "Error processing %s", split.getInfo());
+                                log.debug(t, "Error processing %s", split.getInfo());
                             }
                         }
+                        split.markFailed(t);
                         splitFinished(split);
                     }
                     finally {
@@ -667,6 +668,12 @@ public class TimeSharingTaskExecutor
     public DistributionStat getLeafSplitsSize()
     {
         return leafSplitsSize;
+    }
+
+    @Managed
+    public synchronized int getCurrentLeafSplitsSize()
+    {
+        return allSplits.size() - intermediateSplits.size();
     }
 
     @Managed
@@ -905,7 +912,7 @@ public class TimeSharingTaskExecutor
             if (duration.compareTo(stuckSplitsWarningThreshold) >= 0) {
                 maxActiveSplitCount++;
                 stackTrace.append("\n");
-                stackTrace.append(format("\"%s\" tid=%s", splitInfo.getThreadId(), splitInfo.getThread().getId())).append("\n");
+                stackTrace.append(format("\"%s\" tid=%s", splitInfo.getThreadId(), splitInfo.getThread().threadId())).append("\n");
                 for (StackTraceElement traceElement : splitInfo.getThread().getStackTrace()) {
                     stackTrace.append("\tat ").append(traceElement).append("\n");
                 }

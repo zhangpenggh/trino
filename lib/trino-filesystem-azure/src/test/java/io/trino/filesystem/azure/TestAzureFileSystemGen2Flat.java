@@ -16,13 +16,12 @@ package io.trino.filesystem.azure;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.api.TestInstance.Lifecycle;
-import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 
 import java.io.IOException;
 
 import static io.trino.filesystem.azure.AbstractTestAzureFileSystem.AccountKind.FLAT;
+import static io.trino.testing.SystemEnvironmentUtils.requireEnv;
 
-@EnabledIfEnvironmentVariable(named = "ABFS_FLAT_ACCOUNT", matches = ".+")
 @TestInstance(Lifecycle.PER_CLASS)
 class TestAzureFileSystemGen2Flat
         extends AbstractTestAzureFileSystem
@@ -31,6 +30,6 @@ class TestAzureFileSystemGen2Flat
     void setup()
             throws IOException
     {
-        initialize(getRequiredEnvironmentVariable("ABFS_FLAT_ACCOUNT"), getRequiredEnvironmentVariable("ABFS_FLAT_ACCESS_KEY"), FLAT);
+        initializeWithAccessKey(requireEnv("ABFS_FLAT_ACCOUNT"), requireEnv("ABFS_FLAT_ACCESS_KEY"), FLAT);
     }
 }

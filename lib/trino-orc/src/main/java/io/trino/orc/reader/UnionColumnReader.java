@@ -16,7 +16,6 @@ package io.trino.orc.reader;
 import com.google.common.collect.ImmutableList;
 import com.google.common.io.Closer;
 import io.trino.memory.context.AggregatedMemoryContext;
-import io.trino.orc.OrcBlockFactory;
 import io.trino.orc.OrcColumn;
 import io.trino.orc.OrcCorruptionException;
 import io.trino.orc.OrcReader.FieldMapperFactory;
@@ -27,10 +26,7 @@ import io.trino.orc.stream.ByteInputStream;
 import io.trino.orc.stream.InputStreamSource;
 import io.trino.orc.stream.InputStreamSources;
 import io.trino.spi.block.Block;
-import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.block.ByteArrayBlock;
-import io.trino.spi.block.LazyBlock;
-import io.trino.spi.block.LazyBlockLoader;
 import io.trino.spi.block.RowBlock;
 import io.trino.spi.block.RunLengthEncodedBlock;
 import io.trino.spi.type.RowType;
@@ -45,13 +41,13 @@ import java.util.List;
 import java.util.Optional;
 
 import static com.google.common.base.MoreObjects.toStringHelper;
-import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.base.Verify.verify;
 import static io.airlift.slice.SizeOf.instanceSize;
 import static io.trino.orc.OrcReader.fullyProjectedLayout;
 import static io.trino.orc.metadata.Stream.StreamKind.DATA;
 import static io.trino.orc.metadata.Stream.StreamKind.PRESENT;
 import static io.trino.orc.reader.ColumnReaders.createColumnReader;
+import static io.trino.orc.reader.ReaderUtils.toNotNullSupressedBlock;
 import static io.trino.orc.reader.ReaderUtils.verifyStreamType;
 import static io.trino.orc.stream.MissingInputStreamSource.missingStreamSource;
 import static io.trino.spi.type.TinyintType.TINYINT;
@@ -64,7 +60,6 @@ public class UnionColumnReader
     private static final int INSTANCE_SIZE = instanceSize(UnionColumnReader.class);
 
     private final OrcColumn column;
-    private final OrcBlockFactory blockFactory;
 
     private final RowType type;
     private final List<ColumnReader> fieldReaders;
@@ -81,7 +76,7 @@ public class UnionColumnReader
 
     private boolean rowGroupOpen;
 
-    UnionColumnReader(Type type, OrcColumn column, AggregatedMemoryContext memoryContext, OrcBlockFactory blockFactory, FieldMapperFactory fieldMapperFactory)
+    UnionColumnReader(Type type, OrcColumn column, AggregatedMemoryContext memoryContext, FieldMapperFactory fieldMapperFactory)
             throws OrcCorruptionException
     {
         requireNonNull(type, "type is null");
@@ -89,7 +84,6 @@ public class UnionColumnReader
         this.type = (RowType) type;
 
         this.column = requireNonNull(column, "column is null");
-        this.blockFactory = requireNonNull(blockFactory, "blockFactory is null");
 
         ImmutableList.Builder<ColumnReader> fieldReadersBuilder = ImmutableList.builder();
         List<OrcColumn> fields = column.getNestedColumns();
@@ -99,7 +93,6 @@ public class UnionColumnReader
                     fields.get(i),
                     fullyProjectedLayout(),
                     memoryContext,
-                    blockFactory,
                     fieldMapperFactory));
         }
         fieldReaders = fieldReadersBuilder.build();
@@ -142,18 +135,18 @@ public class UnionColumnReader
         Block[] blocks;
 
         if (presentStream == null) {
-            blocks = getBlocks(nextBatchSize);
+            blocks = getBlocks(nextBatchSize, nextBatchSize, null);
         }
         else {
             nullVector = new boolean[nextBatchSize];
             int nullValues = presentStream.getUnsetBits(nextBatchSize, nullVector);
             if (nullValues != nextBatchSize) {
-                blocks = getBlocks(nextBatchSize - nullValues);
+                blocks = getBlocks(nextBatchSize, nextBatchSize - nullValues, nullVector);
             }
             else {
                 List<Type> typeParameters = type.getTypeParameters();
                 blocks = new Block[typeParameters.size() + 1];
-                blocks[0] = TINYINT.createBlockBuilder(null, 0).build();
+                blocks[0] = TINYINT.createFixedSizeBlockBuilder(0).build();
                 for (int i = 0; i < typeParameters.size(); i++) {
                     blocks[i + 1] = typeParameters.get(i).createBlockBuilder(null, 0).build();
                 }
@@ -165,7 +158,7 @@ public class UnionColumnReader
                 .distinct()
                 .count() == 1);
 
-        Block rowBlock = RowBlock.fromFieldBlocks(nextBatchSize, Optional.ofNullable(nullVector), blocks);
+        Block rowBlock = RowBlock.fromNotNullSuppressedFieldBlocks(nextBatchSize, Optional.ofNullable(nullVector), blocks);
 
         readOffset = 0;
         nextBatchSize = 0;
@@ -230,7 +223,7 @@ public class UnionColumnReader
                 .toString();
     }
 
-    private Block[] getBlocks(int positionCount)
+    private Block[] getBlocks(int positionCount, int nonNullCount, boolean[] rowIsNull)
             throws IOException
     {
         if (dataStream == null) {
@@ -239,14 +232,27 @@ public class UnionColumnReader
 
         Block[] blocks = new Block[fieldReaders.size() + 1];
 
-        byte[] tags = dataStream.next(positionCount);
-        blocks[0] = new ByteArrayBlock(positionCount, Optional.empty(), tags);
+        // read null suppressed tag column, and then remove the suppression
+        byte[] tags = dataStream.next(nonNullCount);
+        if (rowIsNull == null) {
+            blocks[0] = new ByteArrayBlock(positionCount, Optional.empty(), tags);
+        }
+        else {
+            blocks[0] = toNotNullSupressedBlock(positionCount, rowIsNull, new ByteArrayBlock(nonNullCount, Optional.empty(), tags));
+        }
 
-        boolean[][] valueIsNonNull = new boolean[fieldReaders.size()][positionCount];
+        // build a null vector for each field
+        boolean[][] valueIsNull = new boolean[fieldReaders.size()][positionCount];
+        for (boolean[] fieldIsNull : valueIsNull) {
+            Arrays.fill(fieldIsNull, true);
+        }
         int[] nonNullValueCount = new int[fieldReaders.size()];
-        for (int i = 0; i < positionCount; i++) {
-            valueIsNonNull[tags[i]][i] = true;
-            nonNullValueCount[tags[i]]++;
+        for (int position = 0; position < positionCount; position++) {
+            if (rowIsNull != null && rowIsNull[position]) {
+                byte tag = tags[position];
+                valueIsNull[tag][position] = false;
+                nonNullValueCount[tag]++;
+            }
         }
 
         for (int i = 0; i < fieldReaders.size(); i++) {
@@ -254,8 +260,7 @@ public class UnionColumnReader
             if (nonNullValueCount[i] > 0) {
                 ColumnReader reader = fieldReaders.get(i);
                 reader.prepareNextRead(nonNullValueCount[i]);
-                Block rawBlock = blockFactory.createBlock(nonNullValueCount[i], reader::readBlock, true);
-                blocks[i + 1] = new LazyBlock(positionCount, new UnpackLazyBlockLoader(rawBlock, fieldType, valueIsNonNull[i]));
+                blocks[i] = toNotNullSupressedBlock(positionCount, valueIsNull[i], reader.readBlock());
             }
             else {
                 blocks[i + 1] = RunLengthEncodedBlock.create(
@@ -287,39 +292,5 @@ public class UnionColumnReader
             retainedSizeInBytes += structField.getRetainedSizeInBytes();
         }
         return retainedSizeInBytes;
-    }
-
-    private static final class UnpackLazyBlockLoader
-            implements LazyBlockLoader
-    {
-        private final Block denseBlock;
-        private final Type type;
-        private final boolean[] valueIsNonNull;
-
-        public UnpackLazyBlockLoader(Block denseBlock, Type type, boolean[] valueIsNonNull)
-        {
-            this.denseBlock = requireNonNull(denseBlock, "denseBlock is null");
-            this.type = requireNonNull(type, "type is null");
-            this.valueIsNonNull = requireNonNull(valueIsNonNull, "valueIsNonNull");
-        }
-
-        @Override
-        public Block load()
-        {
-            Block loadedDenseBlock = denseBlock.getLoadedBlock();
-            BlockBuilder unpackedBlock = type.createBlockBuilder(null, valueIsNonNull.length);
-
-            int denseBlockPosition = 0;
-            for (boolean isNonNull : valueIsNonNull) {
-                if (isNonNull) {
-                    type.appendTo(loadedDenseBlock, denseBlockPosition++, unpackedBlock);
-                }
-                else {
-                    unpackedBlock.appendNull();
-                }
-            }
-            checkState(denseBlockPosition == loadedDenseBlock.getPositionCount(), "inconsistency between denseBlock and valueIsNonNull");
-            return unpackedBlock.build();
-        }
     }
 }

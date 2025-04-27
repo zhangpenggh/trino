@@ -20,8 +20,6 @@ import io.trino.spi.block.Block;
 import io.trino.spi.block.RunLengthEncodedBlock;
 import io.trino.spi.type.BooleanType;
 import io.trino.spi.type.Type;
-import io.trino.spi.type.TypeOperators;
-import io.trino.sql.gen.JoinCompiler;
 
 import java.util.List;
 
@@ -33,9 +31,15 @@ public class MarkDistinctHash
     private final GroupByHash groupByHash;
     private long nextDistinctId;
 
-    public MarkDistinctHash(Session session, List<Type> types, boolean hasPrecomputedHash, JoinCompiler joinCompiler, TypeOperators typeOperators, UpdateMemory updateMemory)
+    public MarkDistinctHash(Session session, List<Type> types, boolean hasPrecomputedHash, FlatHashStrategyCompiler hashStrategyCompiler, UpdateMemory updateMemory)
     {
-        this.groupByHash = createGroupByHash(session, types, hasPrecomputedHash, 10_000, joinCompiler, typeOperators, updateMemory);
+        this.groupByHash = createGroupByHash(session, types, hasPrecomputedHash, false, 10_000, hashStrategyCompiler, updateMemory);
+    }
+
+    private MarkDistinctHash(MarkDistinctHash other)
+    {
+        groupByHash = other.groupByHash.copy();
+        nextDistinctId = other.nextDistinctId;
     }
 
     public long getEstimatedSize()
@@ -80,5 +84,10 @@ public class MarkDistinctHash
         }
         checkState(nextDistinctId == groupCount);
         return BooleanType.wrapByteArrayAsBooleanBlockWithoutNulls(distinctMask);
+    }
+
+    public MarkDistinctHash copy()
+    {
+        return new MarkDistinctHash(this);
     }
 }

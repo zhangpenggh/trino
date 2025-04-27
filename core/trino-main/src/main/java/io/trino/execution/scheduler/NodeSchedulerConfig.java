@@ -45,14 +45,15 @@ public class NodeSchedulerConfig
 
     private int minCandidates = 10;
     private boolean includeCoordinator = true;
-    private int maxSplitsPerNode = 100;
-    private int minPendingSplitsPerTask = 10;
+    private int maxSplitsPerNode = 256;
+    private int minPendingSplitsPerTask = 16;
     private int maxAdjustedPendingSplitsWeightPerTask = 2000;
     private NodeSchedulerPolicy nodeSchedulerPolicy = NodeSchedulerPolicy.UNIFORM;
     private boolean optimizedLocalScheduling = true;
     private SplitsBalancingPolicy splitsBalancingPolicy = SplitsBalancingPolicy.STAGE;
     private int maxUnacknowledgedSplitsPerTask = 2000;
     private Duration allowedNoMatchingNodePeriod = new Duration(2, TimeUnit.MINUTES);
+    private Duration exhaustedNodeWaitPeriod = new Duration(2, TimeUnit.MINUTES);
 
     @NotNull
     public NodeSchedulerPolicy getNodeSchedulerPolicy()
@@ -71,16 +72,11 @@ public class NodeSchedulerConfig
     private static NodeSchedulerPolicy toNodeSchedulerPolicy(String nodeSchedulerPolicy)
     {
         // "legacy" and "flat" are here for backward compatibility
-        switch (nodeSchedulerPolicy.toLowerCase(ENGLISH)) {
-            case "legacy":
-            case "uniform":
-                return NodeSchedulerPolicy.UNIFORM;
-            case "flat":
-            case "topology":
-                return NodeSchedulerPolicy.TOPOLOGY;
-            default:
-                throw new IllegalArgumentException("Unknown node scheduler policy: " + nodeSchedulerPolicy);
-        }
+        return switch (nodeSchedulerPolicy.toLowerCase(ENGLISH)) {
+            case "legacy", "uniform" -> NodeSchedulerPolicy.UNIFORM;
+            case "flat", "topology" -> NodeSchedulerPolicy.TOPOLOGY;
+            default -> throw new IllegalArgumentException("Unknown node scheduler policy: " + nodeSchedulerPolicy);
+        };
     }
 
     @Min(1)
@@ -186,8 +182,9 @@ public class NodeSchedulerConfig
         return this;
     }
 
+    // TODO: respect in pipelined mode
     @Config("node-scheduler.allowed-no-matching-node-period")
-    @ConfigDescription("How long scheduler should wait before failing a query for which hard task requirements (e.g. node exposing specific catalog) cannot be satisfied")
+    @ConfigDescription("How long scheduler should wait before failing a query for which hard task requirements (e.g. node exposing specific catalog) cannot be satisfied. Relevant for TASK retry policy only.")
     public NodeSchedulerConfig setAllowedNoMatchingNodePeriod(Duration allowedNoMatchingNodePeriod)
     {
         this.allowedNoMatchingNodePeriod = allowedNoMatchingNodePeriod;
@@ -197,5 +194,19 @@ public class NodeSchedulerConfig
     public Duration getAllowedNoMatchingNodePeriod()
     {
         return allowedNoMatchingNodePeriod;
+    }
+
+    // TODO: respect in pipelined mode
+    @Config("node-scheduler.exhausted-node-wait-period")
+    @ConfigDescription("Maximum time to wait for resource availability on preferred nodes before scheduling a remotely accessible split on other nodes. Relevant for TASK retry policy only.")
+    public NodeSchedulerConfig setExhaustedNodeWaitPeriod(Duration exhaustedNodeWaitPeriod)
+    {
+        this.exhaustedNodeWaitPeriod = exhaustedNodeWaitPeriod;
+        return this;
+    }
+
+    public Duration getExhaustedNodeWaitPeriod()
+    {
+        return exhaustedNodeWaitPeriod;
     }
 }

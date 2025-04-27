@@ -14,7 +14,7 @@
 package io.trino.plugin.sqlserver;
 
 import com.google.common.collect.ImmutableMap;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.Map;
 
@@ -41,7 +41,7 @@ public class TestSqlServerConfig
                 .put("sqlserver.bulk-copy-for-write.enabled", "true")
                 .put("sqlserver.bulk-copy-for-write.lock-destination-table", "true")
                 .put("sqlserver.snapshot-isolation.disabled", "true")
-                .put("sqlserver.experimental.stored-procedure-table-function-enabled", "true")
+                .put("sqlserver.stored-procedure-table-function-enabled", "true")
                 .buildOrThrow();
 
         SqlServerConfig expected = new SqlServerConfig()

@@ -24,6 +24,7 @@ import io.trino.orc.OrcDataSink;
 import io.trino.orc.OrcDataSource;
 import io.trino.orc.OrcDataSourceId;
 import io.trino.orc.OrcReaderOptions;
+import io.trino.plugin.base.metrics.FileFormatDataSourceStats;
 import io.trino.plugin.hive.orc.HdfsOrcDataSource;
 import io.trino.plugin.hive.util.MergingPageIterator;
 import io.trino.plugin.hive.util.SortBuffer;
@@ -43,7 +44,6 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Iterator;
 import java.util.List;
-import java.util.Optional;
 import java.util.PriorityQueue;
 import java.util.Queue;
 import java.util.concurrent.atomic.AtomicLong;
@@ -60,7 +60,7 @@ import static java.lang.Math.min;
 import static java.util.Comparator.comparing;
 import static java.util.Objects.requireNonNull;
 
-public class SortingFileWriter
+public final class SortingFileWriter
         implements FileWriter
 {
     private static final Logger log = Logger.get(SortingFileWriter.class);
@@ -105,7 +105,7 @@ public class SortingFileWriter
         this.sortOrders = ImmutableList.copyOf(requireNonNull(sortOrders, "sortOrders is null"));
         this.outputWriter = requireNonNull(outputWriter, "outputWriter is null");
         this.sortBuffer = new SortBuffer(maxMemory, types, sortFields, sortOrders, pageSorter);
-        this.tempFileSinkFactory = tempFileSinkFactory;
+        this.tempFileSinkFactory = requireNonNull(tempFileSinkFactory, "tempFileSinkFactory is null");
         this.typeOperators = requireNonNull(typeOperators, "typeOperators is null");
     }
 
@@ -200,12 +200,6 @@ public class SortingFileWriter
                 .add("tempFilePrefix", tempFilePrefix)
                 .add("outputWriter", outputWriter)
                 .toString();
-    }
-
-    @Override
-    public Optional<Runnable> getVerificationTask()
-    {
-        return outputWriter.getVerificationTask();
     }
 
     private void flushToTempFile()

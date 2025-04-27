@@ -16,27 +16,26 @@ package io.trino.plugin.base.security;
 import com.google.common.collect.ImmutableMap;
 import io.trino.plugin.base.util.TestingHttpServer;
 import io.trino.spi.security.SystemAccessControl;
-import org.testng.annotations.AfterClass;
-import org.testng.annotations.BeforeClass;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.parallel.Execution;
 
-import java.io.File;
 import java.io.IOException;
+import java.nio.file.Path;
 import java.util.Map;
 
 import static io.airlift.testing.Closeables.closeAll;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
+import static org.junit.jupiter.api.parallel.ExecutionMode.CONCURRENT;
 
+@TestInstance(PER_CLASS)
+@Execution(CONCURRENT)
 public class TestHttpFileBasedSystemAccessControl
         extends BaseFileBasedSystemAccessControlTest
 {
-    private TestingHttpServer testingHttpServer;
+    private final TestingHttpServer testingHttpServer = new TestingHttpServer();
 
-    @BeforeClass
-    public void setUp()
-    {
-        testingHttpServer = new TestingHttpServer();
-    }
-
-    @AfterClass(alwaysRun = true)
+    @AfterAll
     public void tearDown()
             throws IOException
     {
@@ -44,14 +43,9 @@ public class TestHttpFileBasedSystemAccessControl
     }
 
     @Override
-    protected SystemAccessControl newFileBasedSystemAccessControl(File configFile, Map<String, String> properties)
+    protected SystemAccessControl newFileBasedSystemAccessControl(Path configFile, Map<String, String> properties)
     {
-        try {
-            String dataUrl = testingHttpServer.resource(configFile.getCanonicalFile().getAbsolutePath()).toString();
-            return newFileBasedSystemAccessControl(ImmutableMap.<String, String>builder().putAll(properties).put("security.config-file", dataUrl).buildOrThrow());
-        }
-        catch (IOException e) {
-            throw new RuntimeException("Error while creating SystemAccessControl", e);
-        }
+        String dataUrl = testingHttpServer.resource(configFile.normalize().toAbsolutePath().toString()).toString();
+        return newFileBasedSystemAccessControl(ImmutableMap.<String, String>builder().putAll(properties).put("security.config-file", dataUrl).buildOrThrow());
     }
 }

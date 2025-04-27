@@ -22,10 +22,7 @@ import io.airlift.units.DataSize;
 import io.trino.Session;
 import io.trino.memory.context.LocalMemoryContext;
 import io.trino.spi.Page;
-import io.trino.spi.connector.SortOrder;
 import io.trino.spi.type.Type;
-import io.trino.spi.type.TypeOperators;
-import io.trino.sql.gen.JoinCompiler;
 import io.trino.sql.planner.plan.PlanNodeId;
 import io.trino.sql.planner.plan.TopNRankingNode.RankingType;
 import io.trino.type.BlockTypeOperators;
@@ -36,6 +33,7 @@ import java.util.Optional;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
+import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.trino.operator.GroupByHash.createGroupByHash;
 import static java.util.Objects.requireNonNull;
 
@@ -55,7 +53,6 @@ public class TopNRankingOperator
         private final List<Integer> partitionChannels;
         private final List<Type> partitionTypes;
         private final List<Integer> sortChannels;
-        private final List<SortOrder> sortOrder;
         private final int maxRowCountPerPartition;
         private final boolean partial;
         private final Optional<Integer> hashChannel;
@@ -63,8 +60,8 @@ public class TopNRankingOperator
 
         private final boolean generateRanking;
         private boolean closed;
-        private final JoinCompiler joinCompiler;
-        private final TypeOperators typeOperators;
+        private final FlatHashStrategyCompiler hashStrategyCompiler;
+        private final PageWithPositionComparator comparator;
         private final BlockTypeOperators blockTypeOperators;
         private final Optional<DataSize> maxPartialMemory;
 
@@ -77,14 +74,13 @@ public class TopNRankingOperator
                 List<Integer> partitionChannels,
                 List<? extends Type> partitionTypes,
                 List<Integer> sortChannels,
-                List<SortOrder> sortOrder,
                 int maxRowCountPerPartition,
                 boolean partial,
                 Optional<Integer> hashChannel,
                 int expectedPositions,
                 Optional<DataSize> maxPartialMemory,
-                JoinCompiler joinCompiler,
-                TypeOperators typeOperators,
+                FlatHashStrategyCompiler hashStrategyCompiler,
+                PageWithPositionComparator comparator,
                 BlockTypeOperators blockTypeOperators)
         {
             this.operatorId = operatorId;
@@ -95,7 +91,6 @@ public class TopNRankingOperator
             this.partitionChannels = ImmutableList.copyOf(requireNonNull(partitionChannels, "partitionChannels is null"));
             this.partitionTypes = ImmutableList.copyOf(requireNonNull(partitionTypes, "partitionTypes is null"));
             this.sortChannels = ImmutableList.copyOf(requireNonNull(sortChannels));
-            this.sortOrder = ImmutableList.copyOf(requireNonNull(sortOrder));
             this.hashChannel = requireNonNull(hashChannel, "hashChannel is null");
             this.partial = partial;
             checkArgument(maxRowCountPerPartition > 0, "maxRowCountPerPartition must be > 0");
@@ -103,8 +98,8 @@ public class TopNRankingOperator
             checkArgument(expectedPositions > 0, "expectedPositions must be > 0");
             this.generateRanking = !partial;
             this.expectedPositions = expectedPositions;
-            this.joinCompiler = requireNonNull(joinCompiler, "joinCompiler is null");
-            this.typeOperators = requireNonNull(typeOperators, "typeOperators is null");
+            this.hashStrategyCompiler = requireNonNull(hashStrategyCompiler, "hashStrategyCompiler is null");
+            this.comparator = requireNonNull(comparator, "comparator is null");
             this.blockTypeOperators = requireNonNull(blockTypeOperators, "blockTypeOperators is null");
             this.maxPartialMemory = requireNonNull(maxPartialMemory, "maxPartialMemory is null");
         }
@@ -122,14 +117,13 @@ public class TopNRankingOperator
                     partitionChannels,
                     partitionTypes,
                     sortChannels,
-                    sortOrder,
                     maxRowCountPerPartition,
                     generateRanking,
                     hashChannel,
                     expectedPositions,
                     maxPartialMemory,
-                    joinCompiler,
-                    typeOperators,
+                    hashStrategyCompiler,
+                    comparator,
                     blockTypeOperators);
         }
 
@@ -151,14 +145,13 @@ public class TopNRankingOperator
                     partitionChannels,
                     partitionTypes,
                     sortChannels,
-                    sortOrder,
                     maxRowCountPerPartition,
                     partial,
                     hashChannel,
                     expectedPositions,
                     maxPartialMemory,
-                    joinCompiler,
-                    typeOperators,
+                    hashStrategyCompiler,
+                    comparator,
                     blockTypeOperators);
         }
     }
@@ -184,14 +177,13 @@ public class TopNRankingOperator
             List<Integer> partitionChannels,
             List<Type> partitionTypes,
             List<Integer> sortChannels,
-            List<SortOrder> sortOrders,
             int maxRankingPerPartition,
             boolean generateRanking,
             Optional<Integer> hashChannel,
             int expectedPositions,
             Optional<DataSize> maxPartialMemory,
-            JoinCompiler joinCompiler,
-            TypeOperators typeOperators,
+            FlatHashStrategyCompiler hashStrategyCompiler,
+            PageWithPositionComparator comparator,
             BlockTypeOperators blockTypeOperators)
     {
         requireNonNull(maxPartialMemory, "maxPartialMemory is null");
@@ -229,10 +221,9 @@ public class TopNRankingOperator
                 rankingType,
                 ImmutableList.copyOf(sourceTypes),
                 sortChannels,
-                sortOrders,
                 maxRankingPerPartition,
                 generateRanking,
-                typeOperators,
+                comparator,
                 blockTypeOperators,
                 groupByChannels,
                 getGroupByHashSupplier(
@@ -240,8 +231,7 @@ public class TopNRankingOperator
                         partitionTypes,
                         hashChannel.isPresent(),
                         operatorContext.getSession(),
-                        joinCompiler,
-                        typeOperators,
+                        hashStrategyCompiler,
                         this::updateMemoryReservation));
     }
 
@@ -250,8 +240,7 @@ public class TopNRankingOperator
             List<Type> partitionTypes,
             boolean hasPrecomputedHash,
             Session session,
-            JoinCompiler joinCompiler,
-            TypeOperators typeOperators,
+            FlatHashStrategyCompiler hashStrategyCompiler,
             UpdateMemory updateMemory)
     {
         if (partitionTypes.isEmpty()) {
@@ -262,9 +251,9 @@ public class TopNRankingOperator
                 session,
                 partitionTypes,
                 hasPrecomputedHash,
+                false,
                 expectedPositions,
-                joinCompiler,
-                typeOperators,
+                hashStrategyCompiler,
                 updateMemory);
     }
 
@@ -272,16 +261,14 @@ public class TopNRankingOperator
             RankingType rankingType,
             List<Type> sourceTypes,
             List<Integer> sortChannels,
-            List<SortOrder> sortOrders,
             int maxRankingPerPartition,
             boolean generateRanking,
-            TypeOperators typeOperators,
+            PageWithPositionComparator comparator,
             BlockTypeOperators blockTypeOperators,
             int[] groupByChannels,
             Supplier<GroupByHash> groupByHashSupplier)
     {
         if (rankingType == RankingType.ROW_NUMBER) {
-            PageWithPositionComparator comparator = new SimplePageWithPositionComparator(sourceTypes, sortChannels, sortOrders, typeOperators);
             return () -> new GroupedTopNRowNumberBuilder(
                     sourceTypes,
                     comparator,
@@ -291,8 +278,10 @@ public class TopNRankingOperator
                     groupByHashSupplier.get());
         }
         if (rankingType == RankingType.RANK) {
-            PageWithPositionComparator comparator = new SimplePageWithPositionComparator(sourceTypes, sortChannels, sortOrders, typeOperators);
-            PageWithPositionEqualsAndHash equalsAndHash = new SimplePageWithPositionEqualsAndHash(ImmutableList.copyOf(sourceTypes), sortChannels, blockTypeOperators);
+            List<Type> sortTypes = sortChannels.stream()
+                    .map(sourceTypes::get)
+                    .collect(toImmutableList());
+            PageWithPositionEqualsAndHash equalsAndHash = new SimplePageWithPositionEqualsAndHash(sortTypes, sortChannels, blockTypeOperators);
             return () -> new GroupedTopNRankBuilder(
                     sourceTypes,
                     comparator,

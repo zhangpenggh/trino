@@ -21,11 +21,13 @@ import io.trino.operator.project.PageProcessor;
 import io.trino.spi.Page;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.connector.SourcePage;
 import io.trino.spi.type.RowType;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.VarcharType;
 import io.trino.sql.relational.CallExpression;
 import io.trino.sql.relational.RowExpression;
+import org.junit.jupiter.api.Test;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
 import org.openjdk.jmh.annotations.Fork;
@@ -35,7 +37,6 @@ import org.openjdk.jmh.annotations.Scope;
 import org.openjdk.jmh.annotations.Setup;
 import org.openjdk.jmh.annotations.State;
 import org.openjdk.jmh.runner.options.WarmupMode;
-import org.testng.annotations.Test;
 
 import java.util.List;
 import java.util.Optional;
@@ -68,7 +69,7 @@ public class BenchmarkRowToRowCast
                 SESSION,
                 new DriverYieldSignal(),
                 newSimpleAggregatedMemoryContext().newLocalMemoryContext(PageProcessor.class.getSimpleName()),
-                data.getPage()));
+                SourcePage.create(data.getPage())));
     }
 
     @SuppressWarnings("FieldMayBeFinal")
@@ -97,7 +98,7 @@ public class BenchmarkRowToRowCast
             Block[] fieldBlocks = fromFieldTypes.stream()
                     .map(type -> createBlock(POSITION_COUNT, type))
                     .toArray(Block[]::new);
-            Block rowBlock = fromFieldBlocks(POSITION_COUNT, Optional.empty(), fieldBlocks);
+            Block rowBlock = fromFieldBlocks(POSITION_COUNT, fieldBlocks);
 
             page = new Page(rowBlock);
         }

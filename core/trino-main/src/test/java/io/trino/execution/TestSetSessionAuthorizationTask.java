@@ -16,18 +16,20 @@ package io.trino.execution;
 import io.trino.client.NodeVersion;
 import io.trino.execution.warnings.WarningCollector;
 import io.trino.metadata.Metadata;
+import io.trino.metadata.TestMetadataManager;
 import io.trino.security.AccessControl;
 import io.trino.security.AllowAllAccessControl;
 import io.trino.spi.TrinoException;
 import io.trino.spi.resourcegroups.ResourceGroupId;
-import io.trino.sql.parser.ParsingOptions;
 import io.trino.sql.parser.SqlParser;
 import io.trino.sql.tree.SetSessionAuthorization;
 import io.trino.transaction.TransactionId;
 import io.trino.transaction.TransactionManager;
-import org.testng.annotations.AfterClass;
-import org.testng.annotations.BeforeClass;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.parallel.Execution;
 
 import java.net.URI;
 import java.util.Optional;
@@ -35,14 +37,17 @@ import java.util.concurrent.ExecutorService;
 
 import static io.airlift.concurrent.Threads.daemonThreadsNamed;
 import static io.trino.execution.querystats.PlanOptimizersStatsCollector.createPlanOptimizersStatsCollector;
-import static io.trino.metadata.MetadataManager.testMetadataManagerBuilder;
 import static io.trino.testing.TestingSession.testSessionBuilder;
 import static io.trino.transaction.InMemoryTransactionManager.createTestTransactionManager;
 import static java.util.Collections.emptyList;
 import static java.util.concurrent.Executors.newCachedThreadPool;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.testng.Assert.assertEquals;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
+import static org.junit.jupiter.api.parallel.ExecutionMode.CONCURRENT;
 
+@TestInstance(PER_CLASS)
+@Execution(CONCURRENT)
 public class TestSetSessionAuthorizationTask
 {
     private TransactionManager transactionManager;
@@ -51,18 +56,18 @@ public class TestSetSessionAuthorizationTask
     private SqlParser parser;
     private ExecutorService executor = newCachedThreadPool(daemonThreadsNamed(getClass().getSimpleName() + "-%s"));
 
-    @BeforeClass
+    @BeforeAll
     public void setUp()
     {
         transactionManager = createTestTransactionManager();
         accessControl = new AllowAllAccessControl();
-        metadata = testMetadataManagerBuilder()
+        metadata = TestMetadataManager.builder()
                 .withTransactionManager(transactionManager)
                 .build();
         parser = new SqlParser();
     }
 
-    @AfterClass(alwaysRun = true)
+    @AfterAll
     public void tearDown()
     {
         executor.shutdownNow();
@@ -84,7 +89,7 @@ public class TestSetSessionAuthorizationTask
     public void testSetSessionAuthorizationInTransaction()
     {
         String query = "SET SESSION AUTHORIZATION user";
-        SetSessionAuthorization statement = (SetSessionAuthorization) parser.createStatement(query, new ParsingOptions());
+        SetSessionAuthorization statement = (SetSessionAuthorization) parser.createStatement(query);
         TransactionId transactionId = transactionManager.beginTransaction(false);
         QueryStateMachine stateMachine = createStateMachine(Optional.of(transactionId), query);
         assertThatThrownBy(() -> new SetSessionAuthorizationTask(accessControl, transactionManager).execute(statement, stateMachine, emptyList(), WarningCollector.NOOP))
@@ -94,11 +99,11 @@ public class TestSetSessionAuthorizationTask
 
     private void assertSetSessionAuthorization(String query, Optional<String> expected)
     {
-        SetSessionAuthorization statement = (SetSessionAuthorization) parser.createStatement(query, new ParsingOptions());
+        SetSessionAuthorization statement = (SetSessionAuthorization) parser.createStatement(query);
         QueryStateMachine stateMachine = createStateMachine(Optional.empty(), query);
         new SetSessionAuthorizationTask(accessControl, transactionManager).execute(statement, stateMachine, emptyList(), WarningCollector.NOOP);
         QueryInfo queryInfo = stateMachine.getQueryInfo(Optional.empty());
-        assertEquals(queryInfo.getSetAuthorizationUser(), expected);
+        assertThat(queryInfo.getSetAuthorizationUser()).isEqualTo(expected);
     }
 
     private QueryStateMachine createStateMachine(Optional<TransactionId> transactionId, String query)
@@ -119,6 +124,7 @@ public class TestSetSessionAuthorizationTask
                 createPlanOptimizersStatsCollector(),
                 Optional.empty(),
                 true,
+                Optional.empty(),
                 new NodeVersion("test"));
         return stateMachine;
     }

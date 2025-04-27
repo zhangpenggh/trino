@@ -22,7 +22,7 @@ import io.trino.spi.expression.Call;
 import io.trino.spi.expression.ConnectorExpression;
 import io.trino.spi.expression.FunctionName;
 import io.trino.spi.expression.Variable;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
@@ -41,7 +41,7 @@ public class TestGenericRewrite
     @Test
     public void testRewriteCall()
     {
-        GenericRewrite rewrite = new GenericRewrite(Map.of(), "add(foo: decimal(p, s), bar: bigint): decimal(rp, rs)", "foo + bar::decimal(rp,rs)");
+        GenericRewrite rewrite = new GenericRewrite(Map.of(), session -> true, "add(foo: decimal(p, s), bar: bigint): decimal(rp, rs)", "foo + bar::decimal(rp,rs)");
         ConnectorExpression expression = new Call(
                 createDecimalType(21, 2),
                 new FunctionName("add"),
@@ -58,7 +58,7 @@ public class TestGenericRewrite
     public void testRewriteCallWithTypeClass()
     {
         Map<String, Set<String>> typeClasses = Map.of("integer_class", Set.of("integer", "bigint"));
-        GenericRewrite rewrite = new GenericRewrite(typeClasses, "add(foo: integer_class, bar: bigint): integer_class", "foo + bar");
+        GenericRewrite rewrite = new GenericRewrite(typeClasses, session -> true, "add(foo: integer_class, bar: bigint): integer_class", "foo + bar");
 
         assertThat(apply(rewrite, new Call(
                 BIGINT,
@@ -111,8 +111,8 @@ public class TestGenericRewrite
             @Override
             public Optional<ParameterizedExpression> defaultRewrite(ConnectorExpression expression)
             {
-                if (expression instanceof Variable) {
-                    return Optional.of(new ParameterizedExpression("\"" + ((Variable) expression).getName().replace("\"", "\"\"") + "\"", ImmutableList.of()));
+                if (expression instanceof Variable variable) {
+                    return Optional.of(new ParameterizedExpression("\"" + variable.getName().replace("\"", "\"\"") + "\"", ImmutableList.of()));
                 }
                 return Optional.empty();
             }

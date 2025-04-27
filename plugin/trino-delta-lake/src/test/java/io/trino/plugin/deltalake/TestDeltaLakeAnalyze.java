@@ -13,18 +13,18 @@
  */
 package io.trino.plugin.deltalake;
 
-import com.google.common.collect.ImmutableMap;
 import io.trino.Session;
 import io.trino.filesystem.TrinoFileSystem;
 import io.trino.filesystem.hdfs.HdfsFileSystemFactory;
 import io.trino.plugin.deltalake.transactionlog.AddFileEntry;
 import io.trino.plugin.deltalake.transactionlog.DeltaLakeTransactionLogEntry;
 import io.trino.plugin.deltalake.transactionlog.statistics.DeltaLakeFileStatistics;
+import io.trino.plugin.tpcds.TpcdsPlugin;
 import io.trino.testing.AbstractTestQueryFramework;
-import io.trino.testing.DataProviders;
+import io.trino.testing.DistributedQueryRunner;
 import io.trino.testing.QueryRunner;
 import io.trino.testing.sql.TestTable;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.net.URI;
@@ -41,9 +41,8 @@ import java.util.regex.Pattern;
 import static com.google.common.base.Verify.verify;
 import static com.google.common.io.MoreFiles.deleteRecursively;
 import static com.google.common.io.RecursiveDeleteOption.ALLOW_INSECURE;
-import static io.trino.plugin.deltalake.DeltaLakeQueryRunner.DELTA_CATALOG;
-import static io.trino.plugin.deltalake.DeltaLakeQueryRunner.TPCH_SCHEMA;
-import static io.trino.plugin.deltalake.DeltaLakeQueryRunner.createDeltaLakeQueryRunner;
+import static io.airlift.testing.Closeables.closeAllSuppress;
+import static io.trino.plugin.deltalake.DeltaLakeConfig.DEFAULT_TRANSACTION_LOG_MAX_CACHED_SIZE;
 import static io.trino.plugin.deltalake.DeltaLakeSessionProperties.EXTENDED_STATISTICS_COLLECT_ON_WRITE;
 import static io.trino.plugin.deltalake.DeltaTestingConnectorSession.SESSION;
 import static io.trino.plugin.deltalake.TestingDeltaLakeUtils.copyDirectoryContents;
@@ -67,12 +66,20 @@ public class TestDeltaLakeAnalyze
     protected QueryRunner createQueryRunner()
             throws Exception
     {
-        return createDeltaLakeQueryRunner(
-                DELTA_CATALOG,
-                ImmutableMap.of(),
-                ImmutableMap.of(
-                        "delta.enable-non-concurrent-writes", "true",
-                        "delta.register-table-procedure.enabled", "true"));
+        DistributedQueryRunner queryRunner = DeltaLakeQueryRunner.builder()
+                .addDeltaProperty("delta.enable-non-concurrent-writes", "true")
+                .addDeltaProperty("delta.register-table-procedure.enabled", "true")
+                .build();
+        try {
+            queryRunner.installPlugin(new TpcdsPlugin());
+            queryRunner.createCatalog("tpcds", "tpcds");
+
+            return queryRunner;
+        }
+        catch (Exception e) {
+            closeAllSuppress(e, queryRunner);
+            throw e;
+        }
     }
 
     @Test
@@ -314,7 +321,7 @@ public class TestDeltaLakeAnalyze
 
         // ANALYZE only new data
         DateTimeFormatter formatter = DateTimeFormatter.ofPattern("'TIMESTAMP '''yyyy-MM-dd HH:mm:ss.SSS VV''").withZone(UTC);
-        getDistributedQueryRunner().executeWithQueryId(
+        getDistributedQueryRunner().executeWithPlan(
                 getSession(),
                 format("ANALYZE %s WITH(files_modified_after = %s)", tableName, formatter.format(afterInitialDataIngestion)));
 
@@ -411,7 +418,7 @@ public class TestDeltaLakeAnalyze
         assertQuery("SHOW STATS FOR " + tableName, expectedFullStats);
 
         // drop stats
-        assertUpdate(format("CALL %s.system.drop_extended_stats('%s', '%s')", DELTA_CATALOG, TPCH_SCHEMA, tableName));
+        assertUpdate(format("CALL system.drop_extended_stats(CURRENT_SCHEMA, '%s')", tableName));
         // now we should be able to analyze all columns
         assertUpdate(format("ANALYZE %s", tableName), 50);
         assertQuery("SHOW STATS FOR " + tableName, expectedFullStats);
@@ -444,8 +451,7 @@ public class TestDeltaLakeAnalyze
     @Test
     public void testDropExtendedStats()
     {
-        try (TestTable table = new TestTable(
-                getQueryRunner()::execute,
+        try (TestTable table = newTrinoTable(
                 "test_drop_extended_stats",
                 "AS SELECT * FROM tpch.sf1.nation")) {
             String query = "SHOW STATS FOR " + table.getName();
@@ -466,7 +472,7 @@ public class TestDeltaLakeAnalyze
             assertQuery(query, extendedStats);
 
             // Dropping extended stats clears distinct count and leaves other stats alone
-            assertUpdate(format("CALL %s.system.drop_extended_stats('%s', '%s')", DELTA_CATALOG, TPCH_SCHEMA, table.getName()));
+            assertUpdate(format("CALL system.drop_extended_stats(CURRENT_SCHEMA, '%s')", table.getName()));
             assertQuery(query, baseStats);
 
             // Re-analyzing should work
@@ -478,12 +484,11 @@ public class TestDeltaLakeAnalyze
     @Test
     public void testDropMissingStats()
     {
-        try (TestTable table = new TestTable(
-                getQueryRunner()::execute,
+        try (TestTable table = newTrinoTable(
                 "test_drop_missing_stats",
                 "AS SELECT * FROM tpch.sf1.nation")) {
             // When there are no extended stats, the procedure should have no effect
-            assertUpdate(format("CALL %s.system.drop_extended_stats('%s', '%s')", DELTA_CATALOG, TPCH_SCHEMA, table.getName()));
+            assertUpdate(format("CALL system.drop_extended_stats(CURRENT_SCHEMA, '%s')", table.getName()));
             assertQuery(
                     "SHOW STATS FOR " + table.getName(),
                     "VALUES"
@@ -499,12 +504,11 @@ public class TestDeltaLakeAnalyze
     @Test
     public void testDropStatsAccessControl()
     {
-        try (TestTable table = new TestTable(
-                getQueryRunner()::execute,
+        try (TestTable table = newTrinoTable(
                 "test_deny_drop_stats",
                 "AS SELECT * FROM tpch.sf1.nation")) {
             assertAccessDenied(
-                    format("CALL %s.system.drop_extended_stats('%s', '%s')", DELTA_CATALOG, TPCH_SCHEMA, table.getName()),
+                    format("CALL system.drop_extended_stats(CURRENT_SCHEMA, '%s')", table.getName()),
                     "Cannot insert into table .*",
                     privilege(table.getName(), INSERT_TABLE));
         }
@@ -517,8 +521,7 @@ public class TestDeltaLakeAnalyze
     @Test
     public void testStatsOnTpcDsData()
     {
-        try (TestTable table = new TestTable(
-                getQueryRunner()::execute,
+        try (TestTable table = newTrinoTable(
                 "test_old_date_stats",
                 "AS SELECT d_date FROM tpcds.tiny.date_dim")) {
             assertUpdate("ANALYZE " + table.getName());
@@ -766,8 +769,14 @@ public class TestDeltaLakeAnalyze
         assertUpdate("DROP TABLE " + tableName);
     }
 
-    @Test(dataProviderClass = DataProviders.class, dataProvider = "trueFalse")
-    public void testCollectStatsAfterColumnAdded(boolean collectOnWrite)
+    @Test
+    public void testCollectStatsAfterColumnAdded()
+    {
+        testCollectStatsAfterColumnAdded(false);
+        testCollectStatsAfterColumnAdded(true);
+    }
+
+    private void testCollectStatsAfterColumnAdded(boolean collectOnWrite)
     {
         String tableName = "test_collect_stats_after_column_added_" + randomNameSuffix();
         assertUpdate("CREATE TABLE " + tableName + " (col_int_1 bigint, col_varchar_1 varchar)");
@@ -997,12 +1006,14 @@ public class TestDeltaLakeAnalyze
                         """);
 
         // Version 3 should be created with recalculated statistics.
-        List<DeltaLakeTransactionLogEntry> transactionLogAfterUpdate = getEntriesFromJson(3, tableLocation + "/_delta_log", FILE_SYSTEM).orElseThrow();
+        List<DeltaLakeTransactionLogEntry> transactionLogAfterUpdate = getEntriesFromJson(3, tableLocation + "/_delta_log", FILE_SYSTEM, DEFAULT_TRANSACTION_LOG_MAX_CACHED_SIZE)
+                .orElseThrow()
+                .getEntriesList(FILE_SYSTEM);
         assertThat(transactionLogAfterUpdate).hasSize(2);
         AddFileEntry updateAddFileEntry = transactionLogAfterUpdate.get(1).getAdd();
         DeltaLakeFileStatistics updateStats = updateAddFileEntry.getStats().orElseThrow();
-        assertThat(updateStats.getMinValues().orElseThrow().get("c_Int")).isEqualTo(2);
-        assertThat(updateStats.getMaxValues().orElseThrow().get("c_Int")).isEqualTo(11);
+        assertThat(updateStats.getMinValues().orElseThrow()).containsEntry("c_Int", 2);
+        assertThat(updateStats.getMaxValues().orElseThrow()).containsEntry("c_Int", 11);
         assertThat(updateStats.getNullCount("c_Int").orElseThrow()).isEqualTo(1);
         assertThat(updateStats.getNullCount("c_Str").orElseThrow()).isEqualTo(1);
 
@@ -1019,7 +1030,7 @@ public class TestDeltaLakeAnalyze
         assertQuery("SELECT * FROM " + tableName, " VALUES (42, 'foo'), (12, 'ab'), (null, null), (15, 'cd'), (15, 'bar'), (1, 'a'), (12, 'b')");
 
         // Simulate initial analysis
-        assertUpdate(format("CALL system.drop_extended_stats('%s', '%s')", TPCH_SCHEMA, tableName));
+        assertUpdate(format("CALL system.drop_extended_stats(CURRENT_SCHEMA, '%s')", tableName));
 
         assertUpdate("ANALYZE " + tableName, 7);
         assertQuery(
@@ -1130,7 +1141,7 @@ public class TestDeltaLakeAnalyze
         String tableName = resourceTable + randomNameSuffix();
         URI resourcesLocation = getClass().getClassLoader().getResource(resourcePath).toURI();
         copyDirectoryContents(Path.of(resourcesLocation), tableLocation);
-        assertUpdate(format("CALL system.register_table('%s', '%s', '%s')", getSession().getSchema().orElseThrow(), tableName, tableLocation.toUri()));
+        assertUpdate(format("CALL system.register_table(CURRENT_SCHEMA, '%s', '%s')", tableName, tableLocation.toUri()));
         return tableName;
     }
 

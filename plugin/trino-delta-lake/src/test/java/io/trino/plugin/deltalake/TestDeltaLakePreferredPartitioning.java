@@ -20,15 +20,16 @@ import io.trino.testing.AbstractTestQueryFramework;
 import io.trino.testing.DistributedQueryRunner;
 import io.trino.testing.QueryRunner;
 import io.trino.testing.containers.Minio;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
-import static io.trino.SystemSessionProperties.TASK_PARTITIONED_WRITER_COUNT;
+import static io.trino.SystemSessionProperties.TASK_MAX_WRITER_COUNT;
 import static io.trino.SystemSessionProperties.USE_PREFERRED_WRITE_PARTITIONING;
 import static io.trino.plugin.base.util.Closables.closeAllSuppress;
 import static io.trino.plugin.deltalake.DeltaLakeQueryRunner.DELTA_CATALOG;
 import static io.trino.testing.TestingNames.randomNameSuffix;
 import static io.trino.testing.TestingSession.testSessionBuilder;
 import static io.trino.testing.containers.Minio.MINIO_ACCESS_KEY;
+import static io.trino.testing.containers.Minio.MINIO_REGION;
 import static io.trino.testing.containers.Minio.MINIO_SECRET_KEY;
 import static java.lang.String.format;
 import static java.util.UUID.randomUUID;
@@ -54,7 +55,7 @@ public class TestDeltaLakePreferredPartitioning
                 .setCatalog(DELTA_CATALOG)
                 .setSchema(schema)
                 .build();
-        DistributedQueryRunner queryRunner = DistributedQueryRunner.builder(session).build();
+        QueryRunner queryRunner = DistributedQueryRunner.builder(session).build();
         try {
             queryRunner.installPlugin(new TpchPlugin());
             queryRunner.createCatalog("tpch", "tpch");
@@ -63,10 +64,15 @@ public class TestDeltaLakePreferredPartitioning
             queryRunner.createCatalog(DELTA_CATALOG, DeltaLakeConnectorFactory.CONNECTOR_NAME, ImmutableMap.<String, String>builder()
                     .put("hive.metastore", "file")
                     .put("hive.metastore.catalog.dir", queryRunner.getCoordinator().getBaseDataDir().resolve("file-metastore").toString())
-                    .put("hive.s3.aws-access-key", MINIO_ACCESS_KEY)
-                    .put("hive.s3.aws-secret-key", MINIO_SECRET_KEY)
-                    .put("hive.s3.endpoint", minio.getMinioAddress())
-                    .put("hive.s3.path-style-access", "true")
+                    // required by the file metastore
+                    .put("fs.hadoop.enabled", "true")
+                    .put("fs.native-s3.enabled", "true")
+                    .put("s3.aws-access-key", MINIO_ACCESS_KEY)
+                    .put("s3.aws-secret-key", MINIO_SECRET_KEY)
+                    .put("s3.region", MINIO_REGION)
+                    .put("s3.endpoint", minio.getMinioAddress())
+                    .put("s3.path-style-access", "true")
+                    .put("s3.streaming.part-size", "5MB") // minimize memory usage
                     .put("delta.enable-non-concurrent-writes", "true")
                     .put("delta.max-partitions-per-writer", String.valueOf(WRITE_PARTITIONING_TEST_PARTITIONS_COUNT - 1))
                     .buildOrThrow());
@@ -163,7 +169,7 @@ public class TestDeltaLakePreferredPartitioning
                 // It is important to explicitly set partitioned writer count to 1 since in above tests we are testing
                 // the open writers limit for partitions. So, with default value of 32 writer count, we will never
                 // hit that limit thus, tests will fail.
-                .setSystemProperty(TASK_PARTITIONED_WRITER_COUNT, "1")
+                .setSystemProperty(TASK_MAX_WRITER_COUNT, "1")
                 .build();
     }
 
@@ -174,7 +180,7 @@ public class TestDeltaLakePreferredPartitioning
                 // It is important to explicitly set partitioned writer count to 1 since in above tests we are testing
                 // the open writers limit for partitions. So, with default value of 32 writer count, we will never
                 // hit that limit thus, tests will fail.
-                .setSystemProperty(TASK_PARTITIONED_WRITER_COUNT, "1")
+                .setSystemProperty(TASK_MAX_WRITER_COUNT, "1")
                 .build();
     }
 }

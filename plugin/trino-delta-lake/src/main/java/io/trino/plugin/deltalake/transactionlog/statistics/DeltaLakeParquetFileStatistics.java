@@ -19,6 +19,8 @@ import io.trino.plugin.deltalake.DeltaLakeColumnHandle;
 import io.trino.plugin.deltalake.transactionlog.CanonicalColumnName;
 import io.trino.plugin.deltalake.transactionlog.TransactionLogAccess;
 import io.trino.spi.block.Block;
+import io.trino.spi.block.SqlMap;
+import io.trino.spi.block.SqlRow;
 
 import java.util.List;
 import java.util.Map;
@@ -85,7 +87,7 @@ public class DeltaLakeParquetFileStatistics
         if (!columnHandle.isBaseColumn()) {
             return Optional.empty();
         }
-        return getStat(columnHandle.getBasePhysicalColumnName(), maxValues);
+        return getStat(columnHandle.basePhysicalColumnName(), maxValues);
     }
 
     @Override
@@ -94,7 +96,7 @@ public class DeltaLakeParquetFileStatistics
         if (!columnHandle.isBaseColumn()) {
             return Optional.empty();
         }
-        return getStat(columnHandle.getBasePhysicalColumnName(), minValues);
+        return getStat(columnHandle.basePhysicalColumnName(), minValues);
     }
 
     @Override
@@ -113,7 +115,7 @@ public class DeltaLakeParquetFileStatistics
         if (contents == null) {
             return Optional.empty();
         }
-        if (contents instanceof List || contents instanceof Map || contents instanceof Block) {
+        if (contents instanceof List || contents instanceof Map || contents instanceof Block || contents instanceof SqlMap || contents instanceof SqlRow) {
             log.debug("Skipping statistics value for column with complex value type: %s", columnName);
             return Optional.empty();
         }
@@ -138,8 +140,8 @@ public class DeltaLakeParquetFileStatistics
 
     private static long sizeOfMinMaxStatsEntry(Object value)
     {
-        if (value instanceof Block) {
-            return ((Block) value).getRetainedSizeInBytes();
+        if (value instanceof Block block) {
+            return block.getRetainedSizeInBytes();
         }
 
         return SizeOf.sizeOfObjectArray(1);
@@ -147,8 +149,8 @@ public class DeltaLakeParquetFileStatistics
 
     private static long sizeOfNullCountStatsEntry(Object value)
     {
-        if (value instanceof Block) {
-            return ((Block) value).getRetainedSizeInBytes();
+        if (value instanceof Block block) {
+            return block.getRetainedSizeInBytes();
         }
 
         return SizeOf.sizeOfLongArray(1);

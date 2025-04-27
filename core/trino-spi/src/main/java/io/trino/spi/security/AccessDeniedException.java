@@ -14,16 +14,20 @@
 package io.trino.spi.security;
 
 import io.trino.spi.TrinoException;
+import io.trino.spi.connector.EntityKindAndName;
 import io.trino.spi.function.FunctionKind;
 
 import java.security.Principal;
 import java.util.Collection;
+import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.Set;
 
 import static io.trino.spi.StandardErrorCode.PERMISSION_DENIED;
 import static java.lang.String.format;
+import static java.util.Locale.ENGLISH;
+import static java.util.stream.Collectors.joining;
 
 public class AccessDeniedException
         extends TrinoException
@@ -170,11 +174,19 @@ public class AccessDeniedException
         throw new AccessDeniedException(format("Cannot rename schema from %s to %s%s", schemaName, newSchemaName, formatExtraInfo(extraInfo)));
     }
 
+    /**
+     * @deprecated Use {@link #denySetEntityAuthorization(EntityKindAndName, TrinoPrincipal)}
+     */
+    @Deprecated(forRemoval = true)
     public static void denySetSchemaAuthorization(String schemaName, TrinoPrincipal principal)
     {
         denySetSchemaAuthorization(schemaName, principal, null);
     }
 
+    /**
+     * @deprecated Use {@link #denySetEntityAuthorization(EntityKindAndName, TrinoPrincipal, String)}
+     */
+    @Deprecated(forRemoval = true)
     public static void denySetSchemaAuthorization(String schemaName, TrinoPrincipal principal, String extraInfo)
     {
         throw new AccessDeniedException(format("Cannot set authorization for schema %s to %s%s", schemaName, principal, formatExtraInfo(extraInfo)));
@@ -330,11 +342,19 @@ public class AccessDeniedException
         throw new AccessDeniedException(format("Cannot alter a column for table %s%s", tableName, formatExtraInfo(extraInfo)));
     }
 
+    /**
+     * @deprecated Use {@link #denySetEntityAuthorization(EntityKindAndName, TrinoPrincipal)}
+     */
+    @Deprecated(forRemoval = true)
     public static void denySetTableAuthorization(String tableName, TrinoPrincipal principal)
     {
         denySetTableAuthorization(tableName, principal, null);
     }
 
+    /**
+     * @deprecated Use {@link #denySetEntityAuthorization(EntityKindAndName, TrinoPrincipal, String)}
+     */
+    @Deprecated(forRemoval = true)
     public static void denySetTableAuthorization(String tableName, TrinoPrincipal principal, String extraInfo)
     {
         throw new AccessDeniedException(format("Cannot set authorization for table %s to %s%s", tableName, principal, formatExtraInfo(extraInfo)));
@@ -425,16 +445,6 @@ public class AccessDeniedException
         throw new AccessDeniedException(format("View owner '%s' cannot create view that selects from %s%s", identity.getUser(), sourceName, formatExtraInfo(extraInfo)));
     }
 
-    public static void denyGrantExecuteFunctionPrivilege(String functionName, Identity identity, Identity grantee)
-    {
-        denyGrantExecuteFunctionPrivilege(functionName, identity, format("user '%s'", grantee.getUser()));
-    }
-
-    public static void denyGrantExecuteFunctionPrivilege(String functionName, Identity identity, String grantee)
-    {
-        throw new AccessDeniedException(format("'%s' cannot grant '%s' execution to %s", identity.getUser(), functionName, grantee));
-    }
-
     public static void denyRenameView(String viewName, String newViewName)
     {
         denyRenameView(viewName, newViewName, null);
@@ -445,24 +455,22 @@ public class AccessDeniedException
         throw new AccessDeniedException(format("Cannot rename view from %s to %s%s", viewName, newViewName, formatExtraInfo(extraInfo)));
     }
 
+    /**
+     * @deprecated Use {@link #denySetEntityAuthorization(EntityKindAndName, TrinoPrincipal)}
+     */
+    @Deprecated(forRemoval = true)
     public static void denySetViewAuthorization(String viewName, TrinoPrincipal principal)
     {
         denySetViewAuthorization(viewName, principal, null);
     }
 
+    /**
+     * @deprecated Use {@link #denySetEntityAuthorization(EntityKindAndName, TrinoPrincipal, String)}
+     */
+    @Deprecated(forRemoval = true)
     public static void denySetViewAuthorization(String viewName, TrinoPrincipal principal, String extraInfo)
     {
         throw new AccessDeniedException(format("Cannot set authorization for view %s to %s%s", viewName, principal, formatExtraInfo(extraInfo)));
-    }
-
-    public static void denySetViewComment(String viewName)
-    {
-        denySetViewComment(viewName, null);
-    }
-
-    public static void denySetViewComment(String viewName, String extraInfo)
-    {
-        throw new AccessDeniedException(format("Cannot set comment for view %s%s", viewName, formatExtraInfo(extraInfo)));
     }
 
     public static void denyDropView(String viewName)
@@ -473,16 +481,6 @@ public class AccessDeniedException
     public static void denyDropView(String viewName, String extraInfo)
     {
         throw new AccessDeniedException(format("Cannot drop view %s%s", viewName, formatExtraInfo(extraInfo)));
-    }
-
-    public static void denySelectView(String viewName)
-    {
-        denySelectView(viewName, null);
-    }
-
-    public static void denySelectView(String viewName, String extraInfo)
-    {
-        throw new AccessDeniedException(format("Cannot select from view %s%s", viewName, formatExtraInfo(extraInfo)));
     }
 
     public static void denyCreateMaterializedView(String materializedViewName)
@@ -595,14 +593,49 @@ public class AccessDeniedException
         throw new AccessDeniedException(format("Cannot revoke privilege %s on table %s%s", privilege, tableName, formatExtraInfo(extraInfo)));
     }
 
+    public static void denyGrantEntityPrivilege(String privilege, EntityKindAndName entity)
+    {
+        denyGrantEntityPrivilege(privilege, entity, null);
+    }
+
+    public static void denyGrantEntityPrivilege(String privilege, EntityKindAndName entity, String extraInfo)
+    {
+        entityPrivilegeException("grant", privilege, entity, extraInfo);
+    }
+
+    public static void denyDenyEntityPrivilege(String privilege, EntityKindAndName entity)
+    {
+        denyDenyEntityPrivilege(privilege, entity, null);
+    }
+
+    public static void denyDenyEntityPrivilege(String privilege, EntityKindAndName entity, String extraInfo)
+    {
+        entityPrivilegeException("deny", privilege, entity, extraInfo);
+    }
+
+    public static void denyRevokeEntityPrivilege(String privilege, EntityKindAndName entity)
+    {
+        denyRevokeEntityPrivilege(privilege, entity, null);
+    }
+
+    public static void denyRevokeEntityPrivilege(String privilege, EntityKindAndName entity, String extraInfo)
+    {
+        entityPrivilegeException("revoke", privilege, entity, extraInfo);
+    }
+
+    private static void entityPrivilegeException(String operation, String privilege, EntityKindAndName entity, String extraInfo)
+    {
+        throw new AccessDeniedException(format("Cannot %s privilege %s on %s %s%s",
+                operation,
+                privilege,
+                entity.entityKind().toLowerCase(Locale.ROOT),
+                entity.name(),
+                formatExtraInfo(extraInfo)));
+    }
+
     public static void denyShowRoles()
     {
         throw new AccessDeniedException("Cannot show roles");
-    }
-
-    public static void denyShowRoleAuthorizationDescriptors()
-    {
-        throw new AccessDeniedException("Cannot show role authorization descriptors");
     }
 
     public static void denyShowCurrentRoles()
@@ -698,6 +731,62 @@ public class AccessDeniedException
     public static void denyExecuteTableProcedure(String tableName, String procedureName)
     {
         throw new AccessDeniedException(format("Cannot execute table procedure %s on %s", procedureName, tableName));
+    }
+
+    public static void denyShowFunctions(String schemaName)
+    {
+        denyShowFunctions(schemaName, null);
+    }
+
+    public static void denyShowFunctions(String schemaName, String extraInfo)
+    {
+        throw new AccessDeniedException(format("Cannot show functions of schema %s%s", schemaName, formatExtraInfo(extraInfo)));
+    }
+
+    public static void denyCreateFunction(String functionName)
+    {
+        denyCreateFunction(functionName, null);
+    }
+
+    public static void denyCreateFunction(String functionName, String extraInfo)
+    {
+        throw new AccessDeniedException(format("Cannot create function %s%s", functionName, formatExtraInfo(extraInfo)));
+    }
+
+    public static void denyDropFunction(String functionName)
+    {
+        denyDropFunction(functionName, null);
+    }
+
+    public static void denyDropFunction(String functionName, String extraInfo)
+    {
+        throw new AccessDeniedException(format("Cannot drop function %s%s", functionName, formatExtraInfo(extraInfo)));
+    }
+
+    public static void denyShowCreateFunction(String functionName)
+    {
+        denyShowCreateFunction(functionName, null);
+    }
+
+    public static void denyShowCreateFunction(String functionName, String extraInfo)
+    {
+        throw new AccessDeniedException(format("Cannot show create function for %s%s", functionName, formatExtraInfo(extraInfo)));
+    }
+
+    public static void denySetEntityAuthorization(EntityKindAndName entityKindAndName, TrinoPrincipal principal)
+    {
+        denySetEntityAuthorization(entityKindAndName, principal, null);
+    }
+
+    public static void denySetEntityAuthorization(EntityKindAndName entityKindAndName, TrinoPrincipal principal, String extraInfo)
+    {
+        throw new AccessDeniedException(format("Cannot set authorization for %s %s to %s%s",
+                entityKindAndName.entityKind().toLowerCase(ENGLISH), entityNameString(entityKindAndName.name()), principal, formatExtraInfo(extraInfo)));
+    }
+
+    private static String entityNameString(List<String> name)
+    {
+        return name.stream().collect(joining("."));
     }
 
     private static Object formatExtraInfo(String extraInfo)

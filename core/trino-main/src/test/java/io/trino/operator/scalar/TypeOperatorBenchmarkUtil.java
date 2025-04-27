@@ -55,18 +55,13 @@ final class TypeOperatorBenchmarkUtil
 
     public static Type toType(String type)
     {
-        switch (type) {
-            case "BIGINT":
-                return BIGINT;
-            case "VARCHAR":
-                return VARCHAR;
-            case "DOUBLE":
-                return DOUBLE;
-            case "BOOLEAN":
-                return BOOLEAN;
-            default:
-                throw new UnsupportedOperationException();
-        }
+        return switch (type) {
+            case "BIGINT" -> BIGINT;
+            case "VARCHAR" -> VARCHAR;
+            case "DOUBLE" -> DOUBLE;
+            case "BOOLEAN" -> BOOLEAN;
+            default -> throw new UnsupportedOperationException();
+        };
     }
 
     public static MethodHandle getEqualBlockMethod(Type type)
@@ -87,7 +82,7 @@ final class TypeOperatorBenchmarkUtil
         int positionCount = left.getPositionCount();
         long count = 0;
         for (int position = 0; position < positionCount; position++) {
-            if ((Boolean) equalOperator.invokeExact(left, position, right, position) == Boolean.TRUE) {
+            if (Boolean.TRUE.equals((Boolean) equalOperator.invokeExact(left, position, right, position))) {
                 count++;
             }
         }

@@ -13,19 +13,21 @@
  */
 package io.trino.tests.product.launcher.env.jdk;
 
+import io.airlift.log.Logger;
 import io.trino.tests.product.launcher.env.DockerContainer;
-
-import static io.trino.tests.product.launcher.Configurations.nameForJdkProvider;
 
 public class BuiltInJdkProvider
         implements JdkProvider
 {
-    public static final String BUILT_IN_NAME = nameForJdkProvider(BuiltInJdkProvider.class);
+    private final Logger log = Logger.get(getClass());
+
+    public static final String BUILT_IN_NAME = "builtin";
 
     @Override
     public DockerContainer applyTo(DockerContainer container)
     {
-        return container;
+        log.info("Setting JAVA_HOME to: %s for container: %s", getJavaHome(), container.getLogicalName());
+        return container.withEnv("JAVA_HOME", getJavaHome());
     }
 
     @Override

@@ -23,8 +23,6 @@ import io.trino.spi.PageBuilder;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.type.Type;
-import io.trino.spi.type.TypeOperators;
-import io.trino.sql.gen.JoinCompiler;
 import io.trino.sql.planner.plan.PlanNodeId;
 
 import java.util.List;
@@ -54,8 +52,7 @@ public class RowNumberOperator
         private final Optional<Integer> hashChannel;
         private final int expectedPositions;
         private boolean closed;
-        private final JoinCompiler joinCompiler;
-        private final TypeOperators typeOperators;
+        private final FlatHashStrategyCompiler hashStrategyCompiler;
 
         public RowNumberOperatorFactory(
                 int operatorId,
@@ -67,8 +64,7 @@ public class RowNumberOperator
                 Optional<Integer> maxRowsPerPartition,
                 Optional<Integer> hashChannel,
                 int expectedPositions,
-                JoinCompiler joinCompiler,
-                TypeOperators typeOperators)
+                FlatHashStrategyCompiler hashStrategyCompiler)
         {
             this.operatorId = operatorId;
             this.planNodeId = requireNonNull(planNodeId, "planNodeId is null");
@@ -81,8 +77,7 @@ public class RowNumberOperator
             this.hashChannel = requireNonNull(hashChannel, "hashChannel is null");
             checkArgument(expectedPositions > 0, "expectedPositions < 0");
             this.expectedPositions = expectedPositions;
-            this.joinCompiler = requireNonNull(joinCompiler, "joinCompiler is null");
-            this.typeOperators = requireNonNull(typeOperators, "typeOperators is null");
+            this.hashStrategyCompiler = requireNonNull(hashStrategyCompiler, "hashStrategyCompiler is null");
         }
 
         @Override
@@ -100,8 +95,7 @@ public class RowNumberOperator
                     maxRowsPerPartition,
                     hashChannel,
                     expectedPositions,
-                    joinCompiler,
-                    typeOperators);
+                    hashStrategyCompiler);
         }
 
         @Override
@@ -113,7 +107,17 @@ public class RowNumberOperator
         @Override
         public OperatorFactory duplicate()
         {
-            return new RowNumberOperatorFactory(operatorId, planNodeId, sourceTypes, outputChannels, partitionChannels, partitionTypes, maxRowsPerPartition, hashChannel, expectedPositions, joinCompiler, typeOperators);
+            return new RowNumberOperatorFactory(
+                    operatorId,
+                    planNodeId,
+                    sourceTypes,
+                    outputChannels,
+                    partitionChannels,
+                    partitionTypes,
+                    maxRowsPerPartition,
+                    hashChannel,
+                    expectedPositions,
+                    hashStrategyCompiler);
         }
     }
 
@@ -147,8 +151,7 @@ public class RowNumberOperator
             Optional<Integer> maxRowsPerPartition,
             Optional<Integer> hashChannel,
             int expectedPositions,
-            JoinCompiler joinCompiler,
-            TypeOperators typeOperators)
+            FlatHashStrategyCompiler hashStrategyCompiler)
     {
         this.operatorContext = requireNonNull(operatorContext, "operatorContext is null");
         this.localUserMemoryContext = operatorContext.localUserMemoryContext();
@@ -178,7 +181,14 @@ public class RowNumberOperator
             else {
                 this.groupByChannels = Ints.toArray(partitionChannels);
             }
-            this.groupByHash = Optional.of(createGroupByHash(operatorContext.getSession(), partitionTypes, hashChannel.isPresent(), expectedPositions, joinCompiler, typeOperators, this::updateMemoryReservation));
+            this.groupByHash = Optional.of(createGroupByHash(
+                    operatorContext.getSession(),
+                    partitionTypes,
+                    hashChannel.isPresent(),
+                    false,
+                    expectedPositions,
+                    hashStrategyCompiler,
+                    this::updateMemoryReservation));
         }
     }
 

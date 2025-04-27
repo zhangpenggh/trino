@@ -16,10 +16,12 @@ package io.trino.execution;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.inject.Inject;
 import io.trino.Session;
+import io.trino.client.ClientCapabilities;
 import io.trino.execution.warnings.WarningCollector;
 import io.trino.security.AccessControl;
 import io.trino.spi.TrinoException;
 import io.trino.spi.security.Identity;
+import io.trino.spi.security.SelectedRole;
 import io.trino.sql.tree.Expression;
 import io.trino.sql.tree.Identifier;
 import io.trino.sql.tree.SetSessionAuthorization;
@@ -27,10 +29,13 @@ import io.trino.sql.tree.StringLiteral;
 import io.trino.transaction.TransactionManager;
 
 import java.util.List;
+import java.util.Optional;
+import java.util.Set;
 
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.util.concurrent.Futures.immediateFuture;
 import static io.trino.spi.StandardErrorCode.GENERIC_USER_ERROR;
+import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static java.util.Objects.requireNonNull;
 
 public class SetSessionAuthorizationTask
@@ -60,6 +65,9 @@ public class SetSessionAuthorizationTask
             WarningCollector warningCollector)
     {
         Session session = stateMachine.getSession();
+        if (!session.getClientCapabilities().contains(ClientCapabilities.SESSION_AUTHORIZATION.toString())) {
+            throw new TrinoException(NOT_SUPPORTED, "SET SESSION AUTHORIZATION not supported by client");
+        }
         Identity originalIdentity = session.getOriginalIdentity();
         // Set authorization user in the middle of a transaction is disallowed by the SQL spec
         session.getTransactionId().ifPresent(transactionId -> {
@@ -86,6 +94,18 @@ public class SetSessionAuthorizationTask
             accessControl.checkCanImpersonateUser(originalIdentity, user);
         }
         stateMachine.setSetAuthorizationUser(user);
+        SelectedRole selectedRole;
+        Set<String> enabledRoles = originalIdentity.getEnabledRoles();
+        if (enabledRoles.isEmpty()) {
+            selectedRole = new SelectedRole(SelectedRole.Type.NONE, Optional.empty());
+        }
+        else if (enabledRoles.size() == 1) {
+            selectedRole = new SelectedRole(SelectedRole.Type.ROLE, Optional.of(enabledRoles.iterator().next()));
+        }
+        else {
+            selectedRole = new SelectedRole(SelectedRole.Type.ALL, Optional.empty());
+        }
+        stateMachine.addSetOriginalRoles(selectedRole);
         return immediateFuture(null);
     }
 }

@@ -17,11 +17,13 @@ import com.google.common.collect.ImmutableList;
 import io.trino.matching.Captures;
 import io.trino.plugin.base.expression.ConnectorExpressionRule;
 import io.trino.plugin.jdbc.QueryParameter;
+import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.expression.ConnectorExpression;
 
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Predicate;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -35,14 +37,22 @@ public class GenericRewrite
     // Matches words in the `rewritePattern`
     private static final Pattern REWRITE_TOKENS = Pattern.compile("(?<![a-zA-Z0-9_$])[a-zA-Z_$][a-zA-Z0-9_$]*(?![a-zA-Z0-9_$])");
 
+    private final Predicate<ConnectorSession> condition;
     private final ExpressionPattern expressionPattern;
     private final String rewritePattern;
 
-    public GenericRewrite(Map<String, Set<String>> typeClasses, String expressionPattern, String rewritePattern)
+    public GenericRewrite(Map<String, Set<String>> typeClasses, Predicate<ConnectorSession> condition, String expressionPattern, String rewritePattern)
     {
+        this.condition = requireNonNull(condition, "condition is null");
         ExpressionMappingParser parser = new ExpressionMappingParser(typeClasses);
         this.expressionPattern = parser.createExpressionPattern(expressionPattern);
         this.rewritePattern = requireNonNull(rewritePattern, "rewritePattern is null");
+    }
+
+    @Override
+    public boolean isEnabled(ConnectorSession session)
+    {
+        return condition.test(session);
     }
 
     @Override
@@ -68,11 +78,11 @@ public class GenericRewrite
             String replacement;
             if (capture.isPresent()) {
                 Object value = capture.get();
-                if (value instanceof Long) {
-                    replacement = Long.toString((Long) value);
+                if (value instanceof Long longValue) {
+                    replacement = Long.toString(longValue);
                 }
-                else if (value instanceof ConnectorExpression) {
-                    Optional<ParameterizedExpression> rewritten = context.defaultRewrite((ConnectorExpression) value);
+                else if (value instanceof ConnectorExpression connectorExpression) {
+                    Optional<ParameterizedExpression> rewritten = context.defaultRewrite(connectorExpression);
                     if (rewritten.isEmpty()) {
                         return Optional.empty();
                     }

@@ -13,6 +13,7 @@
  */
 package io.trino.filesystem.local;
 
+import com.google.common.collect.ImmutableSet;
 import io.trino.filesystem.FileIterator;
 import io.trino.filesystem.Location;
 import io.trino.filesystem.TrinoFileSystem;
@@ -22,13 +23,20 @@ import io.trino.filesystem.TrinoOutputFile;
 import java.io.IOException;
 import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.SimpleFileVisitor;
 import java.nio.file.attribute.BasicFileAttributes;
+import java.time.Instant;
 import java.util.Optional;
+import java.util.Set;
+import java.util.stream.Stream;
 
 import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static io.trino.filesystem.local.LocalUtils.handleException;
+import static java.nio.file.LinkOption.NOFOLLOW_LINKS;
+import static java.util.UUID.randomUUID;
 
 /**
  * A hierarchical file system for testing.
@@ -41,7 +49,7 @@ public class LocalFileSystem
     public LocalFileSystem(Path rootPath)
     {
         this.rootPath = rootPath;
-        checkArgument(Files.isDirectory(rootPath), "root is not a directory");
+        checkArgument(Files.isDirectory(rootPath), "root is not a directory: %s", rootPath);
     }
 
     @Override
@@ -53,7 +61,13 @@ public class LocalFileSystem
     @Override
     public TrinoInputFile newInputFile(Location location, long length)
     {
-        return new LocalInputFile(location, toFilePath(location), length);
+        return new LocalInputFile(location, toFilePath(location), length, null);
+    }
+
+    @Override
+    public TrinoInputFile newInputFile(Location location, long length, Instant lastModified)
+    {
+        return new LocalInputFile(location, toFilePath(location), length, lastModified);
     }
 
     @Override
@@ -69,6 +83,8 @@ public class LocalFileSystem
         Path filePath = toFilePath(location);
         try {
             Files.delete(filePath);
+        }
+        catch (NoSuchFileException _) {
         }
         catch (IOException e) {
             throw handleException(location, e);
@@ -194,6 +210,49 @@ public class LocalFileSystem
         }
     }
 
+    @Override
+    public Set<Location> listDirectories(Location location)
+            throws IOException
+    {
+        Path path = toDirectoryPath(location);
+        if (Files.isRegularFile(path)) {
+            throw new IOException("Location is a file: " + location);
+        }
+        if (!Files.isDirectory(path)) {
+            return ImmutableSet.of();
+        }
+        try (Stream<Path> stream = Files.list(path)) {
+            return stream
+                    .filter(file -> Files.isDirectory(file, NOFOLLOW_LINKS))
+                    .map(file -> file.getFileName() + "/")
+                    .map(location::appendPath)
+                    .collect(toImmutableSet());
+        }
+    }
+
+    @Override
+    public Optional<Location> createTemporaryDirectory(Location targetPath, String temporaryPrefix, String relativePrefix)
+            throws IOException
+    {
+        // allow for absolute or relative temporary prefix
+        Location temporary;
+        if (temporaryPrefix.startsWith("/")) {
+            String prefix = temporaryPrefix;
+            while (prefix.startsWith("/")) {
+                prefix = prefix.substring(1);
+            }
+            temporary = Location.of("local:///").appendPath(prefix);
+        }
+        else {
+            temporary = targetPath.appendPath(temporaryPrefix);
+        }
+
+        temporary = temporary.appendPath(randomUUID().toString());
+
+        createDirectory(temporary);
+        return Optional.of(temporary);
+    }
+
     private Path toFilePath(Location location)
     {
         validateLocalLocation(location);
@@ -214,7 +273,7 @@ public class LocalFileSystem
 
     private static void validateLocalLocation(Location location)
     {
-        checkArgument(location.scheme().equals(Optional.of("local")), "Only 'local' scheme is supported: %s", location);
+        checkArgument(location.scheme().equals(Optional.of("local")) || location.scheme().equals(Optional.of("file")), "Only 'local' and 'file' scheme is supported: %s", location);
         checkArgument(location.userInfo().isEmpty(), "Local location cannot contain user info: %s", location);
         checkArgument(location.host().isEmpty(), "Local location cannot contain a host: %s", location);
     }

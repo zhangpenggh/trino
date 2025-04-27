@@ -400,17 +400,6 @@ public abstract class DefaultTraversalVisitor<C>
     }
 
     @Override
-    protected Void visitBindExpression(BindExpression node, C context)
-    {
-        for (Expression value : node.getValues()) {
-            process(value, context);
-        }
-        process(node.getFunction(), context);
-
-        return null;
-    }
-
-    @Override
     protected Void visitArithmeticUnary(ArithmeticUnaryExpression node, C context)
     {
         process(node.getValue(), context);
@@ -613,6 +602,12 @@ public abstract class DefaultTraversalVisitor<C>
             process(expression, context);
         }
 
+        return null;
+    }
+
+    @Override
+    protected Void visitAutoGroupBy(AutoGroupBy node, C context)
+    {
         return null;
     }
 
@@ -896,14 +891,6 @@ public abstract class DefaultTraversalVisitor<C>
     protected Void visitQuantifiedPattern(QuantifiedPattern node, C context)
     {
         process(node.getPattern(), context);
-
-        return null;
-    }
-
-    @Override
-    protected Void visitLabelDereference(LabelDereference node, C context)
-    {
-        node.getReference().ifPresent(reference -> process(reference, context));
 
         return null;
     }

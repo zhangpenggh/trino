@@ -14,43 +14,48 @@
 package io.trino.plugin.iceberg.catalog.glue;
 
 import com.google.common.collect.ImmutableMap;
+import io.trino.plugin.base.util.UncheckedCloseable;
 import io.trino.plugin.hive.BaseS3AndGlueMetastoreTest;
 import io.trino.plugin.iceberg.IcebergQueryRunner;
-import io.trino.testing.DistributedQueryRunner;
+import io.trino.plugin.iceberg.SchemaInitializer;
 import io.trino.testing.QueryRunner;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
-import java.nio.file.Path;
+import java.net.URI;
+import java.util.Map;
 import java.util.Set;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
-import static io.trino.plugin.hive.metastore.glue.GlueHiveMetastore.createTestingGlueHiveMetastore;
+import static io.trino.plugin.hive.metastore.glue.TestingGlueHiveMetastore.createTestingGlueHiveMetastore;
+import static io.trino.testing.SystemEnvironmentUtils.requireEnv;
 import static io.trino.testing.TestingNames.randomNameSuffix;
-import static java.util.Objects.requireNonNull;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class TestIcebergS3AndGlueMetastoreTest
         extends BaseS3AndGlueMetastoreTest
 {
     public TestIcebergS3AndGlueMetastoreTest()
     {
-        super("partitioning", "location", requireNonNull(System.getenv("S3_BUCKET"), "Environment S3_BUCKET was not set"));
+        super("partitioning", "location", requireEnv("S3_BUCKET"));
     }
 
     @Override
     protected QueryRunner createQueryRunner()
             throws Exception
     {
-        metastore = createTestingGlueHiveMetastore(Path.of(schemaPath()));
-        DistributedQueryRunner queryRunner = IcebergQueryRunner.builder()
+        metastore = createTestingGlueHiveMetastore(URI.create(schemaPath()), this::closeAfterClass);
+        return IcebergQueryRunner.builder()
                 .setIcebergProperties(ImmutableMap.<String, String>builder()
                         .put("iceberg.catalog.type", "glue")
                         .put("hive.metastore.glue.default-warehouse-dir", schemaPath())
+                        .put("fs.native-s3.enabled", "true")
                         .buildOrThrow())
+                .setSchemaInitializer(SchemaInitializer.builder()
+                        .withSchemaName(schemaName)
+                        .withSchemaProperties(Map.of("location", "'" + schemaPath() + "'"))
+                        .build())
                 .build();
-        queryRunner.execute("CREATE SCHEMA " + schemaName + " WITH (location = '" + schemaPath() + "')");
-        return queryRunner;
     }
 
     @Override
@@ -60,7 +65,7 @@ public class TestIcebergS3AndGlueMetastoreTest
         {
             String locationDirectory = location.endsWith("/") ? location : location + "/";
             String partitionPart = partitionColumn.isEmpty() ? "" : partitionColumn + "=[a-z0-9]+/";
-            assertThat(dataFile).matches("^" + locationDirectory + "data/" + partitionPart + "[a-zA-Z0-9_-]+.(orc|parquet)$");
+            assertThat(dataFile).matches("^" + Pattern.quote(locationDirectory) + "data/" + partitionPart + "[a-zA-Z0-9_-]+.(orc|parquet)$");
             verifyPathExist(dataFile);
         });
     }
@@ -71,7 +76,7 @@ public class TestIcebergS3AndGlueMetastoreTest
         getAllMetadataDataFilesFromTableDirectory(location).forEach(metadataFile ->
         {
             String locationDirectory = location.endsWith("/") ? location : location + "/";
-            assertThat(metadataFile).matches("^" + locationDirectory + "metadata/[a-zA-Z0-9_-]+.(avro|metadata.json|stats)$");
+            assertThat(metadataFile).matches("^" + Pattern.quote(locationDirectory) + "metadata/[a-zA-Z0-9_-]+.(avro|metadata.json|stats)$");
             verifyPathExist(metadataFile);
         });
     }
@@ -103,8 +108,16 @@ public class TestIcebergS3AndGlueMetastoreTest
                 .collect(Collectors.toUnmodifiableSet());
     }
 
-    @Test(dataProvider = "locationPatternsDataProvider")
-    public void testAnalyzeWithProvidedTableLocation(boolean partitioned, LocationPattern locationPattern)
+    @Test
+    public void testAnalyzeWithProvidedTableLocation()
+    {
+        for (LocationPattern locationPattern : LocationPattern.values()) {
+            testAnalyzeWithProvidedTableLocation(false, locationPattern);
+            testAnalyzeWithProvidedTableLocation(true, locationPattern);
+        }
+    }
+
+    private void testAnalyzeWithProvidedTableLocation(boolean partitioned, LocationPattern locationPattern)
     {
         String tableName = "test_analyze_" + randomNameSuffix();
         String location = locationPattern.locationForTable(bucketName, schemaName, tableName);
@@ -117,12 +130,13 @@ public class TestIcebergS3AndGlueMetastoreTest
             assertUpdate("INSERT INTO " + tableName + " VALUES ('str4', 4)", 1);
             assertQuery("SELECT * FROM " + tableName, "VALUES ('str1', 1), ('str2', 2), ('str3', 3), ('str4', 4)");
 
-            String expectedStatistics = """
+            String expectedStatistics =
+                    """
                     VALUES
                     ('col_str', %s, 4.0, 0.0, null, null, null),
                     ('col_int', null, 4.0, 0.0, null, 1, 4),
                     (null, null, null, null, 4.0, null, null)"""
-                    .formatted(partitioned ? "475.0" : "264.0");
+                            .formatted(partitioned ? "432.0" : "243.0");
 
             // Check extended statistics collection on write
             assertQuery("SHOW STATS FOR " + tableName, expectedStatistics);
@@ -133,27 +147,5 @@ public class TestIcebergS3AndGlueMetastoreTest
             assertUpdate("ANALYZE " + tableName);
             assertQuery("SHOW STATS FOR " + tableName, expectedStatistics);
         }
-    }
-
-    @Test
-    public void testCreateTableWithIncorrectLocation()
-    {
-        String tableName = "test_create_table_with_incorrect_location_" + randomNameSuffix();
-        String location = "s3://%s/%s/a#hash/%s".formatted(bucketName, schemaName, tableName);
-
-        assertThatThrownBy(() -> assertUpdate("CREATE TABLE " + tableName + " (key integer, value varchar) WITH (location = '" + location + "')"))
-                .hasMessageContaining("Fragment is not allowed in a file system location");
-    }
-
-    @Test
-    public void testCtasWithIncorrectLocation()
-    {
-        String tableName = "test_create_table_with_incorrect_location_" + randomNameSuffix();
-        String location = "s3://%s/%s/a#hash/%s".formatted(bucketName, schemaName, tableName);
-
-        assertThatThrownBy(() -> assertUpdate("CREATE TABLE " + tableName +
-                " WITH (location = '" + location + "')" +
-                " AS SELECT * FROM tpch.tiny.nation"))
-                .hasMessageContaining("Fragment is not allowed in a file system location");
     }
 }

@@ -25,10 +25,12 @@ import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.block.BlockEncodingSerde;
 import io.trino.spi.block.TestingBlockEncodingSerde;
 import io.trino.spi.type.Type;
-import org.testng.annotations.AfterMethod;
-import org.testng.annotations.BeforeClass;
-import org.testng.annotations.BeforeMethod;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.parallel.Execution;
 
 import java.io.File;
 import java.io.IOException;
@@ -40,15 +42,19 @@ import java.util.concurrent.ExecutionException;
 
 import static com.google.common.io.MoreFiles.deleteRecursively;
 import static com.google.common.io.RecursiveDeleteOption.ALLOW_INSECURE;
+import static io.trino.execution.buffer.PagesSerdes.createSpillingPagesSerdeFactory;
 import static io.trino.memory.context.AggregatedMemoryContext.newSimpleAggregatedMemoryContext;
 import static io.trino.operator.PageAssertions.assertPageEquals;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.VarbinaryType.VARBINARY;
 import static io.trino.spi.type.VarcharType.VARCHAR;
-import static org.testng.Assert.assertEquals;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
+import static org.junit.jupiter.api.parallel.ExecutionMode.SAME_THREAD;
 
-@Test(singleThreaded = true)
+@TestInstance(PER_CLASS)
+@Execution(SAME_THREAD)
 public class TestBinaryFileSpiller
 {
     private static final List<Type> TYPES = ImmutableList.of(BIGINT, VARCHAR, DOUBLE, BIGINT);
@@ -60,30 +66,30 @@ public class TestBinaryFileSpiller
     private PageSerializer serializer;
     private AggregatedMemoryContext memoryContext;
 
-    @BeforeClass(alwaysRun = true)
+    @BeforeAll
     public void setUpClass()
             throws IOException
     {
         spillPath = Files.createTempDirectory("tmp").toFile();
     }
 
-    @BeforeMethod
+    @BeforeEach
     public void setUp()
     {
         spillerStats = new SpillerStats();
         FeaturesConfig featuresConfig = new FeaturesConfig();
-        featuresConfig.setSpillerSpillPaths(spillPath.getAbsolutePath());
+        featuresConfig.setSpillerSpillPaths(ImmutableList.of(spillPath.getAbsolutePath()));
         featuresConfig.setSpillMaxUsedSpaceThreshold(1.0);
         NodeSpillConfig nodeSpillConfig = new NodeSpillConfig();
         BlockEncodingSerde blockEncodingSerde = new TestingBlockEncodingSerde();
         singleStreamSpillerFactory = new FileSingleStreamSpillerFactory(blockEncodingSerde, spillerStats, featuresConfig, nodeSpillConfig);
         factory = new GenericSpillerFactory(singleStreamSpillerFactory);
-        PagesSerdeFactory pagesSerdeFactory = new PagesSerdeFactory(blockEncodingSerde, nodeSpillConfig.isSpillCompressionEnabled());
+        PagesSerdeFactory pagesSerdeFactory = createSpillingPagesSerdeFactory(blockEncodingSerde, nodeSpillConfig.getSpillCompressionCodec());
         serializer = pagesSerdeFactory.createSerializer(Optional.empty());
         memoryContext = newSimpleAggregatedMemoryContext();
     }
 
-    @AfterMethod(alwaysRun = true)
+    @AfterEach
     public void tearDown()
             throws Exception
     {
@@ -106,8 +112,8 @@ public class TestBinaryFileSpiller
     {
         List<Type> types = ImmutableList.of(BIGINT, DOUBLE, VARBINARY);
 
-        BlockBuilder col1 = BIGINT.createBlockBuilder(null, 1);
-        BlockBuilder col2 = DOUBLE.createBlockBuilder(null, 1);
+        BlockBuilder col1 = BIGINT.createFixedSizeBlockBuilder(1);
+        BlockBuilder col2 = DOUBLE.createFixedSizeBlockBuilder(1);
         BlockBuilder col3 = VARBINARY.createBlockBuilder(null, 1);
 
         BIGINT.writeLong(col1, 42);
@@ -146,31 +152,31 @@ public class TestBinaryFileSpiller
         long spilledBytesBefore = spillerStats.getTotalSpilledBytes();
         long spilledBytes = 0;
 
-        assertEquals(memoryContext.getBytes(), 0);
+        assertThat(memoryContext.getBytes()).isEqualTo(0);
         for (List<Page> spill : spills) {
             spilledBytes += spill.stream()
                     .mapToLong(page -> serializer.serialize(page).length())
                     .sum();
             spiller.spill(spill.iterator()).get();
         }
-        assertEquals(spillerStats.getTotalSpilledBytes() - spilledBytesBefore, spilledBytes);
+        assertThat(spillerStats.getTotalSpilledBytes() - spilledBytesBefore).isEqualTo(spilledBytes);
         // At this point, the buffers should still be accounted for in the memory context, because
         // the spiller (FileSingleStreamSpiller) doesn't release its memory reservation until it's closed.
-        assertEquals(memoryContext.getBytes(), (long) spills.length * FileSingleStreamSpiller.BUFFER_SIZE);
+        assertThat(memoryContext.getBytes()).isEqualTo((long) spills.length * FileSingleStreamSpiller.BUFFER_SIZE);
 
         List<Iterator<Page>> actualSpills = spiller.getSpills();
-        assertEquals(actualSpills.size(), spills.length);
+        assertThat(actualSpills).hasSize(spills.length);
 
         for (int i = 0; i < actualSpills.size(); i++) {
             List<Page> actualSpill = ImmutableList.copyOf(actualSpills.get(i));
             List<Page> expectedSpill = spills[i];
 
-            assertEquals(actualSpill.size(), expectedSpill.size());
+            assertThat(actualSpill).hasSize(expectedSpill.size());
             for (int j = 0; j < actualSpill.size(); j++) {
                 assertPageEquals(types, actualSpill.get(j), expectedSpill.get(j));
             }
         }
         spiller.close();
-        assertEquals(memoryContext.getBytes(), 0);
+        assertThat(memoryContext.getBytes()).isEqualTo(0);
     }
 }

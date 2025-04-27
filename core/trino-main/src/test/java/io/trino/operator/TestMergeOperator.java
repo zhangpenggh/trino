@@ -17,16 +17,20 @@ import com.google.common.cache.CacheBuilder;
 import com.google.common.cache.CacheLoader;
 import com.google.common.cache.LoadingCache;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
+import io.airlift.configuration.secrets.SecretsResolver;
 import io.airlift.http.client.HttpClient;
+import io.airlift.http.client.HttpClientConfig;
 import io.airlift.http.client.testing.TestingHttpClient;
 import io.airlift.node.NodeInfo;
+import io.airlift.tracing.Tracing;
+import io.opentelemetry.api.OpenTelemetry;
 import io.trino.FeaturesConfig;
 import io.trino.exchange.DirectExchangeInput;
 import io.trino.exchange.ExchangeManagerRegistry;
 import io.trino.execution.StageId;
 import io.trino.execution.TaskId;
 import io.trino.execution.buffer.PagesSerdeFactory;
-import io.trino.execution.buffer.TestingPagesSerdeFactory;
 import io.trino.metadata.Split;
 import io.trino.spi.Page;
 import io.trino.spi.connector.SortOrder;
@@ -35,9 +39,10 @@ import io.trino.spi.type.TypeOperators;
 import io.trino.split.RemoteSplit;
 import io.trino.sql.gen.OrderingCompiler;
 import io.trino.sql.planner.plan.PlanNodeId;
-import org.testng.annotations.AfterMethod;
-import org.testng.annotations.BeforeMethod;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -50,6 +55,8 @@ import static io.airlift.concurrent.Threads.daemonThreadsNamed;
 import static io.trino.RowPagesBuilder.rowPagesBuilder;
 import static io.trino.SessionTestUtils.TEST_SESSION;
 import static io.trino.cache.SafeCaches.buildNonEvictableCache;
+import static io.trino.execution.buffer.CompressionCodec.LZ4;
+import static io.trino.execution.buffer.TestingPagesSerdes.createTestingPagesSerdeFactory;
 import static io.trino.operator.OperatorAssertion.assertOperatorIsBlocked;
 import static io.trino.operator.OperatorAssertion.assertOperatorIsUnblocked;
 import static io.trino.operator.PageAssertions.assertPageEquals;
@@ -59,12 +66,10 @@ import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.testing.TestingTaskContext.createTaskContext;
 import static java.util.concurrent.Executors.newSingleThreadScheduledExecutor;
-import static org.testng.Assert.assertEquals;
-import static org.testng.Assert.assertFalse;
-import static org.testng.Assert.assertNull;
-import static org.testng.Assert.assertTrue;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_METHOD;
 
-@Test(singleThreaded = true)
+@TestInstance(PER_METHOD)
 public class TestMergeOperator
 {
     private static final TaskId TASK_1_ID = new TaskId(new StageId("query", 0), 0, 0);
@@ -81,11 +86,11 @@ public class TestMergeOperator
 
     private LoadingCache<TaskId, TestingTaskBuffer> taskBuffers;
 
-    @BeforeMethod
+    @BeforeEach
     public void setUp()
     {
         executor = newSingleThreadScheduledExecutor(daemonThreadsNamed("test-merge-operator-%s"));
-        serdeFactory = new TestingPagesSerdeFactory();
+        serdeFactory = createTestingPagesSerdeFactory(LZ4);
 
         taskBuffers = buildNonEvictableCache(CacheBuilder.newBuilder(), CacheLoader.from(TestingTaskBuffer::new));
         httpClient = new TestingHttpClient(new TestingExchangeHttpClientHandler(taskBuffers, serdeFactory), executor);
@@ -94,12 +99,13 @@ public class TestMergeOperator
                 new FeaturesConfig(),
                 new DirectExchangeClientConfig(),
                 httpClient,
+                new HttpClientConfig(),
                 executor,
-                new ExchangeManagerRegistry());
+                new ExchangeManagerRegistry(OpenTelemetry.noop(), Tracing.noopTracer(), new SecretsResolver(ImmutableMap.of())));
         orderingCompiler = new OrderingCompiler(new TypeOperators());
     }
 
-    @AfterMethod(alwaysRun = true)
+    @AfterEach
     public void tearDown()
     {
         serdeFactory = null;
@@ -122,12 +128,12 @@ public class TestMergeOperator
         List<Type> types = ImmutableList.of(BIGINT, BIGINT);
 
         MergeOperator operator = createMergeOperator(types, ImmutableList.of(1), ImmutableList.of(0, 1), ImmutableList.of(ASC_NULLS_FIRST, ASC_NULLS_FIRST));
-        assertFalse(operator.isFinished());
-        assertFalse(operator.isBlocked().isDone());
+        assertThat(operator.isFinished()).isFalse();
+        assertThat(operator.isBlocked().isDone()).isFalse();
 
         operator.addSplit(createRemoteSplit(TASK_1_ID));
-        assertFalse(operator.isFinished());
-        assertFalse(operator.isBlocked().isDone());
+        assertThat(operator.isFinished()).isFalse();
+        assertThat(operator.isBlocked().isDone()).isFalse();
 
         operator.noMoreSplits();
 
@@ -139,13 +145,13 @@ public class TestMergeOperator
                 .row(4, 4)
                 .build();
 
-        assertNull(operator.getOutput());
-        assertFalse(operator.isFinished());
+        assertThat(operator.getOutput()).isNull();
+        assertThat(operator.isFinished()).isFalse();
         assertOperatorIsBlocked(operator);
         taskBuffers.getUnchecked(TASK_1_ID).addPage(input.get(0), false);
         assertOperatorIsUnblocked(operator);
 
-        assertNull(operator.getOutput());
+        assertThat(operator.getOutput()).isNull();
         assertOperatorIsBlocked(operator);
         taskBuffers.getUnchecked(TASK_1_ID).addPage(input.get(1), true);
         assertOperatorIsUnblocked(operator);
@@ -184,13 +190,13 @@ public class TestMergeOperator
                 .build();
 
         // blocked on first data source
-        assertNull(operator.getOutput());
+        assertThat(operator.getOutput()).isNull();
         assertOperatorIsBlocked(operator);
         taskBuffers.getUnchecked(TASK_1_ID).addPages(task1Pages, true);
         assertOperatorIsUnblocked(operator);
 
         // blocked on second data source
-        assertNull(operator.getOutput());
+        assertThat(operator.getOutput()).isNull();
         assertOperatorIsBlocked(operator);
         taskBuffers.getUnchecked(TASK_2_ID).addPages(task2Pages, true);
         assertOperatorIsUnblocked(operator);
@@ -273,20 +279,20 @@ public class TestMergeOperator
                 .build();
 
         // blocked on first data source
-        assertNull(operator.getOutput());
-        assertFalse(operator.isFinished());
+        assertThat(operator.getOutput()).isNull();
+        assertThat(operator.isFinished()).isFalse();
         assertOperatorIsBlocked(operator);
         taskBuffers.getUnchecked(TASK_1_ID).addPage(source1Pages.get(0), false);
         assertOperatorIsUnblocked(operator);
 
         // blocked on second data source
-        assertNull(operator.getOutput());
+        assertThat(operator.getOutput()).isNull();
         assertOperatorIsBlocked(operator);
         taskBuffers.getUnchecked(TASK_2_ID).addPage(source2Pages.get(0), false);
         assertOperatorIsUnblocked(operator);
 
         // blocked on third data source
-        assertNull(operator.getOutput());
+        assertThat(operator.getOutput()).isNull();
         assertOperatorIsBlocked(operator);
 
         taskBuffers.getUnchecked(TASK_3_ID).addPage(source3Pages.get(0), false);
@@ -375,7 +381,7 @@ public class TestMergeOperator
         assertOperatorIsUnblocked(operator);
 
         while (!operator.isFinished() && System.nanoTime() - endTime < 0) {
-            assertFalse(operator.needsInput());
+            assertThat(operator.needsInput()).isFalse();
             Page outputPage = operator.getOutput();
             if (outputPage != null) {
                 outputPages.add(outputPage);
@@ -386,13 +392,17 @@ public class TestMergeOperator
         }
 
         // verify state
-        assertFalse(operator.needsInput(), "Operator still wants input");
-        assertTrue(operator.isFinished(), "Expected operator to be finished");
+        assertThat(operator.needsInput())
+                .describedAs("Operator still wants input")
+                .isFalse();
+        assertThat(operator.isFinished())
+                .describedAs("Expected operator to be finished")
+                .isTrue();
 
         operator.close();
         operator.getOperatorContext().destroy();
 
-        assertEquals(getOnlyElement(operator.getOperatorContext().getNestedOperatorStats()).getUserMemoryReservation().toBytes(), 0);
+        assertThat(operator.getOperatorContext().getOperatorStats().getUserMemoryReservation().toBytes()).isEqualTo(0);
 
         return outputPages;
     }

@@ -23,7 +23,7 @@ import org.apache.parquet.schema.LogicalTypeAnnotation;
 import org.apache.parquet.schema.PrimitiveType;
 import org.apache.parquet.schema.Types;
 import org.intellij.lang.annotations.Language;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
@@ -32,7 +32,7 @@ import static io.trino.plugin.deltalake.DeltaLakeParquetSchemas.createParquetSch
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static org.apache.parquet.schema.Type.Repetition.OPTIONAL;
 import static org.apache.parquet.schema.Type.Repetition.REQUIRED;
-import static org.testng.Assert.assertEquals;
+import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestDeltaLakeParquetSchemas
 {
@@ -42,7 +42,8 @@ public class TestDeltaLakeParquetSchemas
     public void testStringFieldColumnMappingNoneUnpartitioned()
     {
         @Language("JSON")
-        String jsonSchema = """
+        String jsonSchema =
+                """
                 {
                     "type": "struct",
                     "fields": [
@@ -73,7 +74,8 @@ public class TestDeltaLakeParquetSchemas
     public void testStringFieldColumnMappingNonePartitioned()
     {
         @Language("JSON")
-        String jsonSchema = """
+        String jsonSchema =
+                """
                 {
                      "type": "struct",
                      "fields": [
@@ -110,7 +112,8 @@ public class TestDeltaLakeParquetSchemas
     public void testStringFieldColumnMappingIdUnpartitioned()
     {
         @Language("JSON")
-        String jsonSchema = """
+        String jsonSchema =
+                """
                 {
                     "type": "struct",
                     "fields": [
@@ -143,7 +146,8 @@ public class TestDeltaLakeParquetSchemas
     public void testStringFieldColumnMappingIdPartitioned()
     {
         @Language("JSON")
-        String jsonSchema = """
+        String jsonSchema =
+                """
                 {
                     "type": "struct",
                     "fields": [
@@ -185,7 +189,8 @@ public class TestDeltaLakeParquetSchemas
     public void testStringFieldColumnMappingNameUnpartitioned()
     {
         @Language("JSON")
-        String jsonSchema = """
+        String jsonSchema =
+                """
                 {
                     "type": "struct",
                     "fields": [
@@ -219,7 +224,8 @@ public class TestDeltaLakeParquetSchemas
     {
         // Corresponds to Databricks Delta type `a_complex_struct STRUCT<nested_struct: STRUCT<a_string: STRING>, a_string_array ARRAY<STRING>, a_complex_map MAP<STRING, STRUCT<a_string: STRING>>>`
         @Language("JSON")
-        String jsonSchema = """
+        String jsonSchema =
+                """
                 {
                     "type": "struct",
                     "fields": [
@@ -350,7 +356,7 @@ public class TestDeltaLakeParquetSchemas
             Map<List<String>, Type> expectedPrimitiveTypes)
     {
         DeltaLakeParquetSchemaMapping parquetSchemaMapping = createParquetSchemaMapping(jsonSchema, typeManager, columnMappingMode, partitionColumnNames);
-        assertEquals(parquetSchemaMapping.messageType(), expectedMessageType);
-        assertEquals(parquetSchemaMapping.primitiveTypes(), expectedPrimitiveTypes);
+        assertThat(parquetSchemaMapping.messageType()).isEqualTo(expectedMessageType);
+        assertThat(parquetSchemaMapping.primitiveTypes()).isEqualTo(expectedPrimitiveTypes);
     }
 }

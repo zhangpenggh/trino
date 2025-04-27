@@ -16,11 +16,13 @@ package io.trino.type;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.block.BlockBuilderStatus;
+import io.trino.spi.block.ByteArrayBlock;
 import io.trino.spi.block.ByteArrayBlockBuilder;
 import io.trino.spi.block.PageBuilderStatus;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.function.FlatFixed;
 import io.trino.spi.function.FlatFixedOffset;
+import io.trino.spi.function.FlatVariableOffset;
 import io.trino.spi.function.FlatVariableWidth;
 import io.trino.spi.function.ScalarOperator;
 import io.trino.spi.type.AbstractType;
@@ -51,7 +53,7 @@ public final class UnknownType
         // We never access the native container for UNKNOWN because its null check is always true.
         // The actual native container type does not matter here.
         // We choose boolean to represent UNKNOWN because it's the smallest primitive type.
-        super(new TypeSignature(NAME), boolean.class);
+        super(new TypeSignature(NAME), boolean.class, ByteArrayBlock.class);
     }
 
     @Override
@@ -61,7 +63,7 @@ public final class UnknownType
     }
 
     @Override
-    public BlockBuilder createBlockBuilder(BlockBuilderStatus blockBuilderStatus, int expectedEntries, int expectedBytesPerEntry)
+    public BlockBuilder createBlockBuilder(BlockBuilderStatus blockBuilderStatus, int expectedEntries)
     {
         int maxBlockSizeInBytes;
         if (blockBuilderStatus == null) {
@@ -73,12 +75,6 @@ public final class UnknownType
         return new ByteArrayBlockBuilder(
                 blockBuilderStatus,
                 Math.min(expectedEntries, maxBlockSizeInBytes / getFixedSize()));
-    }
-
-    @Override
-    public BlockBuilder createBlockBuilder(BlockBuilderStatus blockBuilderStatus, int expectedEntries)
-    {
-        return createBlockBuilder(blockBuilderStatus, expectedEntries, getFixedSize());
     }
 
     @Override
@@ -122,8 +118,8 @@ public final class UnknownType
     @Override
     public boolean getBoolean(Block block, int position)
     {
-        // Ideally, this function should never be invoked for unknown type.
-        // However, some logic rely on having a default value before the null check.
+        // Ideally, this function should never be invoked for the unknown type.
+        // However, some logic relies on having a default value before the null check.
         checkArgument(block.isNull(position));
         return false;
     }
@@ -132,8 +128,8 @@ public final class UnknownType
     @Override
     public void writeBoolean(BlockBuilder blockBuilder, boolean value)
     {
-        // Ideally, this function should never be invoked for unknown type.
-        // However, some logic (e.g. AbstractMinMaxBy) rely on writing a default value before the null check.
+        // Ideally, this function should never be invoked for the unknown type.
+        // However, some logic (e.g. AbstractMinMaxBy) relies on writing a default value before the null check.
         checkArgument(!value);
         blockBuilder.appendNull();
     }
@@ -148,7 +144,8 @@ public final class UnknownType
     private static boolean readFlat(
             @FlatFixed byte[] unusedFixedSizeSlice,
             @FlatFixedOffset int unusedFixedSizeOffset,
-            @FlatVariableWidth byte[] unusedVariableSizeSlice)
+            @FlatVariableWidth byte[] unusedVariableSizeSlice,
+            @FlatVariableOffset int unusedVariableSizeOffset)
     {
         throw new AssertionError("value of unknown type should all be NULL");
     }
